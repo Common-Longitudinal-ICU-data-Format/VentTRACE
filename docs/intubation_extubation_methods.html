@@ -1,0 +1,1699 @@
+<title>Intubation &amp; Extubation Definitions — Methods Catalog</title>
+
+<style>
+/* ── tokens ─────────────────────────────────────────────────────────── */
+:root{
+  --ground:#FBFCFD; --surface:#FFFFFF; --sunk:#F1F5F7;
+  --ink:#12181D; --ink-2:#3D4C56; --ink-3:#6B7C87;
+  --rule:#DCE4E9; --rule-2:#EDF1F4;
+  --accent:#0B6E8C; --accent-soft:#E3F0F5;
+  --m1:#0B6E8C; --m2:#65479B; --m3:#A8321F; --m4:#2C6B4C; --m5:#8A6624;
+  --m1-bg:#E2EFF4; --m2-bg:#EDE8F6; --m3-bg:#F8E7E3; --m4-bg:#E2EFE8; --m5-bg:#F5EEDF;
+  --warn:#9A6207; --warn-bg:#FBF0DC;
+  --bad:#A8321F;  --good:#2C6B4C;
+  --shadow:0 1px 2px rgba(18,24,29,.05), 0 8px 24px -16px rgba(18,24,29,.28);
+  --serif:ui-serif,"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+  --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --ground:#0D1317; --surface:#151E24; --sunk:#101920;
+    --ink:#DEE7EC; --ink-2:#A3B3BD; --ink-3:#76888F;
+    --rule:#243139; --rule-2:#1B252C;
+    --accent:#5CB6D2; --accent-soft:#152B34;
+    --m1:#5CB6D2; --m2:#A98FD8; --m3:#E08471; --m4:#6FBF95; --m5:#D2B067;
+    --m1-bg:#132B34; --m2-bg:#231D33; --m3-bg:#331E1A; --m4-bg:#132A20; --m5-bg:#2E2716;
+    --warn:#D9A64A; --warn-bg:#2C2314;
+    --bad:#E08471;  --good:#6FBF95;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0D1317; --surface:#151E24; --sunk:#101920;
+  --ink:#DEE7EC; --ink-2:#A3B3BD; --ink-3:#76888F;
+  --rule:#243139; --rule-2:#1B252C;
+  --accent:#5CB6D2; --accent-soft:#152B34;
+  --m1:#5CB6D2; --m2:#A98FD8; --m3:#E08471; --m4:#6FBF95; --m5:#D2B067;
+  --m1-bg:#132B34; --m2-bg:#231D33; --m3-bg:#331E1A; --m4-bg:#132A20; --m5-bg:#2E2716;
+  --warn:#D9A64A; --warn-bg:#2C2314;
+  --bad:#E08471;  --good:#6FBF95;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+:root[data-theme="light"]{
+  --ground:#FBFCFD; --surface:#FFFFFF; --sunk:#F1F5F7;
+  --ink:#12181D; --ink-2:#3D4C56; --ink-3:#6B7C87;
+  --rule:#DCE4E9; --rule-2:#EDF1F4;
+  --accent:#0B6E8C; --accent-soft:#E3F0F5;
+  --m1:#0B6E8C; --m2:#65479B; --m3:#A8321F; --m4:#2C6B4C; --m5:#8A6624;
+  --m1-bg:#E2EFF4; --m2-bg:#EDE8F6; --m3-bg:#F8E7E3; --m4-bg:#E2EFE8; --m5-bg:#F5EEDF;
+  --warn:#9A6207; --warn-bg:#FBF0DC;
+  --bad:#A8321F;  --good:#2C6B4C;
+  --shadow:0 1px 2px rgba(18,24,29,.05), 0 8px 24px -16px rgba(18,24,29,.28);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--sans); font-size:16px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ── shell ──────────────────────────────────────────────────────────── */
+.shell{display:grid; grid-template-columns:1fr; max-width:1420px; margin:0 auto}
+@media (min-width:1080px){
+  .shell{grid-template-columns:258px minmax(0,1fr); gap:0}
+}
+
+/* ── nav rail ───────────────────────────────────────────────────────── */
+.rail{display:none}
+@media (min-width:1080px){
+  .rail{
+    display:block; position:sticky; top:0; align-self:start;
+    height:100dvh; overflow-y:auto; padding:34px 22px 60px 32px;
+    border-right:1px solid var(--rule); background:var(--sunk);
+  }
+}
+.rail-mark{font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--accent); font-weight:600; margin-bottom:4px}
+.rail-title{font-family:var(--serif); font-size:19px; line-height:1.25; margin:0 0 22px; font-weight:600}
+.rail h4{font-family:var(--mono); font-size:10px; letter-spacing:.15em; text-transform:uppercase;
+  color:var(--ink-3); margin:22px 0 8px; font-weight:600}
+.rail a{
+  display:flex; gap:9px; align-items:baseline; text-decoration:none; color:var(--ink-2);
+  font-size:13.5px; line-height:1.4; padding:4px 8px; margin-left:-8px; border-radius:5px;
+}
+.rail a:hover{color:var(--ink); background:var(--surface)}
+.rail a.on{color:var(--accent); background:var(--accent-soft); font-weight:600}
+.rail a b{font-family:var(--mono); font-size:11px; color:var(--ink-3); font-weight:600; min-width:22px}
+.rail a.on b{color:var(--accent)}
+
+/* ── content ────────────────────────────────────────────────────────── */
+main{padding:34px 22px 120px; min-width:0}
+@media (min-width:760px){main{padding:52px 46px 140px}}
+.col{max-width:74ch}
+.wide{max-width:100%}
+
+h1{font-family:var(--serif); font-size:clamp(30px,4.6vw,46px); line-height:1.1; font-weight:600;
+  letter-spacing:-.015em; margin:0 0 14px; text-wrap:balance}
+h2{font-family:var(--serif); font-size:clamp(21px,2.6vw,28px); line-height:1.2; font-weight:600;
+  letter-spacing:-.01em; margin:0 0 14px; text-wrap:balance; scroll-margin-top:24px}
+h3{font-family:var(--sans); font-size:16.5px; font-weight:650; letter-spacing:-.005em;
+  margin:34px 0 10px; text-wrap:balance}
+h4{font-family:var(--mono); font-size:11px; letter-spacing:.13em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:600; margin:28px 0 8px}
+p{margin:0 0 15px}
+ul,ol{margin:0 0 15px; padding-left:20px}
+li{margin-bottom:7px}
+a{color:var(--accent)}
+strong{font-weight:650}
+em{font-style:italic}
+
+section{padding:44px 0; border-top:1px solid var(--rule)}
+section:first-of-type{border-top:none; padding-top:0}
+.sec-num{font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--accent); font-weight:600; display:block; margin-bottom:9px}
+
+/* ── hero ───────────────────────────────────────────────────────────── */
+.hero{padding-bottom:40px}
+.eyebrow{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:600; margin:0 0 16px; display:flex; flex-wrap:wrap; gap:10px; align-items:center}
+.eyebrow span{color:var(--accent)}
+.lede{font-size:18.5px; line-height:1.55; color:var(--ink-2); max-width:64ch; margin:0 0 26px}
+.meta{display:flex; flex-wrap:wrap; gap:0 30px; font-size:13.5px; color:var(--ink-3);
+  border-top:1px solid var(--rule); padding-top:16px; margin-top:6px}
+.meta div{display:flex; gap:7px}
+.meta b{font-weight:600; color:var(--ink-2)}
+
+/* ── thesis figure: device timeline ─────────────────────────────────── */
+.thesis{
+  background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+  padding:24px 22px 20px; margin:30px 0 8px; box-shadow:var(--shadow); overflow-x:auto;
+}
+.thesis-cap{font-family:var(--mono); font-size:10.5px; letter-spacing:.13em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:600; margin-bottom:14px}
+.tl{display:grid; grid-template-columns:52px repeat(10,minmax(46px,1fr)); gap:3px; align-items:center;
+  min-width:600px}
+.tl-lab{font-family:var(--mono); font-size:11px; font-weight:600; color:var(--ink-2); text-align:right;
+  padding-right:9px; letter-spacing:.02em}
+.dev{
+  font-family:var(--mono); font-size:9.5px; font-weight:600; letter-spacing:.04em;
+  text-align:center; padding:9px 2px; border-radius:4px; white-space:nowrap;
+}
+.dev.imv{background:var(--accent); color:var(--surface)}
+.dev.non{background:var(--sunk); color:var(--ink-3); border:1px solid var(--rule)}
+.mk{height:24px; border-radius:4px; display:flex; align-items:center; justify-content:center;
+  font-family:var(--mono); font-size:9.5px; font-weight:700; letter-spacing:.05em; color:var(--ink-3)}
+.mk.e{background:var(--rule-2); color:transparent}
+.mk.in,.mk.ex{color:var(--surface)}
+.tl-row.r1 .mk.in,.tl-row.r1 .mk.ex{background:var(--m1)}
+.thesis .m1 .mk.in,.thesis .m1 .mk.ex{background:var(--m1)}
+.thesis .m2 .mk.in,.thesis .m2 .mk.ex{background:var(--m2)}
+.thesis .m3 .mk.in,.thesis .m3 .mk.ex{background:var(--m3)}
+.thesis .m4 .mk.in,.thesis .m4 .mk.ex{background:var(--m4)}
+.thesis-note{font-size:13.5px; color:var(--ink-2); margin:16px 0 0; padding-top:14px;
+  border-top:1px solid var(--rule-2); max-width:70ch}
+
+/* ── method chips ───────────────────────────────────────────────────── */
+.chip{display:inline-flex; align-items:center; font-family:var(--mono); font-size:11px; font-weight:700;
+  letter-spacing:.05em; padding:1px 6px; border-radius:4px; vertical-align:baseline}
+.chip.m1{background:var(--m1-bg); color:var(--m1)}
+.chip.m2{background:var(--m2-bg); color:var(--m2)}
+.chip.m3{background:var(--m3-bg); color:var(--m3)}
+.chip.m4{background:var(--m4-bg); color:var(--m4)}
+.chip.m5{background:var(--m5-bg); color:var(--m5)}
+.tag{display:inline-flex; font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.08em;
+  text-transform:uppercase; padding:2px 6px; border-radius:3px; background:var(--warn-bg); color:var(--warn)}
+.tag.no{background:var(--m3-bg); color:var(--m3)}
+.tag.ok{background:var(--m4-bg); color:var(--m4)}
+
+/* ── method header block ────────────────────────────────────────────── */
+.mhead{display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; margin-bottom:6px}
+.mhead .chip{font-size:13px; padding:3px 9px}
+.mby{font-size:13.5px; color:var(--ink-3)}
+.mby code{font-size:12.5px}
+
+/* ── code / diagram blocks ──────────────────────────────────────────── */
+pre{
+  font-family:var(--mono); font-size:12.5px; line-height:1.55; margin:0 0 18px;
+  background:var(--sunk); border:1px solid var(--rule); border-radius:8px;
+  padding:16px 18px; overflow-x:auto; color:var(--ink-2); tab-size:2;
+}
+pre b{color:var(--ink); font-weight:600}
+pre i{color:var(--accent); font-style:normal}
+pre u{color:var(--bad); text-decoration:none}
+code{font-family:var(--mono); font-size:.885em; background:var(--sunk); border:1px solid var(--rule-2);
+  padding:.08em .34em; border-radius:4px}
+pre code{background:none; border:none; padding:0}
+h2 code,h3 code{font-size:.9em}
+
+/* ── quotes ─────────────────────────────────────────────────────────── */
+blockquote{
+  margin:0 0 18px; padding:2px 0 2px 18px; border-left:2px solid var(--accent);
+  color:var(--ink-2); font-size:15px;
+}
+blockquote p:last-child{margin-bottom:0}
+.who{font-family:var(--mono); font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:600; margin-bottom:7px}
+
+/* ── callouts ───────────────────────────────────────────────────────── */
+.note{border:1px solid var(--rule); border-left:3px solid var(--accent); background:var(--surface);
+  border-radius:0 8px 8px 0; padding:15px 18px; margin:0 0 20px; font-size:14.5px; color:var(--ink-2)}
+.note.warn{border-left-color:var(--warn); background:var(--warn-bg)}
+.note.key{border-left-color:var(--bad)}
+.note p:last-child{margin-bottom:0}
+.note b{color:var(--ink)}
+
+/* ── tables ─────────────────────────────────────────────────────────── */
+.tw{overflow-x:auto; margin:0 0 20px; border:1px solid var(--rule); border-radius:8px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; font-size:14px}
+th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--rule-2); vertical-align:top}
+thead th{
+  font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:600; background:var(--sunk); border-bottom:1px solid var(--rule);
+  white-space:nowrap;
+}
+tbody tr:last-child td{border-bottom:none}
+td.n,th.n{text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap}
+td.c,th.c{text-align:center}
+td.k{font-weight:600; white-space:nowrap}
+.hi{background:var(--accent-soft)}
+td.bad{color:var(--bad); font-weight:650}
+td.good{color:var(--good); font-weight:650}
+
+/* trace tables */
+.trace td,.trace th{padding:6px 10px; font-family:var(--mono); font-size:12.5px}
+.trace td.dv{font-weight:600; color:var(--ink)}
+.trace td.ev{text-align:center; font-weight:700; letter-spacing:.04em}
+.trace .v1{color:var(--m1)} .trace .v2{color:var(--m2)}
+.trace .v3{color:var(--m3)} .trace .v4{color:var(--m4)}
+.trace td.dot{text-align:center; color:var(--rule)}
+.trace tr.imvrow td.dv{color:var(--accent)}
+.trace td.cm{font-family:var(--sans); font-size:12.5px; color:var(--ink-3); white-space:nowrap}
+.trace tfoot td{border-top:1px solid var(--rule); background:var(--sunk); font-weight:700; font-size:12px}
+
+/* ── tier stack ─────────────────────────────────────────────────────── */
+.tiers{display:flex; flex-direction:column; gap:12px; margin:0 0 22px}
+.tier{border:1px solid var(--rule); border-radius:9px; background:var(--surface); padding:16px 18px;
+  display:grid; grid-template-columns:auto 1fr; gap:4px 16px; box-shadow:var(--shadow)}
+.tier .t{font-family:var(--mono); font-size:11px; font-weight:700; letter-spacing:.1em;
+  color:var(--surface); background:var(--accent); border-radius:4px; padding:3px 8px; height:fit-content;
+  grid-row:span 3; align-self:start}
+.tier:nth-child(2) .t{background:var(--m5)}
+.tier:nth-child(3) .t{background:var(--m3)}
+.tier h5{margin:0; font-size:15.5px; font-weight:650}
+.tier .s{font-size:14px; color:var(--ink-2); margin:0}
+.tier .c{font-family:var(--mono); font-size:11.5px; color:var(--ink-3); margin:2px 0 0}
+
+/* ── checklist ──────────────────────────────────────────────────────── */
+.checks{list-style:none; padding:0; margin:0 0 20px; border:1px solid var(--rule);
+  border-radius:8px; overflow:hidden; background:var(--surface)}
+.checks li{display:grid; grid-template-columns:20px 62px 1fr; gap:12px; align-items:baseline;
+  margin:0; padding:9px 15px; border-bottom:1px solid var(--rule-2); font-size:14.5px}
+.checks li:last-child{border-bottom:none}
+.checks .box{font-family:var(--mono); color:var(--ink-3)}
+.checks .ref{font-family:var(--mono); font-size:12px; color:var(--accent); font-weight:600}
+.checks li.first{background:var(--accent-soft)}
+.checks .first-tag{font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--accent); font-weight:700; margin-left:8px}
+
+/* ── findings ───────────────────────────────────────────────────────── */
+.finds{list-style:none; counter-reset:f; padding:0; margin:0 0 22px}
+.finds li{counter-increment:f; display:grid; grid-template-columns:30px 1fr; gap:14px;
+  padding:13px 0; border-bottom:1px solid var(--rule-2); margin:0}
+.finds li:last-child{border-bottom:none}
+.finds li::before{content:counter(f); font-family:var(--mono); font-size:12px; font-weight:700;
+  color:var(--accent); background:var(--accent-soft); border-radius:5px; text-align:center;
+  padding:3px 0; height:fit-content}
+
+hr.soft{border:none; border-top:1px solid var(--rule-2); margin:26px 0}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
+</style>
+
+<div class="shell">
+
+<nav class="rail" aria-label="Contents">
+  <div class="rail-mark">VentTRACE</div>
+  <p class="rail-title">Intubation &amp; Extubation<br>Methods Catalog</p>
+
+  <h4>Ground</h4>
+  <a href="#s1"><b>1</b> Context</a>
+  <a href="#s2"><b>2</b> The substrate</a>
+  <a href="#s3"><b>3</b> Common notation</a>
+
+  <h4>Methods</h4>
+  <a href="#s4"><b>M1</b> Strict 5-row</a>
+  <a href="#s5"><b>M2</b> Symmetric 2/2</a>
+  <a href="#s6"><b>M3</b> SQL + outcomes</a>
+  <a href="#s7"><b>M4</b> Candidate rescue</a>
+  <a href="#s8"><b>M5</b> Non-device</a>
+
+  <h4>Analysis</h4>
+  <a href="#s9"><b>9</b> Decision axes</a>
+  <a href="#s10"><b>10</b> Divergence traces</a>
+  <a href="#s11"><b>11</b> Demo figures</a>
+
+  <h4>Decision</h4>
+  <a href="#s12"><b>12</b> Validation rubric</a>
+  <a href="#s13"><b>13</b> Summary</a>
+  <a href="#sa"><b>A</b> Source verbatim</a>
+</nav>
+
+<main>
+
+<!-- ══ HERO ══════════════════════════════════════════════════════════ -->
+<section class="hero">
+  <p class="eyebrow">VentTRACE <span>&middot;</span> Methods Catalog <span>&middot;</span> clifpy issue #124</p>
+  <div class="col">
+    <h1>Four ways to say a patient was intubated</h1>
+    <p class="lede">
+      Issue #124 asked for one standard definition of intubation and extubation. Nine comments later
+      there are four, written in three notations, never compared side by side. This catalog normalises
+      all of them into a single formalism, shows exactly where they disagree, and sets out a rubric
+      for validating them across consortium sites.
+    </p>
+  </div>
+
+  <div class="thesis">
+    <div class="thesis-cap">The problem, in one encounter &mdash; Cathy's blip edge case</div>
+    <div class="tl">
+      <div class="tl-lab">device</div>
+      <div class="dev imv">IMV</div><div class="dev imv">IMV</div><div class="dev imv">IMV</div>
+      <div class="dev non">NIPPV</div><div class="dev imv">IMV</div><div class="dev non">NIPPV</div>
+      <div class="dev non">NIPPV</div><div class="dev non">HFNC</div><div class="dev non">HFNC</div>
+      <div class="dev non">HFNC</div>
+    </div>
+    <div class="tl m1" style="margin-top:8px">
+      <div class="tl-lab">M1</div>
+      <div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div>
+      <div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div>
+      <div class="mk e">·</div><div class="mk e">·</div>
+    </div>
+    <div class="tl m2" style="margin-top:3px">
+      <div class="tl-lab">M2</div>
+      <div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div>
+      <div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div>
+      <div class="mk e">·</div><div class="mk e">·</div>
+    </div>
+    <div class="tl m3" style="margin-top:3px">
+      <div class="tl-lab">M3</div>
+      <div class="mk in">IN</div><div class="mk e">·</div><div class="mk e">·</div><div class="mk ex">EX</div>
+      <div class="mk in">IN</div><div class="mk ex">EX</div><div class="mk e">·</div><div class="mk e">·</div>
+      <div class="mk e">·</div><div class="mk e">·</div>
+    </div>
+    <div class="tl m4" style="margin-top:3px">
+      <div class="tl-lab">M4</div>
+      <div class="mk in">IN</div><div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div>
+      <div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div><div class="mk e">·</div>
+      <div class="mk e">·</div><div class="mk e">·</div>
+    </div>
+    <p class="thesis-note">
+      One patient, almost certainly extubated once. <b>Three of four methods detect no extubation at
+      all</b> &mdash; including <span class="chip m4">M4</span>, whose rescue logic was written for
+      exactly this pattern. <span class="chip m3">M3</span> reads it as two separate ventilator courses.
+    </p>
+  </div>
+
+  <div class="meta">
+    <div><b>Source</b> <a href="https://github.com/Common-Longitudinal-ICU-data-Format/clifpy/issues/124">clifpy issue&nbsp;#124</a></div>
+    <div><b>Status</b> Reference catalog &mdash; documents what was proposed, not what was decided</div>
+    <div><b>Updated</b> 2026-07-29</div>
+  </div>
+</section>
+
+<!-- ══ 1 CONTEXT ═════════════════════════════════════════════════════ -->
+<section id="s1">
+  <div class="col">
+    <span class="sec-num">Section 1</span>
+    <h2>Context</h2>
+    <p>
+      Issue #124 opened with a request to standardise intubation/extubation logic in <code>clifpy</code>,
+      because 4&ndash;5 projects at a single site &mdash; and parallel efforts at other sites &mdash;
+      each re-implement it. Over nine comments, <strong>four distinct methods</strong> were proposed,
+      written in three different notations. They have never been compared side by side.
+    </p>
+    <p>The final comment on the thread reads:</p>
+    <blockquote>
+      <div class="who">@kaveriC &middot; 2026-07-13</div>
+      <p>@kaveriC @vaishvikc &mdash; create a new test project with different definitions discussed above</p>
+    </blockquote>
+    <p>
+      <strong>VentTRACE is that project.</strong> This document is its first deliverable. The cross-site
+      comparison harness is specified separately.
+    </p>
+  </div>
+
+  <h4>Contributors to the definitions</h4>
+  <div class="tw col"><table>
+    <thead><tr><th>Handle</th><th>Contribution</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><code>@vaishvikc</code></td><td>Issue body &mdash; strict 5-row window (<span class="chip m1">M1</span>); CHEST findings on device-free sites (<span class="chip m5">M5</span>)</td></tr>
+      <tr><td class="k"><code>@cloverbunny</code></td><td>Symmetric 2/2 window, reintubation, no-stitching stance (<span class="chip m2">M2</span>); the blip edge case</td></tr>
+      <tr><td class="k"><code>@ingra107</code></td><td>Endorsed M2's stitch-at-project-level position</td></tr>
+      <tr><td class="k"><code>@whiskey0504</code></td><td>SQL single-transition + outcome classification tree (<span class="chip m3">M3</span>)</td></tr>
+      <tr><td class="k"><code>@wtliao319</code></td><td>Hybrid strict &cup; candidate-rescue implementation (<span class="chip m4">M4</span>)</td></tr>
+      <tr><td class="k"><code>@kaveriC</code></td><td>Directed creation of this test project</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ══ 2 SUBSTRATE ═══════════════════════════════════════════════════ -->
+<section id="s2">
+  <div class="col">
+    <span class="sec-num">Section 2</span>
+    <h2>The substrate: why these methods disagree at all</h2>
+    <p>
+      Every method reads the same table and reduces it to the same question &mdash; <em>for each row,
+      did the patient just start or stop invasive mechanical ventilation?</em> They disagree because
+      <code>respiratory_support</code> is sparse, irregular, and inconsistently charted.
+    </p>
+  </div>
+
+  <div class="tw" style="max-width:560px"><table>
+    <thead><tr><th>device_category</th><th class="n">rows</th><th class="n">share</th></tr></thead>
+    <tbody>
+      <tr><td class="k">IMV</td><td class="n">1,265</td><td class="n">38.0%</td></tr>
+      <tr><td class="k">Nasal Cannula</td><td class="n">912</td><td class="n">27.4%</td></tr>
+      <tr class="hi"><td class="k">NULL &mdash; no device recorded</td><td class="n">783</td><td class="n">23.5%</td></tr>
+      <tr><td class="k">Face Mask</td><td class="n">249</td><td class="n">7.5%</td></tr>
+      <tr><td class="k">High Flow NC</td><td class="n">81</td><td class="n">2.4%</td></tr>
+      <tr><td class="k">NIPPV</td><td class="n">28</td><td class="n">0.8%</td></tr>
+      <tr><td class="k">CPAP</td><td class="n">4</td><td class="n">0.1%</td></tr>
+      <tr><td class="k">Other</td><td class="n">3</td><td class="n">0.1%</td></tr>
+    </tbody>
+  </table></div>
+  <p class="col" style="font-size:13px;color:var(--ink-3);margin-top:-12px">
+    CLIF demo dataset &mdash; 3,325 rows across 110 hospitalizations.
+  </p>
+
+  <div class="col">
+    <p>
+      <strong>Nearly one row in four carries no <code>device_category</code> at all</strong> &mdash;
+      more than Face Mask, HFNC, NIPPV, CPAP and Other combined. Rows exist because <em>some</em> field
+      was charted (a FiO₂, a PEEP, an observed tidal volume), not because a device was recorded.
+    </p>
+    <p>This matters more than any transition rule. A method's behaviour is the product of two independent decisions:</p>
+  </div>
+
+  <pre>       ┌─────────────────────┐        ┌─────────────────────┐
+       │  <b>(A) NULL / fill</b>     │        │  <b>(B) transition</b>       │
+       │      policy         │  ────► │      rule           │  ────►  events
+       │  ffill? drop?       │        │  window width,      │
+       │  NULL = non-IMV?    │        │  anchoring          │
+       └─────────────────────┘        └─────────────────────┘
+            <u>~50× spread</u>                    <i>~7× spread</i></pre>
+
+  <div class="col">
+    <div class="note key">
+      <p>Measured on the demo dataset (§11.4), decision <b>(A)</b> changes event counts by up to
+      <b>50×</b>; decision <b>(B)</b> by about <b>7×</b>. The thread has debated (B) extensively
+      and (A) barely at all.</p>
+    </div>
+    <p>Two further consequences of the substrate, both raised in the thread:</p>
+    <ul>
+      <li><strong><code>mode_category</code> is not reliably present.</strong> @cloverbunny:
+        <em>"Mode may be absent depending on device."</em> In the demo, 1,873 of 3,325 rows (56%)
+        have a NULL mode. Outputs requiring mode-before / mode-after must tolerate nulls rather than
+        drop the event.</li>
+      <li><strong>Some sites chart no post-extubation device at all.</strong> See
+        <span class="chip m5">M5</span> (§8).</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══ 3 NOTATION ════════════════════════════════════════════════════ -->
+<section id="s3">
+  <div class="col">
+    <span class="sec-num">Section 3</span>
+    <h2>Common notation</h2>
+    <p>All four methods are restated here in one formalism so they can be compared directly.
+      For a hospitalization <code>h</code>, let its respiratory-support rows be the sequence</p>
+  </div>
+
+  <pre>        R_h = ( r_1 , r_2 , … , r_n )        ordered ascending by recorded_dttm
+
+        <b>IMV(i)</b>   ≡   d(i) = 'imv'
+       <b>¬IMV(i)</b>   ≡   d(i) ≠ 'imv'</pre>
+
+  <div class="col">
+    <p>
+      <code>d(i)</code> is the <code>device_category</code> of row <code>r_i</code> <strong>after</strong>
+      the NULL policy has been applied. An event is emitted <strong>at a row index</strong>, and that
+      row's <code>recorded_dttm</code> becomes the event timestamp.
+    </p>
+
+    <h3>(P) NULL policy &mdash; what happens to the 23.5% of rows with no device</h3>
+  </div>
+  <div class="tw col"><table>
+    <thead><tr><th>Policy</th><th>Meaning</th><th>Used by</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><code>P_ffill</code></td><td>Forward-fill <code>device_category</code> within hospitalization before evaluating</td><td><span class="chip m1">M1</span> (stated)</td></tr>
+      <tr><td class="k"><code>P_null≠imv</code></td><td>Leave NULL in place; NULL satisfies <code>¬IMV</code></td><td><span class="chip m3">M3</span> <span class="chip m4">M4</span> (by language semantics)</td></tr>
+      <tr><td class="k"><code>P_drop</code></td><td>Delete rows with NULL device before evaluating</td><td>nobody, but plausible</td></tr>
+      <tr><td class="k"><code>P_waterfall</code></td><td>Run <code>clifpy</code> waterfall first, which imputes device by heuristic</td><td>open question (§9.2)</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <h3>(B) Boundary policy &mdash; how <code>d(i)</code> behaves out of bounds</h3>
+    <p>Write <code>⊥</code> for before the first row or after the last.</p>
+  </div>
+  <div class="tw" style="max-width:420px"><table>
+    <thead><tr><th>Policy</th><th class="c">¬IMV(⊥)</th><th class="c">IMV(⊥)</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><code>B_strict</code></td><td class="c">false</td><td class="c">false</td></tr>
+      <tr><td class="k"><code>B_permissive</code></td><td class="c"><strong>true</strong></td><td class="c">false</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <div class="note key">
+      <p>This is the least-discussed and highest-impact convention in the catalog. Under
+      <code>B_strict</code> a patient who arrives already ventilated generates <b>no</b> intubation
+      event; under <code>B_permissive</code> they generate one at their very first row.
+      <span class="chip m3">M3</span> and <span class="chip m4">M4</span> are permissive &mdash; but
+      <b>not by design</b>: it falls out of SQL's <code>NULL IS DISTINCT FROM 'imv' → TRUE</code> and
+      pandas' <code>~NaN.eq('imv') → True</code>. Neither author states it.</p>
+    </div>
+
+    <h3>(A) Anchoring &mdash; which row carries the extubation event</h3>
+  </div>
+
+  <pre>            … IMV   IMV   IMV  │  FaceMask   FaceMask …
+                          <i>▲</i>    │      <u>▲</u>
+                          <i>│</i>    │      <u>│</u>
+                  <i>anchor "last IMV"</i>   <u>anchor "first non-IMV"</u>
+                       <i>(M1)</i>              <u>(M2, M3, M4)</u></pre>
+
+  <div class="col">
+    <p>
+      Both are defensible &mdash; the last IMV row is the last moment ventilation was observed; the
+      first non-IMV row is the first moment it was observed absent. The true extubation lies between
+      them. But the two anchors produce <strong>different timestamps for the same clinical event</strong>,
+      and therefore different ventilator durations. Measured concordance between M1 and M2 on
+      extubation events is <strong>zero</strong> (§11.2) &mdash; entirely because of this.
+    </p>
+    <div class="note warn">
+      <p><b>Convention used throughout.</b> Where a proposal is silent, traces use <code>B_strict</code>
+      for M1/M2 (their prose implies a real lag/lead value must exist) and the language-native
+      <code>B_permissive</code> for M3/M4. Every such choice is tagged
+      <span class="tag">unspecified</span> at the point it is made.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 4 M1 ══════════════════════════════════════════════════════════ -->
+<section id="s4">
+  <div class="col">
+    <span class="sec-num">Section 4</span>
+    <div class="mhead"><span class="chip m1">M1</span><h2 style="margin:0">Strict 5-row window</h2></div>
+    <p class="mby">Proposed by <code>@vaishvikc</code>, issue #124 body.</p>
+  </div>
+
+  <pre>   <b>intub(i)</b>  ≡  ¬IMV(i-2) ∧ ¬IMV(i-1) ∧  IMV(i)  ∧  IMV(i+1) ∧  IMV(i+2)
+   <b>extub(i)</b>  ≡   IMV(i-2) ∧  IMV(i-1) ∧  IMV(i)  ∧ ¬IMV(i+1) ∧ ¬IMV(i+2)</pre>
+
+  <div class="col" style="display:flex;gap:26px;flex-wrap:wrap;font-size:14px;margin-bottom:18px">
+    <div><b>NULL policy</b><br>P_ffill <span style="color:var(--ink-3)">(stated)</span></div>
+    <div><b>Boundary</b><br><span class="tag">unspecified</span> B_strict assumed</div>
+    <div><b>Anchor</b><br>first IMV / <b>last IMV</b></div>
+  </div>
+
+  <pre>   INTUBATION                                EXTUBATION
+
+   i-2  i-1   i   i+1  i+2                   i-2  i-1   i   i+1  i+2
+    ┌────┬────┬────┬────┬────┐                ┌────┬────┬────┬────┬────┐
+    │ ¬  │ ¬  │<b>IMV</b> │<b>IMV</b> │<b>IMV</b> │                │<b>IMV</b> │<b>IMV</b> │<b>IMV</b> │ ¬  │ ¬  │
+    │IMV │IMV │ <i>●</i>  │    │    │                │    │    │ <i>●</i>  │IMV │IMV │
+    └────┴────┴────┴────┴────┘                └────┴────┴────┴────┴────┘
+     └── 2 back ──┘└─ <u>3 fwd</u> ──┘                └── <u>3 back</u> ──┘└─ 2 fwd ─┘
+                  <i>▲ event</i>                                   <i>▲ event</i></pre>
+
+  <div class="col">
+    <h3>M1 is <em>not</em> symmetric</h3>
+    <p>
+      The issue body lists five states for each event. For intubation that is 2 non-IMV + <strong>3</strong>
+      IMV; for extubation it is <strong>3</strong> IMV + 2 non-IMV. Every other method uses 2 + 2. This
+      is easy to miss when reading the bullets, and it makes M1 strictly the most conservative
+      definition in the catalog &mdash; it requires a fifth confirming row that M2/M4 do not.
+    </p>
+    <div class="note key">
+      <p>@cloverbunny describes their approach as <em>"the two look back/look-forward device
+      approach"</em>, which is 2&nbsp;+&nbsp;2 &mdash; i.e. <b>M2, not M1</b>, despite the thread
+      treating them as the same method.</p>
+    </div>
+  </div>
+
+  <div class="tw col"><table>
+    <thead><tr><th>Behaviour</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="k"><span class="tag ok">catches</span></td><td>Long, cleanly documented ventilator courses with unambiguous transitions</td></tr>
+      <tr><td class="k"><span class="tag no">misses</span></td><td>Patients arriving on IMV &mdash; no lookback exists, and <code>B_strict</code> blocks the event</td></tr>
+      <tr><td class="k"><span class="tag no">misses</span></td><td>Episodes shorter than 3 charted rows</td></tr>
+      <tr><td class="k"><span class="tag no">misses</span></td><td>Any course with a single-row device blip (§10.1)</td></tr>
+      <tr><td class="k"><span class="tag ok">strength</span></td><td>Never emits false positives from isolated stray rows &mdash; its conservatism is genuine</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <p>
+      On the demo dataset M1 identifies intubation in <strong>8 of 59</strong> hospitalizations that
+      have any IMV row (§11.1) &mdash; an 86% miss rate &mdash; and its median episode duration is
+      <strong>3× longer</strong> than M3/M4's because it only ever sees the clean, long courses.
+    </p>
+  </div>
+</section>
+
+<!-- ══ 5 M2 ══════════════════════════════════════════════════════════ -->
+<section id="s5">
+  <div class="col">
+    <span class="sec-num">Section 5</span>
+    <div class="mhead"><span class="chip m2">M2</span><h2 style="margin:0">Symmetric 2/2 window, reintubation, no stitching</h2></div>
+    <p class="mby">Proposed by <code>@cloverbunny</code>, endorsed by <code>@ingra107</code> (2026-02-10). Prose, not code.</p>
+  </div>
+
+  <pre>   <b>intub(i)</b>  ≡  ¬IMV(i-2) ∧ ¬IMV(i-1) ∧  IMV(i)  ∧  IMV(i+1)
+   <b>extub(i)</b>  ≡   IMV(i-2) ∧  IMV(i-1) ∧ ¬IMV(i)  ∧ ¬IMV(i+1)
+
+   <b>reintub(i)</b> ≡ intub(i) ∧ ∃ j &lt; i : extub(j)      <i>— any intubation after a prior extubation</i></pre>
+
+  <pre>   INTUBATION                          EXTUBATION
+
+   i-2  i-1   i   i+1                  i-2  i-1   i   i+1
+    ┌────┬────┬────┬────┐               ┌────┬────┬────┬────┐
+    │ ¬  │ ¬  │<b>IMV</b> │<b>IMV</b> │               │<b>IMV</b> │<b>IMV</b> │ ¬  │ ¬  │
+    │IMV │IMV │ <i>●</i>  │    │               │    │    │IMV │IMV │
+    └────┴────┴────┴────┘               └────┴────┴─<i>●</i>──┴────┘
+                                                    <i>▲ event on FIRST non-IMV</i></pre>
+
+  <div class="col">
+    <h3>The distinguishing contribution is a policy position, not a formula</h3>
+  </div>
+
+  <pre>    ┌──────────────────────────────────────────────────────────────┐
+    │  <b>DETECT</b>  extubation whenever 2 non-IMV rows are documented    │
+    │          — even if reintubation follows 20 minutes later      │
+    │                            ▼                                  │
+    │  <b>LABEL</b>   the subsequent intubation as a reintubation          │
+    │                            ▼                                  │
+    │  <b>DO NOT</b>  stitch episodes together inside the package.         │
+    │          Emit both episodes + the gap; let each project apply │
+    │          its own cutoff (&lt;1h? &lt;24h? never?) downstream.       │
+    └──────────────────────────────────────────────────────────────┘</pre>
+
+  <div class="col">
+    <blockquote>
+      <div class="who">@ingra107</div>
+      <p>knowing someone was extubated and intubated quickly is important and then having a way to
+      stitch at the project level</p>
+    </blockquote>
+    <p>
+      This is a direct contrast with <span class="chip m3">M3</span>, which bakes a 24-hour
+      reintubation cutoff into the definition itself. If the consortium adopts M2's stance, the
+      function returns <em>all</em> episodes and stitching becomes a separate, parameterised utility.
+    </p>
+  </div>
+
+  <div class="tw col"><table>
+    <thead><tr><th>Behaviour</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="k"><span class="tag ok">catches</span></td><td>Everything M1 catches, plus episodes one row shorter</td></tr>
+      <tr><td class="k"><span class="tag ok">catches</span></td><td>Rapid extubation → reintubation cycles, as distinct labelled events</td></tr>
+      <tr><td class="k"><span class="tag no">misses</span></td><td>Already-on-IMV arrivals &mdash; same boundary problem as M1</td></tr>
+      <tr><td class="k"><span class="tag no">misses</span></td><td>Single-row blips (§10.1)</td></tr>
+      <tr><td class="k"><span class="tag">open</span></td><td>Comment states no NULL policy and no anchor; anchor assumed "first non-IMV"</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ══ 6 M3 ══════════════════════════════════════════════════════════ -->
+<section id="s6">
+  <div class="col">
+    <span class="sec-num">Section 6</span>
+    <div class="mhead"><span class="chip m3">M3</span><h2 style="margin:0">Single-transition SQL + outcome classification</h2></div>
+    <p class="mby">Proposed by <code>@whiskey0504</code> (2026-02-11). The only proposal that classifies
+      <em>outcomes</em>, not just events.</p>
+    <p>Operates on <code>resp_p</code>, described as <em>"a pre-processed respiratory support table"</em>
+      &mdash; what that pre-processing is remains <span class="tag">unspecified</span>, and §11.4 shows
+      it dominates the result.</p>
+
+    <h3>Event definition &mdash; one row of lookback, no lookahead</h3>
+  </div>
+
+  <pre>   <b>intub(i)</b>  ≡  trach(i)=0  ∧  d(i-1) <u>IS DISTINCT FROM</u> 'imv'  ∧  d(i) = 'imv'
+   <b>extub(i)</b>  ≡  trach(i)=0  ∧  d(i-1) = 'imv'  ∧  d(i) <u>IS DISTINCT FROM</u> 'imv'
+
+   i-1    i                           i-1    i
+    ┌────┬────┐                        ┌────┬────┐
+    │ ¬  │<b>IMV</b> │   INTUBATION           │<b>IMV</b> │ ¬  │   EXTUBATION
+    │IMV │ <i>●</i>  │                        │    │IMV │
+    │<u>or</u>  │    │                        │    │ <i>●</i>  │
+    │<u>NULL</u>│    │                        │    │<u>or NULL</u>
+    └────┴────┘                        └────┴────┘
+
+        <i>no lookahead — fires on the first transition it sees</i></pre>
+
+  <div class="col">
+    <div class="note key">
+      <p><b><code>IS DISTINCT FROM</code> is the load-bearing detail.</b> Unlike <code>!=</code>, it
+      returns TRUE when the left side is NULL &mdash; with two consequences, one intended and one not.</p>
+    </div>
+    <ul>
+      <li><strong>Intended:</strong> at row 1, <code>LAG(device)</code> is NULL, so a patient whose
+        first row is IMV <em>does</em> get an intubation event. This is the only method that handles
+        already-intubated arrivals &mdash; but it labels them as ordinary intubations, silently merging
+        "intubated here" with "arrived intubated". The issue body explicitly asks for these to be
+        <em>"flag[ged] or handle[d] separately"</em>; M3 does not.</li>
+      <li><strong>Unintended:</strong> on data with NULL devices, <em>every NULL row following an IMV
+        row emits an extubation</em>. With the demo's 783 NULL rows this inflates M3 from 65 to
+        <strong>498</strong> intubations (§11.4). M3 is only safe on a table where NULLs have already
+        been resolved.</li>
+    </ul>
+
+    <h3>Tracheostomy handling &mdash; the only proposal that addresses it</h3>
+  </div>
+
+  <pre>WHERE (tracheostomy = 0 OR trach_1st = 1)   <i>-- keep pre-trach rows + the trach placement row</i></pre>
+
+  <div class="col">
+    <p>
+      Once a tracheostomy is placed, subsequent vent liberation is a clinically different process and
+      shouldn't be scored as extubation. In the demo, 111 of 3,325 rows carry
+      <code>tracheostomy = True</code>. Under M1/M2/M4 these rows are treated as ordinary IMV, so a
+      trach patient weaning to a trach collar registers as an <strong>extubation</strong> &mdash;
+      almost certainly wrong.
+    </p>
+
+    <h3>Outcome classification tree</h3>
+    <p>Applied <strong>only to the first extubation</strong> per hospitalization. Second and subsequent
+      extubations are not classified.</p>
+  </div>
+
+  <pre>                       <b>extub(i) = 1</b>
+                            ▼
+                  ┌──────────────────────┐
+                  │ extub_cum = 1 ?      │   <i>running SUM(extub) OVER w</i>
+                  └──────────┬───────────┘
+                   no │      │ yes  →  extub_1st = 1
+                      ▼      ▼
+              [not classified]  ┌────────────────────────────────────────┐
+                                │  code_status ≠ 'full'                  │
+                                │        AND                             │
+                                │  discharge ∈ {hospice, expired} ?      │
+                                └───────────┬────────────────────────────┘
+                                    yes │   │ no
+                                        ▼   ▼
+                            ┌──────────────┐ ┌─────────────────────────────┐
+                            │ <b>withdrawl_lst</b>│ │ ∃ intub within (t, t+24h] ? │
+                            │  <i>(WLST)</i>      │ └──────────┬──────────────────┘
+                            └──────────────┘     yes │  │ no
+                                                     ▼  ▼
+                                          ┌──────────────┐ ┌────────────────┐
+                                          │ <b>fail_extub</b>   │ │ <b>success_extub</b>  │
+                                          │ <i>(reintub&lt;24h)</i>│ │                │
+                                          └──────────────┘ └────────────────┘</pre>
+
+  <div class="col">
+    <div class="note warn">
+      <p><b>Note the precedence.</b> WLST is tested <em>before</em> failed extubation, so a patient
+      reintubated within 24&nbsp;h who then dies on hospice is classified WLST, not failed. That
+      ordering is a clinical judgement embedded in the definition &mdash; defensible, but it should be
+      a conscious consortium choice.</p>
+    </div>
+  </div>
+
+  <div class="tw col"><table>
+    <thead><tr><th>Field</th><th>Table</th><th>Present in demo</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><code>code_status_category</code></td><td><code>code_status</code></td><td class="good">Full, DNR, DNR/DNI, DNI_only, AND</td></tr>
+      <tr><td class="k"><code>discharge_category</code></td><td><code>hospitalization</code></td><td class="good">incl. Hospice, Expired</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <div class="note warn">
+      <p><code>code_status</code> is keyed on <code>patient_id</code> + <code>start_dttm</code>, not
+      <code>hospitalization_id</code>. "Most recent code status" must be resolved as <em>most recent at
+      or before the extubation time, within the encounter</em> &mdash; the SQL does not say this, and
+      the join is nontrivial.</p>
+    </div>
+  </div>
+
+  <div class="tw col"><table>
+    <thead><tr><th>Behaviour</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="k"><span class="tag ok">catches</span></td><td>Already-intubated arrivals; every transition, however brief</td></tr>
+      <tr><td class="k"><span class="tag ok">catches</span></td><td>Outcome semantics no other method provides &mdash; success / failed / WLST</td></tr>
+      <tr><td class="k"><span class="tag ok">catches</span></td><td>Tracheostomy exclusion</td></tr>
+      <tr><td class="k"><span class="tag no">risk</span></td><td>Extremely sensitive to NULL devices &mdash; unusable on raw data (§11.4)</td></tr>
+      <tr><td class="k"><span class="tag no">risk</span></td><td>Blip patterns generate spurious event pairs (§10.1)</td></tr>
+      <tr><td class="k"><span class="tag">limit</span></td><td>Only the first extubation is classified; later ones get no outcome</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ══ 7 M4 ══════════════════════════════════════════════════════════ -->
+<section id="s7">
+  <div class="col">
+    <span class="sec-num">Section 7</span>
+    <div class="mhead"><span class="chip m4">M4</span><h2 style="margin:0">Strict flags &cup; candidate rescue</h2></div>
+    <p class="mby">Proposed by <code>@wtliao319</code> (2026-04-06), matching the pattern
+      <code>@cloverbunny</code> sketched on 2026-03-02.</p>
+    <blockquote>
+      <div class="who">@wtliao319</div>
+      <p>very similar to VC's proposed logic. The only difference is that we added some handling for
+      irregular records to better define the intubation events</p>
+    </blockquote>
+  </div>
+
+  <pre>   <b>2.1</b>  strict flags            <i>2 + 2 window, same as M2</i>
+   <b>2.2</b>  any-transition flags    <i>imv_start / imv_end, same as M3</i>
+              ▼
+   <b>2.3</b>  intubation candidates   <i>rows where 2.2 fired but 2.1 didn't,</i>
+   <b>2.4</b>  extubation candidates   <i>rescued if a 5-row run confirms them</i>
+              ▼
+   <b>2.5</b>  UNION  →  intubation_flag_new = strict ∨ candidate</pre>
+
+  <div class="col">
+    <div class="note key">
+      <p>M4 <b>contains</b> M2 and M3 as its two layers &mdash; its strict flags are identical to M2's,
+      its any-transition flags identical to M3's. Its contribution is the arbitration between them.</p>
+    </div>
+    <h3>Stage 2.3 &mdash; intubation candidate rescue</h3>
+  </div>
+
+  <pre>   <b>cand_in(i)</b> ≡  imv_start(i) ∧ ¬strict_in(i)
+                 ∧  IMV(i+1..i+5)                        <i>← 5-row confirmation: this run is real</i>
+                 ∧ ( ¬IMV(i-2)  ∨  (IMV(i-2) ∧ ¬IMV(i-3..i-7)) )
+                        │                    │
+                        │                    └── <i>i-2 was IMV, but an isolated blip:</i>
+                        │                        <i>rows i-3…i-7 all non-IMV ⇒ still a new start</i>
+                        └── <i>ordinary case: nothing IMV behind us</i></pre>
+
+  <div class="col"><h3>Stage 2.4 &mdash; extubation candidate rescue</h3></div>
+
+  <pre>   <b>cand_ex(i)</b> ≡  imv_end(i) ∧ ¬strict_ex(i)
+                 ∧  IMV(i-5..i-1)                        <i>← 5-row confirmation: real course behind</i>
+                 ∧ ( ¬IMV(i+2)  ∨  (IMV(i+2) ∧ ¬IMV(i+3..i+7)) )
+                                          │
+                                          └── <i>IMV briefly returns at i+2 but doesn't stick:</i>
+                                              <i>rows i+3…i+7 all non-IMV ⇒ this IS the extubation</i></pre>
+
+  <div class="col">
+    <p>
+      Because <code>strict_ex</code> failed while <code>imv_end</code> held, <code>i+1</code> must be
+      IMV. So <code>cand_ex</code> fires precisely on the pattern
+      <strong>IMV×5 → non-IMV → IMV → non-IMV…</strong> &mdash; a one-row dip back onto the vent after
+      the true extubation.
+    </p>
+    <h3>Cathy's stated rescue rules</h3>
+    <p>The screenshot posted by <code>@cloverbunny</code> on 2026-03-02 states the same two patterns:</p>
+  </div>
+
+  <pre>  # update intubation if case like this:
+  # non-imv (continuous 5) -> imv -> non-imv -> imv (intubation start candidate)  -> imv (continuous 5)
+
+  # update extubation if case like this:
+  # imv (continuous 5) -> imv (extubation candidate) -> non-imv -> imv -> non-imv (continuous 5)
+
+  <u># edge cases (their intubation can be very short period like 2 to 4 rows, so cannot catch them)</u></pre>
+
+  <div class="col">
+    <p>
+      Her final line is an explicit acknowledgement that <strong>episodes of 2&ndash;4 rows remain
+      undetectable</strong> by any window-based rescue. That is a stated, accepted limitation of the
+      whole M1/M2/M4 family.
+    </p>
+  </div>
+
+  <div class="tw col"><table>
+    <thead><tr><th>Behaviour</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="k"><span class="tag ok">catches</span></td><td>Everything M2 catches, plus one-row-blip patterns on both sides</td></tr>
+      <tr><td class="k"><span class="tag ok">catches</span></td><td>Already-intubated arrivals &mdash; accidentally, via pandas NaN semantics (§3)</td></tr>
+      <tr><td class="k"><span class="tag ok">suppresses</span></td><td>Most of M3's spurious oscillation events while keeping its coverage (§11.2: 94% agreement, 7 fewer events)</td></tr>
+      <tr><td class="k"><span class="tag no">misses</span></td><td>Episodes of 2&ndash;4 rows, per Cathy's own note</td></tr>
+      <tr><td class="k"><span class="tag no">misses</span></td><td>Blips where the surrounding run is shorter than 5 rows &mdash; the rescue does <b>not</b> fire on Cathy's own example (§10.1)</td></tr>
+      <tr><td class="k"><span class="tag">fragile</span></td><td>Uses raw pandas <code>!=</code> / <code>~.eq()</code> on possibly-NA string dtypes. Under numpy <code>object</code> dtype <code>NaN != 'imv'</code> → <code>True</code>; under pandas nullable <code>StringDtype</code> it propagates <code>pd.NA</code> and <code>.astype(int)</code> raises. Behaviour is <b>dtype-dependent and unstated</b>.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ══ 8 M5 ══════════════════════════════════════════════════════════ -->
+<section id="s8">
+  <div class="col">
+    <span class="sec-num">Section 8</span>
+    <div class="mhead"><span class="chip m5">M5</span><h2 style="margin:0">Non-device signals</h2>
+      <span class="tag">proposed, not specified</span></div>
+    <p class="mby">Raised by <code>@vaishvikc</code> (2026-03-02, "Learnings from CHEST run"), attributed
+      in part to Will.</p>
+    <blockquote>
+      <div class="who">@vaishvikc</div>
+      <p>Some sites have <strong>no facemask/FHNC/NC device charted</strong>, but <strong>LPM is
+      set</strong>. This suggests extubation happened, but <strong>no device name was
+      documented</strong>.</p>
+    </blockquote>
+    <p>
+      <strong>No implementation of this exists.</strong> It is catalogued because it identifies a
+      failure mode structurally invisible to M1&ndash;M4: if a site never charts a post-extubation
+      device, <code>device_category</code> simply stops being IMV and becomes NULL, and every
+      device-based method either forward-fills the patient as ventilated forever, or fires an
+      extubation on a NULL row.
+    </p>
+  </div>
+
+  <pre>   <b>Site A</b> (device charted)              <b>Site B</b> (device-free charting)
+   ───────────────────────              ────────────────────────────
+   IMV       device=IMV                 IMV       device=IMV
+   IMV       device=IMV                 IMV       device=IMV
+   FaceMask  device=Face Mask           <u>NULL      lpm_set=6</u>      <u>◄── extubation happened here</u>
+   NC        device=Nasal Cannula       NULL      lpm_set=4
+                                        NULL      (no vent obs)
+
+   <i>M1–M4 detect extubation ✓</i>           <u>M1/M2/M4 under ffill: never extubated ✗</u>
+                                        <u>M3 under raw NULL: extubation on a NULL row ⚠</u></pre>
+
+  <div class="tw col"><table>
+    <thead><tr><th>Signal</th><th>Definition sketch</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td class="k">S1 &mdash; LPM onset</td><td>Two consecutive rows with <code>lpm_set</code> non-null following IMV rows, with no <code>device_category</code></td><td><span class="tag">needs threshold</span></td></tr>
+      <tr><td class="k">S2 &mdash; vent-obs cessation</td><td>Two consecutive rows where all of <code>peep_set</code>, <code>resp_rate_set</code>, <code>tidal_volume_set</code>, <code>peak_inspiratory_pressure_obs</code>, <code>minute_vent_obs</code> become null</td><td><span class="tag">needs field list</span></td></tr>
+      <tr><td class="k">S3 &mdash; FiO₂ regime shift</td><td><code>fio2_set</code> present but all vent setters absent</td><td><span class="tag">not yet proposed</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <div class="note">
+      <p><b>Open question for the consortium.</b> Is M5 (a) a fallback applied only at sites failing a
+      device-charting completeness check, (b) a universal additional signal unioned into whichever
+      method wins, or (c) out of scope for <code>clifpy</code> and left to site ETL? These have very
+      different implications for cross-site comparability.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 9 AXES ════════════════════════════════════════════════════════ -->
+<section id="s9">
+  <div class="col">
+    <span class="sec-num">Section 9</span>
+    <h2>Cross-cutting decision axes</h2>
+    <p>
+      These are <strong>orthogonal to the choice of method</strong>. Every one is currently unresolved,
+      and each must be decided explicitly &mdash; otherwise two sites can implement "the same method"
+      and get different answers.
+    </p>
+
+    <h3>9.1 &nbsp;NULL / forward-fill policy <span class="tag">highest impact</span></h3>
+    <p>Which of <code>P_ffill</code> / <code>P_null≠imv</code> / <code>P_drop</code> /
+      <code>P_waterfall</code>? Demo impact: up to <strong>50×</strong> on event counts (§11.4),
+      illustrated row-by-row in §10.4. <strong>This must be settled before the method choice.</strong></p>
+
+    <h3>9.2 &nbsp;Pre- vs post-waterfall</h3>
+    <blockquote>
+      <div class="who">@cloverbunny &middot; 2026-02-12</div>
+      <p>Wan-Ting also ran some project code by integrating the logic both PRE and POST waterfall, the
+      results are slightly different but not greatly so &hellip; decreases my worry raised at CLIFATHON
+      about post-waterfall changing stuff too much</p>
+    </blockquote>
+  </div>
+
+  <pre>   <b>PRE-waterfall</b>                          <b>POST-waterfall</b>
+   ─────────────                          ──────────────
+   rows = real chart events               rows = real events + hourly scaffold
+   irregular spacing                      ≥1 row/hour, regular
+   "2 rows" ≈ 2 clinical observations     "2 rows" may be 2 synthetic hourly rows
+   NULL devices present                   devices heuristically imputed</pre>
+
+  <div class="col">
+    <div class="note key">
+      <p><b>The critical interaction:</b> every method in this catalog counts <em>rows</em>, not
+      <em>time</em>. Waterfall changes what a row means. A 2-row confirmation window is a variable
+      amount of wall-clock time pre-waterfall and roughly 2 hours post-waterfall. A method tuned
+      pre-waterfall is not the same method post-waterfall, even with identical code. Wan-Ting's
+      "slightly different" result should be re-measured with the metrics in §12 before it is treated
+      as settled.</p>
+    </div>
+
+    <h3>9.3 &nbsp;Tracheostomy</h3>
+    <p>Only M3 handles it. Options: exclude post-trach rows entirely (M3), treat trach as IMV, or emit
+      a separate <code>trach_placement</code> event and terminate the IMV episode there. 111 demo rows
+      affected.</p>
+
+    <h3>9.4 &nbsp;Patients arriving already on IMV</h3>
+    <p>34 of 110 demo hospitalizations (<strong>31%</strong>) have IMV as their first respiratory row.
+      Options: (a) no intubation event, episode left-censored &mdash; M1/M2; (b) intubation event at
+      first row &mdash; M3/M4, accidentally; (c) intubation event <strong>flagged</strong>
+      <code>arrived_intubated = true</code>, which is what the issue body actually asks for and what
+      <strong>no method implements</strong>.</p>
+
+    <h3>9.5 &nbsp;Zero / near-zero duration episodes</h3>
+    <p>Issue body: <em>"likely failed intubation attempts, rapid reintubation/extubation events, or
+      data quality issues, and may require exclusion or special labeling."</em> Consistent with M2's
+      stance, <strong>emit and flag</strong> keeps the decision at project level. None appear in the
+      demo &mdash; every paired episode exceeds 1&nbsp;h &mdash; so this must be measured at real sites.</p>
+
+    <h3>9.6 &nbsp;Episode stitching <span class="tag no">direct conflict</span></h3>
+    <p>M2 / @ingra107 &mdash; never stitch inside the package, return all episodes and let projects
+      apply cutoffs. M3 &mdash; bake a 24-hour reintubation window into <code>fail_extub</code>. These
+      are reconcilable: emit unstitched episodes <em>plus</em> an optional
+      <code>stitch(gap_hours=…)</code> utility, and derive M3's outcome flags from that.</p>
+
+    <h3>9.7 &nbsp;First vs all extubations</h3>
+    <p>M3 classifies outcomes only for the first extubation. M1/M2/M4 emit all events with no outcomes.
+      If outcome classification is adopted, does it extend to every extubation?</p>
+
+    <h3>9.8 &nbsp;Event anchoring</h3>
+    <p>Last-IMV vs first-non-IMV (§3). Directly determines every reported ventilator duration. Must be
+      fixed globally.</p>
+
+    <h3>9.9 &nbsp;Missing extubation</h3>
+    <p>Issue body: if no extubation is detected, resolve via discharge → <code>discharged_on_imv</code>;
+      in-hospital death → <code>death_on_imv</code>; neither → <code>unknown</code>. Uncontested in the
+      thread; include in whichever method wins.</p>
+  </div>
+</section>
+
+<!-- ══ 10 TRACES ═════════════════════════════════════════════════════ -->
+<section id="s10">
+  <div class="col">
+    <span class="sec-num">Section 10</span>
+    <h2>Divergence traces</h2>
+    <p>
+      All traces produced by running the four definitions as formalised above over identical input.
+      <code>IN</code> = intubation emitted, <code>EX</code> = extubation emitted, <code>·</code> = no
+      event. No forward-fill is applied, so raw behaviour is visible.
+    </p>
+    <h3>10.1 &nbsp;Cathy's blip edge case</h3>
+    <blockquote>
+      <div class="who">@cloverbunny &middot; 2026-02-12</div>
+      <p>Weird edge case example that would be missed by our logic, @wtliao319 found several of these
+      in our tables</p>
+    </blockquote>
+  </div>
+
+  <div class="tw"><table class="trace">
+    <thead><tr><th class="n">row</th><th>time</th><th>device</th>
+      <th class="c">M1</th><th class="c">M2</th><th class="c">M3</th><th class="c">M4</th><th></th></tr></thead>
+    <tbody>
+      <tr class="imvrow"><td class="n">1</td><td>08:00</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">IN</td><td class="ev v4">IN</td>
+        <td class="cm">M3/M4 fire on NULL→imv boundary</td></tr>
+      <tr class="imvrow"><td class="n">2</td><td>08:20</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">3</td><td>08:40</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">4</td><td>09:00</td><td class="dv">NIPPV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">EX</td><td class="dot">·</td>
+        <td class="cm">M3 extubates on the blip</td></tr>
+      <tr class="imvrow"><td class="n">5</td><td>09:20</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">IN</td><td class="dot">·</td>
+        <td class="cm">M3 re-intubates</td></tr>
+      <tr><td class="n">6</td><td>09:40</td><td class="dv">NIPPV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">EX</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">7</td><td>10:00</td><td class="dv">NIPPV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">8</td><td>10:20</td><td class="dv">High Flow NC</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">9</td><td>10:40</td><td class="dv">High Flow NC</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">10</td><td>11:00</td><td class="dv">High Flow NC</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+    </tbody>
+    <tfoot><tr><td colspan="3">TOTAL intub / extub</td>
+      <td class="c">0/0</td><td class="c">0/0</td><td class="c">2/2</td><td class="c">1/0</td><td></td></tr></tfoot>
+  </table></div>
+
+  <div class="col">
+    <div class="note key">
+      <p><b>This is the catalog's most important result.</b> Three of four methods detect no extubation
+      at all &mdash; including M4, whose candidate rescue was designed for exactly this pattern. The
+      rescue requires five consecutive IMV rows behind the candidate, and only three exist. Cathy's own
+      caveat &mdash; <em>"their intubation can be very short period like 2 to 4 rows, so cannot catch
+      them"</em> &mdash; applies to her own example.</p>
+      <p>Clinically the patient was almost certainly extubated once, at 09:00 or 10:00.
+      <b>No proposed method returns that.</b></p>
+    </div>
+
+    <h3>10.2 &nbsp;Clean textbook course &mdash; where everyone agrees on <em>events</em></h3>
+  </div>
+
+  <div class="tw"><table class="trace">
+    <thead><tr><th class="n">row</th><th>time</th><th>device</th>
+      <th class="c">M1</th><th class="c">M2</th><th class="c">M3</th><th class="c">M4</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="n">1</td><td>08:00</td><td class="dv">Nasal Cannula</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">2</td><td>08:20</td><td class="dv">Nasal Cannula</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">3</td><td>08:40</td><td class="dv">IMV</td>
+        <td class="ev v1">IN</td><td class="ev v2">IN</td><td class="ev v3">IN</td><td class="ev v4">IN</td>
+        <td class="cm">unanimous</td></tr>
+      <tr class="imvrow"><td class="n">4</td><td>09:00</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">5</td><td>09:20</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">6</td><td>09:40</td><td class="dv">IMV</td>
+        <td class="ev v1">EX</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td>
+        <td class="cm">M1 anchors on LAST IMV</td></tr>
+      <tr><td class="n">7</td><td>10:00</td><td class="dv">Face Mask</td>
+        <td class="dot">·</td><td class="ev v2">EX</td><td class="ev v3">EX</td><td class="ev v4">EX</td>
+        <td class="cm">others anchor on FIRST non-IMV</td></tr>
+      <tr><td class="n">8</td><td>10:20</td><td class="dv">Face Mask</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">9</td><td>10:40</td><td class="dv">Nasal Cannula</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+    </tbody>
+    <tfoot><tr><td colspan="3">TOTAL intub / extub</td>
+      <td class="c">1/1</td><td class="c">1/1</td><td class="c">1/1</td><td class="c">1/1</td><td></td></tr></tfoot>
+  </table></div>
+
+  <div class="col">
+    <p>
+      All four agree there was one intubation and one extubation &mdash; yet <strong>M1's ventilator
+      duration is 20 minutes shorter than everyone else's</strong>, purely from anchoring. On real data
+      with hours between charted rows, this systematically biases duration downward.
+    </p>
+    <h3>10.3 &nbsp;Arrives already intubated</h3>
+  </div>
+
+  <div class="tw"><table class="trace">
+    <thead><tr><th class="n">row</th><th>time</th><th>device</th>
+      <th class="c">M1</th><th class="c">M2</th><th class="c">M3</th><th class="c">M4</th><th></th></tr></thead>
+    <tbody>
+      <tr class="imvrow"><td class="n">1</td><td>08:00</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">IN</td><td class="ev v4">IN</td>
+        <td class="cm">boundary policy decides everything</td></tr>
+      <tr class="imvrow"><td class="n">2</td><td>08:20</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">3</td><td>08:40</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">4</td><td>09:00</td><td class="dv">IMV</td>
+        <td class="ev v1">EX</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">5</td><td>09:20</td><td class="dv">Nasal Cannula</td>
+        <td class="dot">·</td><td class="ev v2">EX</td><td class="ev v3">EX</td><td class="ev v4">EX</td><td></td></tr>
+      <tr><td class="n">6</td><td>09:40</td><td class="dv">Nasal Cannula</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+    </tbody>
+    <tfoot><tr><td colspan="3">TOTAL intub / extub</td>
+      <td class="c">0/1</td><td class="c">0/1</td><td class="c">1/1</td><td class="c">1/1</td><td></td></tr></tfoot>
+  </table></div>
+
+  <div class="col">
+    <p>
+      M1/M2 emit an <strong>orphan extubation</strong> &mdash; an extubation with no matching
+      intubation. M3/M4 emit a matched pair but claim the intubation happened at 08:00, which is false;
+      it happened before the data. Neither is right. The correct output is the issue body's own
+      request: an extubation plus an intubation flagged <code>arrived_intubated</code>, with start time
+      unknown. <strong>31% of demo hospitalizations hit this case.</strong>
+    </p>
+    <h3>10.4 &nbsp;NULL <code>device_category</code> interleaved &mdash; no forward-fill</h3>
+  </div>
+
+  <div class="tw"><table class="trace">
+    <thead><tr><th class="n">row</th><th>time</th><th>device</th>
+      <th class="c">M1</th><th class="c">M2</th><th class="c">M3</th><th class="c">M4</th><th></th></tr></thead>
+    <tbody>
+      <tr class="imvrow"><td class="n">1</td><td>08:00</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">IN</td><td class="dot">·</td><td></td></tr>
+      <tr class="hi"><td class="n">2</td><td>08:20</td><td class="dv" style="color:var(--ink-3)">NULL</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">EX</td><td class="dot">·</td>
+        <td class="cm">spurious</td></tr>
+      <tr class="imvrow"><td class="n">3</td><td>08:40</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">IN</td><td class="dot">·</td>
+        <td class="cm">spurious</td></tr>
+      <tr class="hi"><td class="n">4</td><td>09:00</td><td class="dv" style="color:var(--ink-3)">NULL</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">EX</td><td class="dot">·</td>
+        <td class="cm">spurious</td></tr>
+      <tr class="hi"><td class="n">5</td><td>09:20</td><td class="dv" style="color:var(--ink-3)">NULL</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">6</td><td>09:40</td><td class="dv">IMV</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">IN</td><td class="dot">·</td>
+        <td class="cm">spurious</td></tr>
+      <tr><td class="n">7</td><td>10:00</td><td class="dv">Nasal Cannula</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="ev v3">EX</td><td class="dot">·</td>
+        <td class="cm">the only real extubation</td></tr>
+      <tr><td class="n">8</td><td>10:20</td><td class="dv">Nasal Cannula</td>
+        <td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+    </tbody>
+    <tfoot><tr><td colspan="3">TOTAL intub / extub</td>
+      <td class="c">0/0</td><td class="c">0/0</td><td class="c">3/3</td><td class="c">0/0</td><td></td></tr></tfoot>
+  </table></div>
+
+  <div class="col">
+    <div class="note key">
+      <p>One patient, one ventilator course, one extubation. <b>M3 reports three intubations and three
+      extubations; M1/M2/M4 report none.</b> This single row pattern &mdash; which describes 23.5% of
+      the demo table &mdash; is why §9.1 must be resolved first.</p>
+    </div>
+    <h3>10.5 &nbsp;Failed extubation with reintubation</h3>
+  </div>
+
+  <div class="tw"><table class="trace">
+    <thead><tr><th class="n">row</th><th>time</th><th>device</th>
+      <th class="c">M1</th><th class="c">M2</th><th class="c">M3</th><th class="c">M4</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="n">1</td><td>08:00</td><td class="dv">Nasal Cannula</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">2</td><td>08:20</td><td class="dv">Nasal Cannula</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">3</td><td>08:40</td><td class="dv">IMV</td>
+        <td class="ev v1">IN</td><td class="ev v2">IN</td><td class="ev v3">IN</td><td class="ev v4">IN</td><td></td></tr>
+      <tr class="imvrow"><td class="n">4</td><td>09:00</td><td class="dv">IMV</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">5</td><td>09:20</td><td class="dv">IMV</td>
+        <td class="ev v1">EX</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">6</td><td>09:40</td><td class="dv">Face Mask</td>
+        <td class="dot">·</td><td class="ev v2">EX</td><td class="ev v3">EX</td><td class="ev v4">EX</td>
+        <td class="cm">extubation #1</td></tr>
+      <tr><td class="n">7</td><td>10:00</td><td class="dv">Face Mask</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">8</td><td>10:20</td><td class="dv">IMV</td>
+        <td class="ev v1">IN</td><td class="ev v2">IN</td><td class="ev v3">IN</td><td class="ev v4">IN</td>
+        <td class="cm">reintubation, 40 min later</td></tr>
+      <tr class="imvrow"><td class="n">9</td><td>10:40</td><td class="dv">IMV</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">10</td><td>11:00</td><td class="dv">IMV</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr class="imvrow"><td class="n">11</td><td>11:20</td><td class="dv">IMV</td>
+        <td class="ev v1">EX</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+      <tr><td class="n">12</td><td>11:40</td><td class="dv">Nasal Cannula</td>
+        <td class="dot">·</td><td class="ev v2">EX</td><td class="ev v3">EX</td><td class="ev v4">EX</td>
+        <td class="cm">extubation #2</td></tr>
+      <tr><td class="n">13</td><td>12:00</td><td class="dv">Nasal Cannula</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td class="dot">·</td><td></td></tr>
+    </tbody>
+    <tfoot><tr><td colspan="3">TOTAL intub / extub</td>
+      <td class="c">2/2</td><td class="c">2/2</td><td class="c">2/2</td><td class="c">2/2</td><td></td></tr></tfoot>
+  </table></div>
+
+  <div class="col">
+    <p>
+      Full agreement on event <strong>count and position</strong> (modulo anchoring). The methods
+      diverge only on <em>interpretation</em>: M2 emits two episodes and lets the project stitch; M3
+      additionally labels extubation #1 <code>fail_extub = 1</code> because reintubation occurred within
+      24&nbsp;h, and classifies nothing about extubation #2. Clean cases like this are where the
+      thread's intuition that the methods are "basically the same" comes from. §10.1 and §10.4 show
+      where that intuition breaks.
+    </p>
+  </div>
+</section>
+
+<!-- ══ 11 DEMO FIGURES ═══════════════════════════════════════════════ -->
+<section id="s11">
+  <div class="col">
+    <span class="sec-num">Section 11</span>
+    <h2>Illustrative behaviour on the CLIF demo dataset</h2>
+    <div class="note warn">
+      <p><b>These are demo-data figures, not site results.</b> 3,325 rows / 110 hospitalizations from
+      the public CLIF demo set, which is small and MIMIC-derived. They show the <em>shape and
+      magnitude</em> of divergence, not a ranking. Real ranking comes from the rubric in §12.</p>
+    </div>
+    <h3>11.1 &nbsp;Event yield, forward-fill applied</h3>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>method</th><th class="n">intubations</th><th class="n">extubations</th>
+      <th class="n">hosp w/ intub</th><th class="n">hosp w/ extub</th><th class="n">extub-only hosp</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><span class="chip m1">M1</span></td><td class="n">9</td><td class="n">42</td><td class="n bad">8</td><td class="n">39</td><td class="n bad">34</td></tr>
+      <tr><td class="k"><span class="chip m2">M2</span></td><td class="n">10</td><td class="n">46</td><td class="n bad">8</td><td class="n">42</td><td class="n bad">37</td></tr>
+      <tr><td class="k"><span class="chip m3">M3</span></td><td class="n">65</td><td class="n">51</td><td class="n">59</td><td class="n">45</td><td class="n good">0</td></tr>
+      <tr><td class="k"><span class="chip m4">M4</span></td><td class="n">62</td><td class="n">47</td><td class="n">58</td><td class="n">43</td><td class="n good">0</td></tr>
+    </tbody>
+  </table></div>
+  <p class="col" style="font-size:13px;color:var(--ink-3);margin-top:-12px">
+    59 of 110 hospitalizations contain at least one IMV row. 34 of 110 begin with IMV as the first
+    respiratory row (arrived ventilated).
+  </p>
+
+  <div class="col">
+    <div class="note key">
+      <p><b>M1 and M2 detect intubation in 8 of 59 ventilated encounters &mdash; a 14% detection
+      rate</b> &mdash; and produce 34&ndash;37 encounters with an extubation but no intubation. M3/M4
+      have zero orphans, but only because their boundary semantics manufacture an intubation at row 1.</p>
+    </div>
+    <h3>11.2 &nbsp;Pairwise event agreement, exact row + type match</h3>
+  </div>
+
+  <div class="tw" style="max-width:620px"><table>
+    <thead><tr><th>pair</th><th class="n">agreed</th><th class="n">only A</th><th class="n">only B</th><th class="n">Jaccard</th><th></th></tr></thead>
+    <tbody>
+      <tr class="hi"><td class="k"><span class="chip m1">M1</span> vs <span class="chip m2">M2</span></td><td class="n">9</td><td class="n">42</td><td class="n">47</td><td class="n bad">0.09</td><td style="font-size:12.5px;color:var(--ink-3)">zero extubation agreement</td></tr>
+      <tr><td class="k"><span class="chip m1">M1</span> vs <span class="chip m3">M3</span></td><td class="n">9</td><td class="n">42</td><td class="n">107</td><td class="n">0.06</td><td></td></tr>
+      <tr><td class="k"><span class="chip m1">M1</span> vs <span class="chip m4">M4</span></td><td class="n">9</td><td class="n">42</td><td class="n">100</td><td class="n">0.06</td><td></td></tr>
+      <tr><td class="k"><span class="chip m2">M2</span> vs <span class="chip m3">M3</span></td><td class="n">56</td><td class="n">0</td><td class="n">60</td><td class="n">0.48</td><td></td></tr>
+      <tr><td class="k"><span class="chip m2">M2</span> vs <span class="chip m4">M4</span></td><td class="n">56</td><td class="n">0</td><td class="n">53</td><td class="n">0.51</td><td></td></tr>
+      <tr class="hi"><td class="k"><span class="chip m3">M3</span> vs <span class="chip m4">M4</span></td><td class="n">109</td><td class="n">7</td><td class="n">0</td><td class="n good">0.94</td><td style="font-size:12.5px;color:var(--ink-3)">near-identical</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <ul>
+      <li><strong>M1 vs M2 agree on all 9 intubations and on none of the 88 extubations.</strong> They
+        are described in the thread as the same approach. The disagreement is 100% anchoring, not
+        clinical logic.</li>
+      <li><strong>M3 and M4 agree 94%</strong> &mdash; M4 is effectively M3 with 7 spurious events
+        suppressed. Once NULLs are resolved, choosing between them is marginal; choosing between
+        {M1, M2} and {M3, M4} is not.</li>
+    </ul>
+    <h3>11.3 &nbsp;Episode duration, intubation → next extubation</h3>
+  </div>
+
+  <div class="tw" style="max-width:680px"><table>
+    <thead><tr><th>method</th><th class="n">paired episodes</th><th class="n">median</th><th class="n">IQR</th><th class="n">max</th><th class="n">&lt; 1 h</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><span class="chip m1">M1</span></td><td class="n bad">6</td><td class="n">66.5 h</td><td class="n">21.5 – 83.2</td><td class="n">113.0 h</td><td class="n">0</td></tr>
+      <tr><td class="k"><span class="chip m2">M2</span></td><td class="n bad">7</td><td class="n">65.0 h</td><td class="n">13.2 – 79.9</td><td class="n">117.0 h</td><td class="n">0</td></tr>
+      <tr><td class="k"><span class="chip m3">M3</span></td><td class="n">51</td><td class="n">21.0 h</td><td class="n">5.8 – 70.5</td><td class="n">355.0 h</td><td class="n">0</td></tr>
+      <tr><td class="k"><span class="chip m4">M4</span></td><td class="n">47</td><td class="n">24.1 h</td><td class="n">7.7 – 76.5</td><td class="n">355.0 h</td><td class="n">0</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <div class="note key">
+      <p><b>Median ventilator duration differs 3-fold between method families</b> (66 h vs 21 h) on
+      identical data. M1/M2 pair only 6&ndash;7 episodes out of 59 ventilated encounters, and the ones
+      they pair are the long clean courses &mdash; a textbook selection bias. Any study reporting "mean
+      duration of mechanical ventilation" is reporting a property of its detection method as much as of
+      its patients.</p>
+    </div>
+    <h3>11.4 &nbsp;Sensitivity to NULL policy &mdash; the dominant effect</h3>
+  </div>
+
+  <div class="tw" style="max-width:680px"><table>
+    <thead><tr><th rowspan="2">method</th><th class="n" colspan="2">ffill applied</th><th class="n" colspan="2">raw, no ffill</th><th class="n" rowspan="2">ratio</th></tr>
+      <tr><th class="n">intub</th><th class="n">extub</th><th class="n">intub</th><th class="n">extub</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><span class="chip m1">M1</span></td><td class="n">9</td><td class="n">42</td><td class="n">2</td><td class="n">2</td><td class="n">0.2×</td></tr>
+      <tr><td class="k"><span class="chip m2">M2</span></td><td class="n">10</td><td class="n">46</td><td class="n">3</td><td class="n">8</td><td class="n">0.3×</td></tr>
+      <tr class="hi"><td class="k"><span class="chip m3">M3</span></td><td class="n">65</td><td class="n">51</td><td class="n bad">498</td><td class="n bad">485</td><td class="n bad">7.7×</td></tr>
+      <tr><td class="k"><span class="chip m4">M4</span></td><td class="n">62</td><td class="n">47</td><td class="n">98</td><td class="n">118</td><td class="n">1.6×</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <div class="note key">
+      <p>M3 goes from 65 to <b>498</b> intubations &mdash; every NULL row adjacent to an IMV row becomes
+      a transition. M1/M2 collapse the other way, because a NULL breaks their consecutive-row requirement.</p>
+      <p>Across the full grid the spread is <b>2 → 498 events, ~250×</b>, versus ~7× for the transition
+      rule at fixed NULL policy. <b>The pre-processing decision matters roughly an order of magnitude
+      more than the method decision.</b> This is the single most actionable finding in the catalog.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 12 RUBRIC ═════════════════════════════════════════════════════ -->
+<section id="s12">
+  <div class="col">
+    <span class="sec-num">Section 12</span>
+    <h2>Validation rubric</h2>
+    <p>
+      Three tiers, ordered cheapest-first. Tier 0 runs everywhere and needs no labels; Tier 1 is
+      automatable; Tier 2 is expensive and therefore spent only where the cheaper tiers show disagreement.
+    </p>
+  </div>
+
+  <div class="tiers col">
+    <div class="tier">
+      <div class="t">TIER 0</div>
+      <h5>Label-free &mdash; every site, every method, mandatory</h5>
+      <p class="s">Concordance, internal consistency and clinical plausibility.</p>
+      <p class="c">cost: compute only &nbsp;·&nbsp; can only find disagreement, never say who is right</p>
+    </div>
+    <div class="tier">
+      <div class="t">TIER 1</div>
+      <h5>Code-referenced &mdash; every site, automatable</h5>
+      <p class="s">Encounter-level scoring against procedure / billing codes.</p>
+      <p class="c">cost: compute only &nbsp;·&nbsp; PRESENCE only, never timing</p>
+    </div>
+    <div class="tier">
+      <div class="t">TIER 2</div>
+      <h5>Chart review &mdash; sampled, disagreement-enriched</h5>
+      <p class="s">Human adjudication of ~50&ndash;100 encounters per site.</p>
+      <p class="c">cost: clinician time &nbsp;·&nbsp; the only tier that scores event timing</p>
+    </div>
+  </div>
+
+  <div class="col"><h3>12.1 &nbsp;Tier 0 &mdash; label-free metrics</h3>
+    <p>Every metric is computed <strong>per method × per site × per NULL policy</strong>, so that §9.1
+      and §9.2 are measured rather than assumed.</p>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>ID</th><th>Metric</th><th>Why it matters</th></tr></thead>
+    <tbody>
+      <tr><td class="k">R0.1</td><td>Intubations and extubations per 1,000 hospitalizations</td><td>Gross yield; catches wildly over/under-calling</td></tr>
+      <tr><td class="k">R0.2</td><td><strong>Detection coverage</strong> &mdash; % of encounters with ≥1 IMV row that yield ≥1 intubation</td><td>Demo: M1 = 14%. A method that cannot find intubations in ventilated patients is disqualified</td></tr>
+      <tr><td class="k">R0.3</td><td><strong>Orphan rate</strong> &mdash; % extubations with no preceding intubation; % intubations with no following extubation</td><td>Demo: M1 has 34/39 encounters extub-only. Distinguishes true left-censoring from detection failure</td></tr>
+      <tr><td class="k">R0.4</td><td>Episode duration median / IQR / max; % &lt; 1 h; % &gt; 30 d; % exceeding hospital LOS</td><td>Duration is the most-used downstream variable; §11.3 shows 3× method effects</td></tr>
+      <tr><td class="k">R0.5</td><td><strong>Temporal validity</strong> &mdash; events before admission, after discharge, or after death</td><td>Hard errors. Any nonzero count is a defect</td></tr>
+      <tr><td class="k">R0.6</td><td><strong>Inter-method concordance</strong> &mdash; pairwise Jaccard at event level (exact, ±1 h, ±4 h) and encounter level</td><td>Separates genuine disagreement from pure anchoring offset</td></tr>
+      <tr><td class="k">R0.7</td><td><strong>Pre-processing stability</strong> &mdash; every metric above computed pre- and post-waterfall; report the ratio</td><td>Directly settles §9.2; re-tests Wan-Ting's "slightly different"</td></tr>
+      <tr><td class="k">R0.8</td><td><strong>Device-charting completeness</strong> &mdash; % IMV episodes ending in a charted non-IMV device vs NULL</td><td>Identifies M5 sites (§8); a site failing this makes all other results uninterpretable</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <h4>Proposed gates <span class="tag">for consortium ratification &mdash; not yet agreed</span></h4>
+  </div>
+  <pre>   R0.2  detection coverage        ≥ 80% of ventilated encounters
+   R0.3  orphan extubation rate    ≤ 10% + the site's arrived-intubated rate
+   R0.5  temporal violations       = 0
+   R0.4  episodes exceeding LOS    = 0</pre>
+
+  <div class="col">
+    <div class="note key">
+      <p>A method must pass at <b>every</b> site, not on average. Cross-site <em>stability</em> is the
+      point of the exercise: a method with mediocre-but-identical behaviour everywhere is more useful
+      to the consortium than one that is excellent at three sites and broken at a fourth.</p>
+    </div>
+
+    <h3>12.2 &nbsp;Tier 1 &mdash; procedure-code reference</h3>
+    <p>Score each method at the <strong>encounter level</strong> against procedure / billing codes.</p>
+  </div>
+
+  <pre>                    <b>code says intubated</b>
+                        yes        no
+                    ┌──────────┬──────────┐
+   <b>method</b>     yes   │    TP    │    FP    │      sensitivity = TP/(TP+FN)
+   <b>detects</b>          ├──────────┼──────────┤      PPV         = TP/(TP+FP)
+              no    │    FN    │    TN    │      F1
+                    └──────────┴──────────┘</pre>
+
+  <div class="tw col"><table>
+    <thead><tr><th>Format</th><th>Codes</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td class="k">ICD-10-PCS</td><td><code>0BH17EZ</code>, <code>0BH18EZ</code></td><td>Insertion of endotracheal airway</td></tr>
+      <tr><td class="k">ICD-10-PCS</td><td><code>5A1935Z</code>, <code>5A1945Z</code>, <code>5A1955Z</code></td><td>Mechanical ventilation &lt;24 h / 24–96 h / &gt;96 h</td></tr>
+      <tr><td class="k">ICD-9</td><td><code>9604</code></td><td>Insertion of endotracheal tube</td></tr>
+      <tr><td class="k">ICD-9</td><td><code>9670</code>, <code>9671</code>, <code>9672</code></td><td>Continuous mechanical ventilation</td></tr>
+      <tr><td class="k">CPT</td><td><code>31500</code></td><td>Emergency endotracheal intubation</td></tr>
+    </tbody>
+  </table></div>
+  <p class="col" style="font-size:13px;color:var(--ink-3);margin-top:-12px">
+    All four formats present in CLIF <code>patient_procedures</code>; the demo contains
+    <code>0BH17EZ</code> ×11, <code>5A1945Z</code>, <code>5A1955Z</code>, ICD-9 <code>9604</code>,
+    <code>9671</code>, <code>9672</code>.
+  </p>
+
+  <div class="col">
+    <div class="note key">
+      <p><b>Two hard constraints on how Tier 1 may be used.</b></p>
+      <p><b>1. Presence only, never timing.</b> The column is <code>procedure_billed_dttm</code> &mdash;
+      a billing timestamp, frequently day-granular or backdated to admission. It can confirm
+      <em>that</em> an encounter involved intubation; it cannot confirm <em>when</em>. Any rubric that
+      scores timing against these codes will overstate accuracy.</p>
+      <p><b>2. Codes are a reference, not truth.</b> Coding completeness varies by site, payer and era.
+      Report each site's <em>code capture rate</em> first &mdash; the % of encounters with ≥1 IMV row
+      carrying any vent code. Where that rate is implausibly low, Tier 1 is uninformative at that site
+      and should be reported as such rather than scored.</p>
+    </div>
+
+    <h3>12.3 &nbsp;Tier 2 &mdash; chart review</h3>
+    <p>The only tier that establishes ground truth for <strong>timing</strong>. Expensive, so sample
+      deliberately &mdash; target ~50&ndash;100 encounters per site.</p>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>Stratum</th><th>Selection</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td class="k">S-A &nbsp;Unanimous</td><td>All 4 methods agree on events and timing</td><td>Detects a <em>shared</em> blind spot &mdash; if all four are wrong together, no concordance metric can reveal it</td></tr>
+      <tr class="hi"><td class="k">S-B &nbsp;Split</td><td>Methods disagree on event count or position</td><td>Where the decision actually gets made &mdash; spend most of the budget here</td></tr>
+      <tr><td class="k">S-C &nbsp;Silent</td><td>≥1 IMV row but ≥1 method emits no event</td><td>Tests §9.4 and detection failure</td></tr>
+      <tr><td class="k">S-D &nbsp;Extreme</td><td>Zero/near-zero duration, duration &gt; 30 d, or orphan events</td><td>Tests §9.5</td></tr>
+      <tr><td class="k">S-E &nbsp;Device-free</td><td>Encounters flagged by R0.8</td><td>Tests whether M5 signals are real</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col"><h4>Adjudication form &mdash; one row per encounter, clinician blind to method output</h4></div>
+  <pre>   was the patient invasively ventilated this encounter?     Y / N
+   arrived already intubated?                                Y / N
+   intubation #1 datetime (or UNKNOWN — arrived intubated)   ________
+   extubation #1 datetime (or NONE)                          ________
+   extubation #1 outcome:   success / reintubated ≤24h / WLST / trach / died on IMV
+   tracheostomy placed this encounter?                       Y / N + datetime
+   additional intubation/extubation pairs                    ________
+   free text: what made this hard?                           ________</pre>
+
+  <div class="col">
+    <p>
+      <strong>Metrics:</strong> event-level sensitivity and PPV against adjudicated events (match
+      tolerance ±1 h and ±4 h, reported separately); <strong>median absolute timestamp error in
+      minutes</strong>, reported separately for intubation and extubation; outcome-classification
+      accuracy for M3's tree.
+    </p>
+    <h3>12.4 &nbsp;Decision procedure</h3>
+  </div>
+
+  <pre>   <b>1.</b>  FIRST fix the NULL/pre-processing policy (§9.1, §9.2).
+       Rubric metrics are not comparable across different policies, and §11.4 shows
+       the policy dominates the method. Use R0.7 + R0.8 to choose it.
+
+   <b>2.</b>  Apply Tier 0 gates at every site.  Eliminate methods that fail anywhere.
+
+   <b>3.</b>  Rank survivors by Tier 1 encounter-level F1, reported per site.
+       Prefer low cross-site variance over high mean.
+
+   <b>4.</b>  Break remaining ties with Tier 2 sensitivity / PPV, then timestamp error.
+
+   <b>5.</b>  Decide the cross-cutting axes (§9.3–§9.9) as explicit parameters of the
+       chosen method, not as silent implementation details.</pre>
+
+  <div class="col">
+    <div class="note warn">
+      <p><b>Reporting constraints.</b> Only aggregate results leave a site; minimum cell size
+      <b>n ≥ 10</b> for every reported statistic; no <code>patient_id</code>, no row-level records, no
+      raw <code>.csv</code>/<code>.parquet</code> in <code>output/final_no_phi/</code>. Chart-review
+      adjudications are PHI and stay in <code>output/intermediate_phi/</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 13 SUMMARY ════════════════════════════════════════════════════ -->
+<section id="s13">
+  <div class="col">
+    <span class="sec-num">Section 13</span>
+    <h2>Summary comparison</h2>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th></th>
+      <th><span class="chip m1">M1</span></th><th><span class="chip m2">M2</span></th>
+      <th><span class="chip m3">M3</span></th><th><span class="chip m4">M4</span></th>
+      <th><span class="chip m5">M5</span></th></tr></thead>
+    <tbody>
+      <tr><td class="k">Proposer</td><td><code>@vaishvikc</code></td><td><code>@cloverbunny</code></td><td><code>@whiskey0504</code></td><td><code>@wtliao319</code></td><td><code>@vaishvikc</code> / Will</td></tr>
+      <tr><td class="k">Notation</td><td>prose</td><td>prose</td><td>SQL</td><td>pandas</td><td>idea only</td></tr>
+      <tr><td class="k">Intub window</td><td>2 + 3</td><td>2 + 2</td><td>1 + 0</td><td>2+2 ∪ rescue</td><td>—</td></tr>
+      <tr><td class="k">Extub window</td><td>3 + 2</td><td>2 + 2</td><td>1 + 0</td><td>2+2 ∪ rescue</td><td>—</td></tr>
+      <tr class="hi"><td class="k">Extub anchor</td><td><strong>last IMV</strong></td><td>first ¬IMV</td><td>first ¬IMV</td><td>first ¬IMV</td><td>—</td></tr>
+      <tr><td class="k">NULL policy</td><td>ffill</td><td><span class="tag">unstated</span></td><td>NULL = ¬IMV</td><td>NULL = ¬IMV</td><td>uses NULLs as signal</td></tr>
+      <tr><td class="k">Boundary</td><td><span class="tag">unstated</span></td><td><span class="tag">unstated</span></td><td>permissive</td><td>permissive</td><td>—</td></tr>
+      <tr><td class="k">Arrived intubated</td><td class="bad">missed</td><td class="bad">missed</td><td>unlabelled event</td><td>unlabelled event</td><td>—</td></tr>
+      <tr><td class="k">Tracheostomy</td><td class="bad">✗</td><td class="bad">✗</td><td class="good">✓ excluded</td><td class="bad">✗</td><td class="bad">✗</td></tr>
+      <tr><td class="k">Reintubation</td><td class="bad">✗</td><td class="good">✓ labelled</td><td class="good">✓ + 24 h rule</td><td class="bad">✗</td><td class="bad">✗</td></tr>
+      <tr><td class="k">Outcome tree</td><td class="bad">✗</td><td class="bad">✗</td><td class="good">✓</td><td class="bad">✗</td><td class="bad">✗</td></tr>
+      <tr><td class="k">Stitching stance</td><td>—</td><td>never stitch</td><td>24 h baked in</td><td>—</td><td>—</td></tr>
+      <tr><td class="k">Blip handling</td><td class="bad">✗</td><td class="bad">✗</td><td>over-calls</td><td>partial &mdash; needs 5-row run</td><td class="bad">✗</td></tr>
+      <tr><td class="k">Device-free sites</td><td class="bad">✗</td><td class="bad">✗</td><td class="bad">✗</td><td class="bad">✗</td><td class="good">✓ target</td></tr>
+      <tr><td class="k">Robust to raw NULLs</td><td>under-calls</td><td>under-calls</td><td class="bad"><strong>fails, 7.7×</strong></td><td>moderate</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <h3>What the catalog establishes</h3>
+    <ol class="finds">
+      <li><strong>No proposed method is correct on Cathy's own edge case</strong> (§10.1) &mdash; three
+        detect no extubation, one splits it into two courses.</li>
+      <li><strong>M1 ≠ M2</strong> despite being discussed as one approach: different window widths and
+        different extubation anchors, giving <strong>zero</strong> extubation agreement (§11.2).</li>
+      <li><strong>M3 ≈ M4</strong> (94% agreement) once NULLs are resolved. The real choice is between
+        families {M1, M2} and {M3, M4}, not within them.</li>
+      <li><strong>NULL / pre-processing policy outweighs method choice by ~10×</strong> (§11.4) and
+        must be decided first.</li>
+      <li><strong>31% of encounters arrive already ventilated</strong>, and the correct behaviour the
+        issue body asks for &mdash; an intubation flagged with unknown start time &mdash;
+        <strong>is implemented by nobody</strong>.</li>
+      <li><strong>M3 alone provides outcome semantics; M2 alone provides an explicit stitching
+        policy.</strong> These are complementary and could be combined regardless of which transition
+        rule wins.</li>
+    </ol>
+
+    <h3>Open decisions for the consortium</h3>
+    <ul class="checks">
+      <li class="first"><span class="box">☐</span><span class="ref">§9.1</span><span>NULL / forward-fill policy<span class="first-tag">decide first</span></span></li>
+      <li class="first"><span class="box">☐</span><span class="ref">§9.2</span><span>pre- vs post-waterfall<span class="first-tag">decide first</span></span></li>
+      <li><span class="box">☐</span><span class="ref">§9.3</span><span>tracheostomy handling</span></li>
+      <li><span class="box">☐</span><span class="ref">§9.4</span><span>arrived-intubated: censor, event, or flag</span></li>
+      <li><span class="box">☐</span><span class="ref">§9.5</span><span>zero-duration episodes: suppress or flag</span></li>
+      <li><span class="box">☐</span><span class="ref">§9.6</span><span>stitching: package-level or project-level</span></li>
+      <li><span class="box">☐</span><span class="ref">§9.7</span><span>outcome classification: first extubation or all</span></li>
+      <li><span class="box">☐</span><span class="ref">§9.8</span><span>event anchoring: last-IMV or first-non-IMV</span></li>
+      <li><span class="box">☐</span><span class="ref">§9.9</span><span>missing extubation resolution &mdash; uncontested, adopt</span></li>
+      <li><span class="box">☐</span><span class="ref">§8</span><span>M5 device-free sites: fallback, universal, or out of scope</span></li>
+      <li><span class="box">☐</span><span class="ref">§12</span><span>ratify Tier 0 gate thresholds</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══ APPENDIX ══════════════════════════════════════════════════════ -->
+<section id="sa">
+  <div class="col">
+    <span class="sec-num">Appendix A</span>
+    <h2>Source material, verbatim</h2>
+    <p>Preserved so that nothing is lost in the normalisation above. The full verbatim SQL, Python and
+      quoted prose &mdash; including <code>@wtliao319</code>'s complete
+      <code>find_intubation_extubation_events()</code> implementation &mdash; is in the companion
+      Markdown file, <code>docs/intubation_extubation_methods.md</code>, Appendix&nbsp;A.</p>
+
+    <h3>A.1 &mdash; M1, issue body <code>@vaishvikc</code></h3>
+    <blockquote>
+      <p><strong>Current Logic.</strong> We use the respiratory support table with a longitudinal
+      "waterfall" approach: group by hospitalization; sort by recorded datetime; forward-fill
+      <code>device_category</code>; generate lag and lead columns.</p>
+      <p><strong>Intubation:</strong> <code>is_no_imv</code> (lag 2) · <code>is_no_imv</code> (lag 1) ·
+      <code>is_imv</code> (current) · <code>is_imv</code> (lead 1) · <code>is_imv</code> (lead 2)</p>
+      <p><strong>Extubation:</strong> <code>is_imv</code> (lag 2) · <code>is_imv</code> (lag 1) ·
+      <code>is_imv</code> (current) · <code>is_no_imv</code> (lead 1) · <code>is_no_imv</code> (lead 2)</p>
+    </blockquote>
+    <p>Requested outputs: device and mode before/after both events; location category at each; episode
+      ID; intubation start datetime; extubation end datetime; time from intubation to extubation.
+      Stated edge cases: patients arriving already on IMV
+      (<em>"logic is needed to flag or handle these episodes separately"</em>); zero/near-zero delta;
+      no extubation identified → discharged on IMV / death on IMV / unknown.</p>
+
+    <h3>A.4 &mdash; Cathy's blip edge case <code>@cloverbunny</code> · 2026-02-12</h3>
+  </div>
+
+  <div class="tw" style="max-width:600px"><table>
+    <thead><tr><th>timestamp</th><th>device_name</th><th>device_category</th></tr></thead>
+    <tbody>
+      <tr class="imvrow"><td>2024-01-01 08:00</td><td>Ventilator</td><td class="k">IMV</td></tr>
+      <tr><td>2024-01-01 08:20</td><td>Ventilator</td><td class="k">IMV</td></tr>
+      <tr><td>2024-01-01 08:50</td><td>Ventilator</td><td class="k">IMV</td></tr>
+      <tr class="hi"><td>2024-01-01 09:10</td><td>Bi-PAP</td><td class="k">NIPPV</td></tr>
+      <tr class="hi"><td>2024-01-01 09:40</td><td>Ventilator</td><td class="k">IMV</td></tr>
+      <tr><td>2024-01-01 10:00</td><td>Bi-PAP</td><td class="k">NIPPV</td></tr>
+      <tr><td>2024-01-01 10:30</td><td>Bi-PAP</td><td class="k">NIPPV</td></tr>
+      <tr><td>2024-01-01 10:50</td><td>HiFlo nasal cannula - heat</td><td class="k">High Flow NC</td></tr>
+      <tr><td>2024-01-01 11:20</td><td>HiFlo nasal cannula - heat</td><td class="k">High Flow NC</td></tr>
+      <tr><td>2024-01-01 11:40</td><td>HiFlo nasal cannula - heat</td><td class="k">High Flow NC</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <h3>A.5 &mdash; M5, <code>@vaishvikc</code> · 2026-03-02</h3>
+    <blockquote>
+      <p><strong>Learnings from CHEST run.</strong> Some sites have no facemask/FHNC/NC device charted,
+      but LPM is set. This suggests extubation happened, but no device name was documented.</p>
+      <p><strong>Additional ideas to test:</strong> (1) Review two charts where LPM transitions from IMV
+      to two separate LPM chartings. (2) Will's idea: check for cessation of all observed values across
+      two observed rows as a potential signal.</p>
+    </blockquote>
+
+    <h3>Appendix B &mdash; requested output schema</h3>
+    <p>One row per IMV episode, consolidated from the issue body plus fields implied by M2 and M3.</p>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>Field</th><th>Source</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><code>hospitalization_id</code></td><td>respiratory_support</td><td></td></tr>
+      <tr><td class="k"><code>episode_id</code></td><td>derived</td><td>sequential within hospitalization</td></tr>
+      <tr><td class="k"><code>intubation_dttm</code></td><td>respiratory_support</td><td>null when <code>arrived_intubated</code></td></tr>
+      <tr><td class="k"><code>extubation_dttm</code></td><td>respiratory_support</td><td>null when no extubation detected</td></tr>
+      <tr><td class="k"><code>imv_duration_hours</code></td><td>derived</td><td><span class="tag">depends on anchoring §9.8</span></td></tr>
+      <tr><td class="k"><code>device_before/after_intubation</code></td><td>respiratory_support</td><td></td></tr>
+      <tr><td class="k"><code>mode_before/after_intubation</code></td><td>respiratory_support</td><td><span class="tag">often null §2</span></td></tr>
+      <tr><td class="k"><code>device_before/after_extubation</code></td><td>respiratory_support</td><td></td></tr>
+      <tr><td class="k"><code>mode_before/after_extubation</code></td><td>respiratory_support</td><td><span class="tag">often null</span></td></tr>
+      <tr><td class="k"><code>location_category_at_intubation / _at_extubation</code></td><td>adt</td><td>join on time-in-location interval</td></tr>
+      <tr class="hi"><td class="k"><code>arrived_intubated</code></td><td>derived</td><td>§9.4 &mdash; requested by the issue body, implemented by nobody</td></tr>
+      <tr><td class="k"><code>is_reintubation</code></td><td>derived</td><td>M2</td></tr>
+      <tr><td class="k"><code>hours_since_prior_extubation</code></td><td>derived</td><td>M2 &mdash; enables project-level stitching</td></tr>
+      <tr><td class="k"><code>no_extubation_reason</code></td><td>hospitalization</td><td><code>discharged_on_imv</code> / <code>death_on_imv</code> / <code>unknown</code></td></tr>
+      <tr><td class="k"><code>extubation_outcome</code></td><td>derived</td><td>M3 &mdash; <code>success</code> / <code>failed</code> / <code>wlst</code></td></tr>
+      <tr><td class="k"><code>tracheostomy_placed</code> / <code>_dttm</code></td><td>respiratory_support</td><td>M3, §9.3</td></tr>
+      <tr><td class="k"><code>zero_duration_flag</code></td><td>derived</td><td>§9.5</td></tr>
+      <tr><td class="k"><code>method_id</code></td><td>—</td><td>which definition produced this row; required for the comparison harness</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <h3>Appendix C &mdash; reproducing the figures</h3>
+    <p>
+      All counts, traces and agreement statistics in §10&ndash;§11 were produced by implementing
+      M1&ndash;M4 exactly as formalised in §4&ndash;§7 and running them over
+      <code>clif_demo/clif_respiratory_support.parquet</code> (3,325 rows, 110 hospitalizations).
+      The verification script is <strong>not</strong> part of the project deliverable &mdash; the
+      production implementation belongs to the comparison harness specified separately.
+    </p>
+    <div class="note warn">
+      <p><b>Known limitations of these figures.</b> The CLIF demo set is small, MIMIC-derived, and not
+      representative of consortium site data &mdash; in particular its 31% arrived-intubated rate and
+      23.5% NULL device rate will differ elsewhere. Figures show the <em>shape</em> of divergence; they
+      do not rank methods. Ranking requires §12 run at real sites.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+</div>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail a'));
+  var map = {};
+  links.forEach(function(a){
+    var el = document.querySelector(a.getAttribute('href'));
+    if (el) map[el.id] = a;
+  });
+  if (!('IntersectionObserver' in window)) return;
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (e.isIntersecting){
+        links.forEach(function(l){ l.classList.remove('on'); });
+        if (map[e.target.id]) map[e.target.id].classList.add('on');
+      }
+    });
+  }, { rootMargin: '-10% 0px -80% 0px', threshold: 0 });
+  Object.keys(map).forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) io.observe(el);
+  });
+})();
+</script>
