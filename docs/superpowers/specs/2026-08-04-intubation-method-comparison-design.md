@@ -252,14 +252,124 @@ Also reports the **code capture rate**: the fraction of the cohort carrying any 
 
 ### `07_agreement.py`
 
-**Tier A — do the methods find the same patients?**
-Pairwise 4×4 Jaccard and Cohen's κ across `SED`, `PARA`, `DEV`, `INF`. An upset plot of detection sets. A histogram of how many methods fired per hospitalization (0–4).
+> **All numbers in the tables below are illustrative shape, not results.** They exist to fix the output format so the notebook can be written and reviewed before any data is run. Real values come from executing the pipeline.
 
-**Tier B — how is charting distributed in time?**
-Offset distributions over [−180, +180] minutes for `SED`, `PARA`, `INF` on a shared axis, from the `_signals` tables. Reported per method: median, IQR, % of signals before t₀ vs after. `DEV` is excluded from this tier by construction.
+#### Step 0 — the joined analytic table
 
-**Tier C — reference check.**
-Per method, a 2×2 against `cpt_present` and separately against `icd_present`, yielding sensitivity, PPV and F1 — reported **after** the code capture rate, never before it.
+The notebook first validates the schema of each `method_*_encounter.parquet` against §6, then joins all four plus `reference_codes.parquet` on `hospitalization_id`. Every cohort hospitalization appears exactly once. This single wide table is the input to all three tiers.
+
+```
+hosp_id  | SED  PARA  DEV  INF | sed_off  para_off  inf_off | cpt  icd
+---------+---------------------+----------------------------+----------
+ 1001    |  1     1    1    1  |   -4.0     -7.0      +38.0  |  1    1
+ 1002    |  1     1    1    0  |   -9.0     -6.0        NaN  |  1    1
+ 1003    |  1     0    1    1  |  -12.0      NaN      +21.0  |  0    1
+ 1004    |  0     0    0    1  |    NaN      NaN     +115.0  |  0    0
+ 1005    |  1     1    0    1  |   -3.0     -5.0      +44.0  |  1    0
+ ...     |                     |                            |
+---------+---------------------+----------------------------+----------
+ N* rows, one per cohort hospitalization
+ offsets in minutes, signed, relative to t₀; NaN where not detected
+ DEV offset omitted — 0 by construction (§7)
+```
+
+#### Tier A — do the methods find the same patients?
+
+**A.1 Detection rate per method.** The marginal, before any pairing.
+
+| method | detected | n | rate |
+|---|---|---|---|
+| `SED` | ✓ | 1 842 | 0.83 |
+| `PARA` | ✓ | 1 431 | 0.65 |
+| `DEV` | ✓ | 1 202 | 0.54 |
+| `INF` | ✓ | 1 067 | 0.48 |
+| — | cohort N* | 2 214 | 1.00 |
+
+**A.2 Pairwise agreement, 4×4.** One row per unordered pair. `both` / `only A` / `only B` / `neither` are the four cells of the 2×2, so every row is a complete contingency table and κ is recomputable from it by hand — a deliberate auditability property.
+
+| pair | both | only A | only B | neither | Jaccard | Cohen κ |
+|---|---|---|---|---|---|---|
+| `SED` × `PARA` | 1 388 | 454 | 43 | 329 | 0.74 | 0.51 |
+| `SED` × `DEV` | 1 043 | 799 | 159 | 213 | 0.52 | 0.14 |
+| `SED` × `INF` | 918 | 924 | 149 | 223 | 0.46 | 0.11 |
+| `PARA` × `DEV` | 902 | 529 | 300 | 483 | 0.52 | 0.25 |
+| `PARA` × `INF` | 811 | 620 | 256 | 527 | 0.48 | 0.24 |
+| `DEV` × `INF` | 704 | 498 | 363 | 649 | 0.45 | 0.26 |
+
+**A.3 Concordance histogram.** How many of the four fired on the same hospitalization.
+
+| methods firing | n | % |
+|---|---|---|
+| 0 | 118 | 5.3 |
+| 1 | 341 | 15.4 |
+| 2 | 502 | 22.7 |
+| 3 | 611 | 27.6 |
+| 4 | 642 | 29.0 |
+
+The `0` row is the one to read first: hospitalizations that are in the cohort — so they *have* an IMV row by construction — where no method fired at all. That count is a direct measure of how much intubation goes undetected by every signal simultaneously.
+
+**A.4 Upset plot** of the 15 non-empty detection-set combinations, sorted by frequency. Plot only; the underlying counts are A.3 broken out by which specific methods fired.
+
+#### Tier B — how is charting distributed in time?
+
+Computed from the `method_*_signals.parquet` long tables, so a hospitalization with three sedative doses in the window contributes three rows. `DEV` is absent from this tier by construction (§7).
+
+**B.1 Offset summary**, minutes relative to t₀, negative = charted before the first IMV row.
+
+| method | n signals | median | IQR | % before t₀ | % within ±30 min |
+|---|---|---|---|---|---|
+| `SED` | 3 419 | −6.0 | −18.0 … −2.0 | 88.1 | 79.4 |
+| `PARA` | 1 655 | −5.0 | −11.0 … −2.0 | 94.3 | 91.0 |
+| `INF` | 1 210 | +41.0 | +12.0 … +96.0 | 17.2 | 34.8 |
+
+**B.2 Offset distribution plot.** Overlaid histograms on a shared [−180, +180] minute axis, one series per method, with t₀ marked at zero.
+
+```
+        −180      −90        0        +90      +180  min
+          |        |         |         |         |
+  PARA          ▁▂▅█▇▃▁      │
+  SED         ▁▂▄▇█▆▃▂▁      │
+  INF                        │ ▂▄▅▄▃▂▂▁▁▁
+                             ▲ t₀
+```
+
+The clinical read: `PARA` and `SED` should cluster tightly just *before* t₀ — the meds are given to accomplish the intubation. `INF` should sit *after* — sedation is continued once the patient is on the vent. A method whose mass falls on the wrong side of t₀ is detecting something other than the intubation.
+
+#### Tier C — reference check
+
+**C.1 Code capture rate, reported first.** Every metric in C.2 is uninterpretable without it.
+
+| reference | n with code | capture rate |
+|---|---|---|
+| `CPT` 31500 | 1 106 | 0.50 |
+| `ICD` (any listed) | 1 794 | 0.81 |
+| either | 1 903 | 0.86 |
+
+**C.2 Per-method scoring**, one block per reference. Reference-positive is treated as the condition; a method's non-detection in a reference-positive encounter is a false negative.
+
+| method | vs | TP | FP | FN | TN | sensitivity | PPV | F1 |
+|---|---|---|---|---|---|---|---|---|
+| `SED` | `ICD` | 1 588 | 254 | 206 | 166 | 0.89 | 0.86 | 0.87 |
+| `PARA` | `ICD` | 1 297 | 134 | 497 | 286 | 0.72 | 0.91 | 0.80 |
+| `DEV` | `ICD` | 1 044 | 158 | 750 | 262 | 0.58 | 0.87 | 0.70 |
+| `INF` | `ICD` | 901 | 166 | 893 | 254 | 0.50 | 0.84 | 0.63 |
+
+Repeated as a second block against `CPT`. Both blocks carry a standing caveat in the notebook output: **codes establish presence, never timing** (catalog §12.2), and where capture rate is low the reference is reported as uninformative rather than scored.
+
+#### Outputs written by `07`
+
+| File | Contents |
+|---|---|
+| `agreement_detection_rates.csv` | A.1 |
+| `agreement_pairwise.csv` | A.2 |
+| `agreement_concordance.csv` | A.3 |
+| `agreement_upset.png` | A.4 |
+| `timing_offset_summary.csv` | B.1 |
+| `timing_offset_distribution.png` | B.2 |
+| `reference_capture_rate.csv` | C.1 |
+| `reference_scoring.csv` | C.2 |
+
+All go to `output/final_no_phi/` and are subject to the n ≥ 10 minimum cell size in §9 — any row of any table with a cell below 10 is suppressed rather than published.
 
 ---
 
