@@ -20,14 +20,15 @@ One further source serves as a **partial gold-truth reference**, not as a compar
 
 | ID | Signal | Whiteboard item | Source table |
 |---|---|---|---|
-| `CPT` | CPT 31500 present in the hospitalization | (c1) | `patient_procedures` |
+| `CPT` | CPT 31500 present in the encounter | (c1) | `patient_procedures` |
 
 The deliverable answers two questions: **do these signals identify the same patients**, and **how is their charting distributed in time relative to the intubation**.
 
 ### Scope
 
 - **Intubation only.** Extubation is out of scope for this build; the catalog already covers it and it can be a later phase.
-- **First IMV episode only.** One index event per hospitalization. Reintubation, episode stitching, and outcome classification are out of scope.
+- **The analytic unit is the stitched encounter**, not `hospitalization_id`. `01_cohort.py` runs `stitch_encounters` first and everything downstream keys on `encounter_block` — see §5.1 for why this is a correctness requirement rather than a convenience.
+- **First IMV episode only.** One index event per encounter. Reintubation, *intubation*-episode stitching, and outcome classification are out of scope. (Encounter stitching is in scope and happens first; the two senses of "stitching" are unrelated.)
 - **Intermittent medications only.** Both medication methods read `medication_admin_intermittent`. The continuous-infusion signal (whiteboard item 3) is out of scope — see §11.
 - **CPT is the sole reference.** ICD procedure codes are out of scope — see §11.
 - **Testing target is MIMIC**, with the pipeline written to run at any consortium site via config.
@@ -44,7 +45,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | D1a | **The continuous-infusion method (`INF`) is removed.** | It detects a *state* — "this patient is on sedation, therefore probably ventilated" — not the intubation event. Its signal necessarily lags t₀ and cannot distinguish an intubation from ongoing ICU sedation, so it would contribute detections without contributing evidence about timing. |
 | D1b | **The ICD reference is removed; CPT 31500 is the sole reference.** | Removing ICD-10-PCS while keeping ICD-9 would leave a reference that is effectively dead for a 2018–2025 cohort, so the reference is dropped whole rather than partially. One reference also removes the question of what to do when CPT and ICD disagree. |
 | D2 | **Device signal is one notebook using the M2 symmetric 2/2 rule**, not four notebooks for M1–M4. | The M1–M4 spread is already quantified in the catalog. Re-running it here would measure a known result and obscure the new one. |
-| D3 | **Analytic unit is one row per hospitalization**, anchored on t₀ = first charted IMV row. | Collapses event matching entirely: no greedy pairing, no order-dependence, no tolerance windows. Agreement becomes a plain binary table; timing becomes offset distributions on a shared axis. |
+| D3 | **Analytic unit is one row per stitched `encounter_block`**, anchored on t₀ = first charted IMV row in the block. | Collapses event matching entirely: no greedy pairing, no order-dependence, no tolerance windows. Agreement becomes a plain binary table; timing becomes offset distributions on a shared axis. |
 | D4 | **Detection window is t₀ ± 3 hours**, symmetric. | Set by the study lead. Every method asks the same question over the same interval, so differences are attributable to the signal and not to the window. |
 | D5 | **Respiratory pre-processing is fixed: post-waterfall, single policy.** No pre/post grid. | Catalog §12.4 requires the policy be settled before methods are compared. Fixing it in one place makes the agreement numbers mean exactly one thing; changing it later is a config edit, not a rewrite. |
 | D6 | **Waterfall runs with `bfill=False`.** | `clifpy/utils/waterfall.py:12` — already the library default; `:58` confirms forward-fill only when False. Backfilling could propagate a device backwards in time and manufacture an IMV row earlier than the first real charting, sliding t₀ and with it every ±3h window. |
@@ -56,6 +57,10 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | D12 | **Ranks deduplicate by `med_category`: last administration before t₀, first after, ranked nearest-first.** | Nearest-first makes rank 1 the most clinically proximate entry, so rank 1 is comparable across patients. Dedup removes a real statistical artifact — under the previous all-signals contract a patient given six fentanyl doses contributed six observations to the timing distribution and dominated it. |
 | D13 | **Ranking is over each method's own medication list only**, not over all charted medications. | Keeps every method strictly about its own signal, so the ranked output elaborates what the method detects rather than describing the ward. Consequence: rank counts are bounded by list size, so no rank cap is specified. |
 | D14 | **Two artifacts per method: canonical `_ranked.json` plus a joinable `_encounter.parquet`.** The raw undeduped signals table is dropped. | JSON carries nested ranks without null padding; parquet is what §8 can join at scale. The undeduped table had no remaining consumer once Tier B moved to ranked entries, and keeping an unconsumed artifact invites it to drift. |
+| D15 | **Encounters are stitched before any cohort criterion is applied**, with `stitch_hours = 6`. | An ED intubation and the inpatient IMV charting that follows can carry different `hospitalization_id`s. Unstitched, `PARA` fires on one and `DEV` on the other and the agreement matrix records a disagreement that is purely administrative. Stitching last would mean filtering on a unit the study does not use. |
+| D16 | **Stitching is preceded by a patient-level IMV-ever pre-filter.** | Stitching joins the full hospitalization and ADT tables and iterates to a fixed point; running it on every patient at a site is wasteful when every cohort criterion requires an IMV row. The filter is **patient**-level, not hospitalization-level, precisely because the IMV may be charted under a different `hospitalization_id` than the one anchoring the block — filtering hospitalizations here would discard the rows stitching exists to reunite. Changes no result (§5.2). |
+| D17 | **Location criterion is ED *or* ICU, evaluated across the whole stitched block.** | Set by the study lead. ED-or-ICU is what admits the ED intubation that never reaches an ICU and the ward patient intubated on ICU transfer; requiring ICU alone would drop the first group, which is exactly where the medication and device signals are most likely to diverge. |
+| D18 | **Tracheostomy in the first 24 h excludes the encounter, tested on two signals: `tracheostomy = True` *or* `device_category = 'Trach Collar'`.** | mCIDE defines `IMV` as "Endotracheal Tube Ventilation, **Tracheostomy Ventilation**" — a trach patient on a vent charts as plain `IMV` and would otherwise enter as a false intubation with no induction or paralytic to find. Either signal alone leaks: the boolean misses sites that only chart the device, and `Trach Collar` is a weaning device that a continuously-ventilated trach patient may never receive. |
 
 ------------------------------------------------------------------------
 
@@ -63,7 +68,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 
 ```         
 code/
-  01_cohort.py            cohort + CONSORT + waterfall + t₀ + window bounds
+  01_cohort.py            encounter stitch + cohort + CONSORT + waterfall + t₀ + window bounds
   02_method_sedative.py   ┐  each fully self-contained:
   03_method_paralytic.py  │  config → cohort_index + ONE CLIF table
   04_method_device.py     ┘  → own logic → artifacts → assert own schema
@@ -75,7 +80,9 @@ The only things crossing a notebook boundary are **artifacts on disk** and the *
 
 All notebooks are marimo notebooks stored as `.py`, run as `uv run python code/NN_name.py`, matching the existing consortium convention.
 
-**Dataframe library:** polars throughout, per the root `pyproject.toml`. `process_resp_support_waterfall` takes a pandas DataFrame, so `01_cohort.py` converts to pandas immediately before that call and back to polars immediately after. That is the only pandas boundary in the project.
+Only `01_cohort.py` knows that `hospitalization_id` exists as a unit. It resolves stitching once and publishes `list_hospitalization_id` in `cohort_index.parquet` as the bridge key; every downstream notebook explodes that list to reach the CLIF tables and aggregates straight back to `encounter_block`. No notebook re-derives a block.
+
+**Dataframe library:** polars throughout, per the root `pyproject.toml`. Two clifpy functions take and return pandas — `stitch_encounters` and `process_resp_support_waterfall` — so `01_cohort.py` converts to pandas immediately before each call and back to polars immediately after. Those are the only two pandas boundaries in the project, both inside `01`.
 
 ------------------------------------------------------------------------
 
@@ -87,50 +94,124 @@ The code must be readable by a clinician-researcher reviewing the definition, no
 - **No helper functions across notebooks**, and inside a notebook only where a step is genuinely repeated. Prefer an explicit repeated expression over an abstraction that hides the definition being tested.
 - **Name intermediate columns explicitly** rather than chaining long expressions. A reviewer must be able to inspect `is_in_window`, `is_target_med`, `delta_minutes`, `rank` as real columns before they are collapsed into the JSON.
 - **No clever vectorisation** where a plain filter and join expresses the same thing. Cohort sizes are small enough that clarity wins over speed.
-- **Every filter prints its row and hospitalization count** before and after, so the CONSORT and the method yields are visible while running, not only in the final artifact.
-- **Each method notebook ends with an explicit schema assertion block** against §6. Copy-pasted deliberately across the four — duplication here is the point of D8.
+- **Every filter prints its row, encounter-block and patient count** before and after, so the CONSORT and the method yields are visible while running, not only in the final artifact.
+- **Each method notebook ends with an explicit schema assertion block** against §6. Copy-pasted deliberately across the three — duplication here is the point of D8.
 - **No silent defaults.** Every parameter that affects a result is read from `config.json` and echoed at the top of the notebook.
 
 ------------------------------------------------------------------------
 
 ## 5. Cohort and CONSORT — `01_cohort.py`
 
-### Inclusion, applied in this order
+**The analytic unit is the stitched `encounter_block`, not `hospitalization_id`.** Everything downstream keys on it.
 
-```         
-  all hospitalizations                                      N
-    └─ age_at_admission ≥ 18                              −n₁
-        └─ date filter (skipped when site is MIMIC)       −n₂
-            └─ ≥1 ADT row with location_category = 'icu'  −n₃
-                └─ ≥1 resp row with device_category='imv' −n₄
-                    └─ ANALYTIC COHORT                     N*
+### 5.1 Why stitching comes first
+
+`stitch_encounters` merges hospitalizations separated by less than `stitch_hours` into a single `encounter_block`, which is how an ED presentation and the inpatient admission that follows it become one encounter.
+
+This study is close to a worst case without it. A patient given rocuronium in the ED and first charted on IMV after transfer has `PARA` firing under one `hospitalization_id` and `DEV` under another. Unstitched, that reads as **two methods disagreeing** when it is one intubation split across an administrative boundary — and every disagreement statistic in §8 inherits the artifact. Stitching is a correctness requirement here, not a convenience.
+
+### 5.2 Step 0 — the IMV-ever pre-filter
+
+Stitching is expensive: it joins the full hospitalization and ADT tables and iterates to a fixed point. Restrict it to patients who could possibly qualify.
+
+```
+  1.  load respiratory_support   columns=['hospitalization_id']
+                                 filters={'device_category': ['IMV']}
+  2.  distinct hospitalization_id  →  join hospitalization  →  distinct patient_id
+  3.  P_imv = patients with ≥1 IMV row anywhere in their record
 ```
 
-Order matters: the CONSORT reports the marginal loss at each step in this sequence, so the sequence is part of the definition.
+Only `hospitalization` and `adt` rows for `P_imv` are loaded and stitched. This is a **pure efficiency filter and changes no result**: every criterion below requires an IMV row, so a patient with none could never enter the cohort by any path.
 
-### Date filter
+The filter is deliberately patient-level, not hospitalization-level. A patient's IMV may be charted under a different `hospitalization_id` than the one that will anchor their encounter block, so filtering hospitalizations here would discard rows that stitching is supposed to reunite.
 
-`site_name.lower() == "mimic"` → **no date restriction** (MIMIC timestamps are date-shifted, so a calendar filter is meaningless). Otherwise → `admission_dttm` within `date_start` … `date_end`, default `2018-01-01` … `2025-12-31`.
+### 5.3 Stitching
 
-### Waterfall and t₀
+`stitch_encounters(hospitalization, adt, time_interval=stitch_hours)` with `stitch_hours = 6` from config. Takes pandas, returns pandas — the second and last pandas boundary in the project (§3).
 
-1.  Subset `respiratory_support` to cohort hospitalizations.
+Two properties of the returned block, both read from `clifpy/utils/stitching_encounters.py:132-141`, matter downstream:
+
+| Field | Aggregation | Consequence |
+|---|---|---|
+| `admission_dttm` | `min` across the block | The block clock starts at the earliest admission — this is what the 24h trach window anchors on |
+| `discharge_dttm` | `max` across the block | |
+| `age_at_admission` | `last` | Age comes from the *last* hospitalization in the block, while the clock starts at the first. Immaterial across a 6h gap, but it is the value the adult criterion tests |
+| `list_hospitalization_id` | sorted unique | **The bridge key.** Method notebooks explode this to filter CLIF tables, then aggregate back to `encounter_block` |
+
+### 5.4 CONSORT
+
+Reported at **every** step, each with encounter-block and patient counts, so no filter is silent.
+
+```         
+  all encounter_blocks for IMV-ever patients            N
+    │
+    ├─ INCLUSIONS
+    │   └─ age_at_admission ≥ 18                       −n₁
+    │       └─ date filter (skipped when site is MIMIC) −n₂
+    │           └─ ≥1 ADT row, location_category
+    │              ∈ {ed, icu}                          −n₃
+    │               └─ ≥1 resp row, device_category
+    │                  = 'IMV'                          −n₄
+    │
+    └─ EXCLUSION
+        └─ tracheostomy or trach collar within 24h
+           of block admission_dttm                      −n₅
+             └─ ANALYTIC COHORT                          N*
+```
+
+Order matters: CONSORT reports the marginal loss at each step in this sequence, so the sequence is part of the definition. Inclusions are applied before the exclusion so that n₅ counts only patients who would otherwise have qualified.
+
+**Step 0** is itself a CONSORT row — total patients and encounter blocks in the source data, then the count surviving the IMV-ever filter — so the reduction from the full table is visible rather than assumed.
+
+### 5.5 Criterion detail
+
+**Adult** — `age_at_admission ≥ min_age` (default 18) on the stitched block. Note the aggregation caveat from §5.3: `age_at_admission` is taken from the *last* hospitalization in the block while the clock starts at the first. Across a 6h gap the two cannot differ, but the criterion is stated on the value actually tested rather than on an idealised one.
+
+**Date filter** — `site_name.lower() == "mimic"` → **no date restriction** (MIMIC timestamps are date-shifted, so a calendar filter is meaningless). Otherwise → block `admission_dttm` within `date_start` … `date_end`, default `2018-01-01` … `2025-12-31`.
+
+**Location** — at least one ADT row anywhere in the block with `location_category ∈ {ed, icu}`. Both are valid mCIDE values. This is deliberately **ED *or* ICU, not ICU alone**: a substantial share of intubations happen in the ED, and requiring ICU would systematically drop the patients whose induction medications are best documented.
+
+**IMV** — at least one `respiratory_support` row in the block with `device_category = 'IMV'`. Evaluated on the **raw** table, before the waterfall, so cohort membership never depends on an imputed device.
+
+**Tracheostomy exclusion** — exclude the block if, within `[admission_dttm, admission_dttm + trach_window_hours]` (default 24 h), any `respiratory_support` row satisfies **either**:
+
+```
+   tracheostomy = True                 the boolean flag
+   OR
+   device_category = 'Trach Collar'    a distinct mCIDE category
+```
+
+> **Both signals are required.** mCIDE defines `Trach Collar` as its own `device_category`, separate from the boolean `tracheostomy` column — and `IMV`'s own mCIDE description reads *"Endotracheal Tube Ventilation, **Tracheostomy Ventilation**"*, so a patient ventilated through a tracheostomy is charted as plain `IMV`. Testing only one signal leaks trach patients into a cohort about intubation. This is catalog §9.3, which no method in the catalog handled.
+
+The `trach_window_hours` clock runs from the **stitched block's** `admission_dttm` (the minimum across the block), not from the individual hospitalization's — otherwise a trach identified in the ED presentation would escape the window of the inpatient admission it was stitched to.
+
+### 5.6 Waterfall and t₀
+
+1.  Subset `respiratory_support` to all hospitalizations listed in the cohort's `list_hospitalization_id`.
 2.  Run `process_resp_support_waterfall(..., bfill=False)`.
-3.  **t₀ = earliest `recorded_dttm` where `device_category == 'imv'`**, per hospitalization.
-4.  `window_start = t₀ − 3h`, `window_end = t₀ + 3h`.
+3.  Map rows to `encounter_block` via `list_hospitalization_id`, then order by `recorded_dttm` **within the block**.
+4.  **t₀ = earliest `recorded_dttm` where `device_category == 'IMV'`**, per `encounter_block`.
+5.  `window_start = t₀ − window_hours`, `window_end = t₀ + window_hours`.
 
-### QC statistic
+Step 3 is what makes stitching effective: the waterfall runs per `hospitalization_id`, but the transition sequence `DEV` evaluates is assembled across the whole block in time order.
 
-Report `Δ = waterfall_t₀ − raw_t₀` (median, IQR, % nonzero). D6 makes a negative Δ very unlikely, but the device/mode heuristics and the hourly `HH:59:59` scaffold run regardless of `bfill`, so this is cheap insurance that t₀ still corresponds to real charting. A nonzero negative Δ in any meaningful fraction of the cohort invalidates the offset distributions and must be investigated before results are interpreted.
+### 5.7 QC statistics
 
-### Outputs
+| Stat | Purpose |
+|---|---|
+| `Δ = waterfall_t₀ − raw_t₀` — median, IQR, % nonzero | D6 makes a negative Δ very unlikely, but the device/mode heuristics and the hourly `HH:59:59` scaffold run regardless of `bfill`. A negative Δ in any meaningful fraction invalidates the offset distributions and must be resolved before results are read. |
+| Blocks per encounter — distribution of `len(list_hospitalization_id)` | Shows how much stitching actually did. If nearly every block is a single hospitalization, stitching is not the mechanism it was added for and that should be known before interpreting §8. |
+| % of blocks whose t₀ falls in a *different* `hospitalization_id` than the block's first | The direct measure of the artifact §5.1 exists to remove. |
+
+### 5.8 Outputs
 
 | File | Contents |
-|------------------------------------|------------------------------------|
-| `cohort.parquet` | one row per included hospitalization, with demographics |
-| `cohort_resp_waterfall.parquet` | waterfalled respiratory rows for cohort hospitalizations |
-| `cohort_index.parquet` | `hospitalization_id`, `t0_dttm`, `window_start`, `window_end` |
-| `consort.json` / `consort.csv` | step label, n remaining, n excluded |
+|---|---|
+| `cohort.parquet` | one row per included `encounter_block`, with demographics and `list_hospitalization_id` |
+| `cohort_resp_waterfall.parquet` | waterfalled respiratory rows for cohort blocks, carrying `encounter_block` |
+| `cohort_index.parquet` | `encounter_block`, `patient_id`, `intubation_episode_id`, `cohort_run_id`, `list_hospitalization_id`, `t0_dttm`, `window_start`, `window_end` — the single input every method reads |
+| `consort.json` / `consort.csv` | step label, n encounter blocks remaining, n patients remaining, n excluded |
+| `cohort_qc.csv` | the three statistics in §5.7 |
 
 ------------------------------------------------------------------------
 
@@ -140,9 +221,17 @@ Each method is a **profiler**, not merely a detector. Anchored on t₀, it repor
 
 ### 6.1 The intubation episode
 
-Every artifact is keyed on `intubation_episode_id`, formed as `{hospitalization_id}_E1`.
+Every artifact is keyed on `intubation_episode_id`, formed as `{encounter_block}_E1`.
 
-Because this build is scoped to the first IMV episode only (§1), the suffix is **always `E1`** and there is exactly one episode per cohort hospitalization. The suffix exists so that widening scope to reintubation later adds `_E2` rows without changing any key, join or schema.
+Because this build is scoped to the first IMV episode only (§1), the suffix is **always `E1`** and there is exactly one episode per cohort encounter. The suffix exists so that widening scope to reintubation later adds `_E2` rows without changing any key, join or schema.
+
+`encounter_block` is an int32 seeded from the sorted row index and propagated to a fixed point (`clifpy/utils/stitching_encounters.py:119-131`), so it is unique across the whole site — the library itself joins on it alone at `:151`. It is a valid standalone key.
+
+It is nonetheless **not stable across runs**: the value is a row position, so a site re-extract that adds or removes a hospitalization renumbers every block. Three consequences:
+
+- The episode id is written once into `cohort_index.parquet` and read verbatim downstream. No notebook reconstructs it.
+- `01` asserts the key is unique before writing.
+- `01` also writes a **`cohort_run_id`** — the ISO timestamp of the run — into `cohort_index.parquet`. Every method copies it into its encounter parquet unchanged, and `06_agreement.py` asserts all inputs carry the same value. Without it, joining a `SED` artifact from one cohort run to a `DEV` artifact from another produces a table that is silently wrong: the ids match, the rows are real, and they describe different patients. One column and one assertion close that off.
 
 ### 6.2 The ranking rule
 
@@ -170,7 +259,8 @@ One JSON object per intubation episode, emitted by the two **medication** method
 
 ```json
 {
-  "hospitalization_id": "1001",
+  "encounter_block": 1001,
+  "patient_id": "P042",
   "intubation_episode_id": "1001_E1",
   "method_id": "SED",
   "imv_dttm": "2130-04-12T03:14:00",
@@ -196,18 +286,20 @@ One JSON object per intubation episode, emitted by the two **medication** method
 }
 ```
 
-`delta_minutes` is signed: negative before t₀, positive after. Both arrays are empty when nothing was found; the object is still written, so the file has one record per cohort hospitalization.
+`delta_minutes` is signed: negative before t₀, positive after. Both arrays are empty when nothing was found; the object is still written, so the file has one record per cohort encounter.
 
 **`DEV` does not emit this file.** It has no medication signal, so an empty-array record would be a fiction rather than a fact. This asymmetry is deliberate and documented rather than papered over — `DEV` writes only its encounter parquet.
 
 ### 6.4 `method_<ID>_encounter.parquet` — joinable
 
-One row per **cohort** hospitalization, including non-detections. Emitted by all three methods. This is what §8 joins on; the JSON is not join-friendly at scale.
+One row per **cohort** encounter, including non-detections. Emitted by all three methods. This is what §8 joins on; the JSON is not join-friendly at scale.
 
 | Column | Type | Notes |
 |---|---|---|
-| `hospitalization_id` | str | |
-| `intubation_episode_id` | str | `{hospitalization_id}_E1` |
+| `encounter_block` | int32 | the analytic unit |
+| `patient_id` | str | carried through for patient-level counts |
+| `intubation_episode_id` | str | `{encounter_block}_E1`, copied from `cohort_index` |
+| `cohort_run_id` | str | copied unchanged from `cohort_index`; §6.1 |
 | `method_id` | str | one of `SED`, `PARA`, `DEV` |
 | `imv_dttm` | datetime | t₀, copied from `cohort_index` |
 | `detected` | bool | see below |
@@ -231,6 +323,18 @@ Deriving the binary from the ranked structure rather than computing it separatel
 ## 7. Method definitions
 
 All three evaluate against `cohort_index.parquet` and are restricted to the window `[window_start, window_end]`. The two medication methods differ **only** in which `med_category` values they admit — the ranking rule of §6.2 is identical across them, and both read `medication_admin_intermittent`.
+
+**How a method reaches the CLIF tables.** CLIF tables are keyed on `hospitalization_id`; the study is keyed on `encounter_block`. Every method bridges the two the same way, and this is the *only* place a method may mention `hospitalization_id`:
+
+```         
+   1.  read cohort_index.parquet
+   2.  explode list_hospitalization_id      →  one row per (encounter_block, hospitalization_id)
+   3.  load the CLIF table filtered to those hospitalization_ids
+   4.  join back on hospitalization_id      →  attach encounter_block, t0_dttm, window bounds
+   5.  DROP hospitalization_id immediately  →  all logic below is per encounter_block
+```
+
+Step 5 is a requirement, not tidiness. A medication given in the ED presentation and an IMV row charted after transfer belong to one encounter; if `hospitalization_id` survives into the window filter or the ranking, the method silently reverts to the unstitched unit and reintroduces exactly the artifact D15 removes. Dropping the column makes that mistake impossible to write rather than merely discouraged.
 
 ### `SED` — `02_method_sedative.py`
 
@@ -260,7 +364,7 @@ Ranked per §6.2. At most 3 before-ranks and 3 after-ranks. Dose handling as for
 
 ### `DEV` — `04_method_device.py`
 
-Source: `cohort_resp_waterfall.parquet`. Fires when t₀ is a **documented non-IMV → IMV transition** under the M2 symmetric 2/2 rule. Writing t₀ as row index `i` within the hospitalization's waterfalled rows ordered by `recorded_dttm`:
+Source: `cohort_resp_waterfall.parquet`, which already carries `encounter_block` — so `DEV` skips the explode of §7 and reads the block directly. Fires when t₀ is a **documented non-IMV → IMV transition** under the M2 symmetric 2/2 rule. Writing t₀ as row index `i` within the **encounter block's** waterfalled rows ordered by `recorded_dttm` across all its hospitalizations:
 
 ```         
    DEV fires  ≡  ¬IMV(i-2) ∧ ¬IMV(i-1) ∧ IMV(i) ∧ IMV(i+1)
@@ -274,7 +378,7 @@ When the rule does not fire, `non_detection_reason` takes the first applicable v
 
 | Reason                  | Condition                                         |
 |------------------------------------|------------------------------------|
-| `arrived_intubated`     | t₀ is the hospitalization's first respiratory row |
+| `arrived_intubated`     | t₀ is the encounter block's first respiratory row |
 | `insufficient_lookback` | fewer than two rows precede t₀                    |
 | `imv_not_sustained`     | row `i+1` is absent or non-IMV                    |
 | `prior_row_imv`         | row `i-1` or `i-2` exists but is IMV              |
@@ -287,13 +391,13 @@ When the rule does not fire, `non_detection_reason` takes the first applicable v
 
 ### `05_reference_cpt.py`
 
-Source: `patient_procedures` — `procedure_code`, `procedure_code_format`. **`billing_provider_id` is not read, and `procedure_billed_dttm` is read only to confirm the row belongs to the hospitalization — never as an event time.**
+Source: `patient_procedures` — `procedure_code`, `procedure_code_format`. Reached by the same explode-and-drop bridge as §7, so a code billed under any hospitalization in the block counts for the encounter. **`billing_provider_id` is not read, and `procedure_billed_dttm` is read only to confirm the row belongs to the encounter — never as an event time.**
 
 | Reference | Format | Code |
 |---|---|---|
 | `CPT` | CPT | `31500` — emergency endotracheal intubation |
 
-Output: `reference_cpt.parquet` — one row per cohort hospitalization with a `cpt_present` boolean.
+Output: `reference_cpt.parquet` — one row per cohort encounter, keyed on `intubation_episode_id` and carrying `cohort_run_id`, with a `cpt_present` boolean.
 
 Also reports the **code capture rate**: the fraction of the cohort carrying the code. Every metric in Tier C must be read against this number first — where capture is low, the reference is uninformative at that site and is reported as such rather than scored.
 
@@ -305,7 +409,7 @@ Also reports the **code capture rate**: the fraction of the cohort carrying the 
 
 #### Step 0 — the joined analytic table
 
-The notebook validates the schema of each `method_*_encounter.parquet` against §6.4, then joins all three plus `reference_cpt.parquet` on `intubation_episode_id`. Every cohort hospitalization appears exactly once. This wide table is the input to **Tier A** and **Tier C**.
+The notebook validates the schema of each `method_*_encounter.parquet` against §6.4, asserts every input carries the same `cohort_run_id` (§6.1), then joins all three plus `reference_cpt.parquet` on `intubation_episode_id`. Every cohort encounter appears exactly once. This wide table is the input to **Tier A** and **Tier C**.
 
 ```         
 episode_id | SED PARA DEV | sed_bef para_bef | cpt
@@ -316,7 +420,7 @@ episode_id | SED PARA DEV | sed_bef para_bef | cpt
  1004_E1   |  0    0   0  |    NaN      NaN  |  0
  1005_E1   |  1    1   0  |   -3.0     -5.0  |  1
 -----------+--------------+------------------+-----
- N* rows, one per cohort hospitalization
+ N* rows, one per cohort encounter
  *_bef = nearest_before_min (rank 1), signed minutes
  NaN where that direction had no ranked entry
  DEV omitted from the offset block — no medication signal (§7)
@@ -343,7 +447,7 @@ episode_id | SED PARA DEV | sed_bef para_bef | cpt
 | `SED` × `DEV` | 1 043 | 799 | 159 | 213 | 0.52 | 0.14 |
 | `PARA` × `DEV` | 902 | 529 | 300 | 483 | 0.52 | 0.25 |
 
-**A.3 Concordance histogram.** How many of the three fired on the same hospitalization.
+**A.3 Concordance histogram.** How many of the three fired on the same encounter.
 
 | methods firing | n | \% |
 |---|---|---|
@@ -352,7 +456,7 @@ episode_id | SED PARA DEV | sed_bef para_bef | cpt
 | 2 | 712 | 32.2 |
 | 3 | 842 | 38.0 |
 
-The `0` row is the one to read first: hospitalizations that are in the cohort — so they *have* an IMV row by construction — where no method fired at all. That count is a direct measure of how much intubation goes undetected by every signal simultaneously.
+The `0` row is the one to read first: encounters that are in the cohort — so they *have* an IMV row by construction — where no method fired at all. That count is a direct measure of how much intubation goes undetected by every signal simultaneously.
 
 **A.4 Upset plot** of the 7 non-empty detection-set combinations, sorted by frequency. Plot only; the underlying counts are A.3 broken out by which specific methods fired.
 
@@ -458,7 +562,7 @@ Follows the existing rules in [`output/README.md`](../../../output/README.md) an
 
 | Directory | Contents |
 |------------------------------------|------------------------------------|
-| `output/intermediate_phi/` | `cohort.parquet`, `cohort_resp_waterfall.parquet`, `cohort_index.parquet`, `method_{SED,PARA}_ranked.json`, `method_{SED,PARA,DEV}_encounter.parquet`, `reference_cpt.parquet` |
+| `output/intermediate_phi/` | `cohort.parquet`, `cohort_resp_waterfall.parquet`, `cohort_index.parquet`, `cohort_qc.csv`, `method_{SED,PARA}_ranked.json`, `method_{SED,PARA,DEV}_encounter.parquet`, `reference_cpt.parquet` |
 | `output/final_no_phi/` | CONSORT counts, agreement matrices, offset distribution summaries, reference-scored metrics, plots |
 
 `output/final_no_phi/` constraints: aggregates only, **minimum cell size n ≥ 10** for every reported statistic, no `patient_id`, no row-level records, no raw `.csv` / `.parquet` data files.
@@ -477,14 +581,24 @@ Extends the existing `config/config.json` schema read by `utils/config.py`.
   "timezone": "US/Eastern",
   "output_directory": "./output",
   "window_hours": 3,
+  "stitch_hours": 6,
+  "trach_window_hours": 24,
+  "min_age": 18,
   "date_start": "2018-01-01",
   "date_end": "2025-12-31"
 }
 ```
 
-`window_hours`, `date_start` and `date_end` are new. `date_start` and `date_end` are ignored when `site_name.lower() == "mimic"`.
+Everything below `output_directory` is new. `date_start` and `date_end` are ignored when `site_name.lower() == "mimic"`.
 
-`window_hours` is the only parameter that changes a detection result, and it applies identically to both medication methods (§6.2). Everything else is a path or a site label.
+| Key | Consumed by | Effect |
+|---|---|---|
+| `window_hours` | `02`, `03` | half-width of the t₀ detection window (D4). The only parameter that changes a *detection* result, and it applies identically to both medication methods (§6.2) |
+| `stitch_hours` | `01` | `time_interval` passed to `stitch_encounters` (D15). Changes the analytic unit itself, so every count in the study moves with it |
+| `trach_window_hours` | `01` | the exclusion clock in §5.5 (D18) |
+| `min_age` | `01` | the adult criterion, tested on `age_at_admission` |
+
+The last three are **cohort** parameters, not detection parameters: they change who is in the denominator rather than who is detected. `01` echoes all four at the top of the notebook and writes them into `cohort_qc.csv`, so a published result carries the cohort definition that produced it. Everything else is a path or a site label.
 
 ------------------------------------------------------------------------
 
