@@ -82,7 +82,24 @@ def _(Path, json):
 
     # MIMIC timestamps are date-shifted, so a calendar filter is meaningless there.
     APPLY_DATE_FILTER = SITE.lower() != "mimic"
+
+    def to_site_naive(series):
+        """The ONLY correct way to get a naive site-local timestamp out of clifpy.
+
+        clifpy returns timestamp columns carrying a pytz tzinfo still in its LMT state
+        (`DstTzInfo 'US/Eastern' LMT-1 day, 19:04:00 STD`). Calling `.dt.tz_localize(None)`
+        on such a series drops the offset that is *attached* rather than the one that is
+        *correct*, and the naive result is off by an hour. `.dt.tz_convert` re-resolves
+        the instant against the real tz database first, so its output is right.
+
+        Neither path errors or warns, and they differ by exactly one hour — so mixing them
+        across two frames silently misaligns every window computed between them.
+        See tests/test_clifpy_tz_boundary.py.
+        """
+        return series.dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+
     return (
+        to_site_naive,
         APPLY_DATE_FILTER,
         DATA_DIR,
         DATE_END,
@@ -187,7 +204,7 @@ def _(mo):
 
 
 @app.cell
-def _(DATA_DIR, FILETYPE, Hospitalization, RespiratorySupport, TIMEZONE, pl):
+def _(DATA_DIR, FILETYPE, Hospitalization, RespiratorySupport, TIMEZONE, pl, to_site_naive):
     # Only the id column, only IMV rows — the cheapest possible pass over the big table.
     #
     # The filter lists casing variants (D22). It runs inside from_file, on raw site data,
@@ -229,8 +246,8 @@ def _(DATA_DIR, FILETYPE, Hospitalization, RespiratorySupport, TIMEZONE, pl):
     )
     hosp_all = pl.from_pandas(
         _hosp_all.df.assign(
-            admission_dttm=lambda d: d["admission_dttm"].dt.tz_localize(None),
-            discharge_dttm=lambda d: d["discharge_dttm"].dt.tz_localize(None),
+            admission_dttm=lambda d: to_site_naive(d["admission_dttm"]),
+            discharge_dttm=lambda d: to_site_naive(d["discharge_dttm"]),
         )
     )
 
@@ -312,8 +329,8 @@ def _(
     # location_category lower-cased on load like every other category column (D21).
     adt_pl = pl.from_pandas(
         _adt.df.assign(
-            in_dttm=lambda d: d["in_dttm"].dt.tz_localize(None),
-            out_dttm=lambda d: d["out_dttm"].dt.tz_localize(None),
+            in_dttm=lambda d: to_site_naive(d["in_dttm"]),
+            out_dttm=lambda d: to_site_naive(d["out_dttm"]),
         )
     ).with_columns(location_category=pl.col("location_category").str.to_lowercase())
 
@@ -551,7 +568,7 @@ def _(
     resp_utc_pd = resp_raw_pd.assign(
         recorded_dttm=resp_raw_pd["recorded_dttm"].dt.tz_convert("UTC")
     )
-    resp_raw_pd["recorded_dttm"] = resp_raw_pd["recorded_dttm"].dt.tz_localize(None)
+    resp_raw_pd["recorded_dttm"] = to_site_naive(resp_raw_pd["recorded_dttm"])
 
     # Lower-cased once, here, before any comparison (D21). Every device literal below is
     # written in lower case to match.
@@ -686,9 +703,7 @@ def _(
     )
 
     # Back to site-local naive, matching every other timestamp in the pipeline.
-    _waterfalled["recorded_dttm"] = (
-        _waterfalled["recorded_dttm"].dt.tz_convert(TIMEZONE).dt.tz_localize(None)
-    )
+    _waterfalled["recorded_dttm"] = to_site_naive(_waterfalled["recorded_dttm"])
 
     resp_waterfall = (
         pl.from_pandas(
@@ -715,6 +730,25 @@ def _(
         f"waterfall emitted device_category values outside mCIDE: {sorted(_seen - _MCIDE_DEVICE_LOWER)}"
     )
     assert "imv" in _seen, "no 'imv' rows survived the waterfall — t0 would be null everywhere"
+
+    # Defense in depth for the timezone boundary. The waterfall only ever ADDS rows, at
+    # HH:59:59 scaffold positions; it never invents a timestamp anywhere else. So every
+    # non-scaffold waterfall timestamp must exist in the raw table. If the two frames were
+    # converted by different paths — see to_site_naive — this subset relation breaks
+    # immediately, which is exactly how the one-hour pytz/LMT bug was caught.
+    _wf_real = set(
+        resp_waterfall.filter(pl.col("recorded_dttm").dt.second() != 59)
+        .get_column("recorded_dttm")
+        .to_list()
+    )
+    _raw_ts = set(resp_raw.get_column("recorded_dttm").to_list())
+    _orphans = _wf_real - _raw_ts
+    assert not _orphans, (
+        f"{len(_orphans):,} waterfalled timestamps have no raw counterpart "
+        f"(e.g. {sorted(_orphans)[:3]}). The raw and waterfall frames are on different "
+        "time bases — check that both went through to_site_naive."
+    )
+    print(f"timestamp alignment OK: {len(_wf_real):,} non-scaffold rows all match raw")
 
     print(f"\nwaterfalled rows : {resp_waterfall.height:,}")
     print("\ndevice_category after the waterfall (lower case throughout):")
