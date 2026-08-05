@@ -136,14 +136,19 @@ The filter is deliberately patient-level, not hospitalization-level. A patient's
 
 `stitch_encounters(hospitalization, adt, time_interval=stitch_hours)` with `stitch_hours = 6` from config. Takes pandas, returns pandas — the second and last pandas boundary in the project (§3).
 
-Two properties of the returned block, both read from `clifpy/utils/stitching_encounters.py:132-141`, matter downstream:
+**What the function actually returns is narrower than it looks.** `clifpy/utils/stitching_encounters.py:178` returns `(hospitalization_stitched, adt_stitched, encounter_mapping)` — the first two are the input tables with an `encounter_block` column appended, the third is the `hospitalization_id → encounter_block` map. The block-level aggregate the function builds internally at `:136-144` (`hospital_block2`, carrying `list_hospitalization_id` and the min/max block window) is **never returned**. `01` therefore derives the block table itself from `hospitalization_stitched`, which is one explicit `group_by` and is better for this study than inheriting the library's:
 
-| Field | Aggregation | Consequence |
+| Field | Aggregation `01` uses | Why not the library's |
 |---|---|---|
-| `admission_dttm` | `min` across the block | The block clock starts at the earliest admission — this is what the 24h trach window anchors on |
-| `discharge_dttm` | `max` across the block | |
-| `age_at_admission` | `last` | Age comes from the *last* hospitalization in the block, while the clock starts at the first. Immaterial across a 6h gap, but it is the value the adult criterion tests |
-| `list_hospitalization_id` | sorted unique | **The bridge key.** Method notebooks explode this to filter CLIF tables, then aggregate back to `encounter_block` |
+| `admission_dttm` | `min` | same |
+| `discharge_dttm` | `max` | same |
+| `age_at_admission` | value from the row with the **minimum** `admission_dttm` | the library takes `last`, pairing an age from the end of the block with a clock that starts at its beginning. Immaterial across a 6 h gap, but there is no reason to inherit the mismatch when the correct value is the same one line of code |
+| `list_hospitalization_id` | sorted unique | same |
+
+Two consequences matter downstream:
+
+- **`admission_dttm` is the block's earliest admission.** This is what the `trach_window_hours` clock anchors on, so a trach charted during an ED presentation is inside the window of the inpatient admission stitched to it.
+- **`list_hospitalization_id` is the bridge key.** Method notebooks explode it to filter CLIF tables, then aggregate back to `encounter_block` (§7).
 
 ### 5.4 CONSORT A — cohort
 
@@ -172,7 +177,7 @@ Order matters: CONSORT reports the marginal loss at each step in this sequence, 
 
 ### 5.5 Criterion detail
 
-**Adult** — `age_at_admission ≥ min_age` (default 18) on the stitched block. Note the aggregation caveat from §5.3: `age_at_admission` is taken from the *last* hospitalization in the block while the clock starts at the first. Across a 6h gap the two cannot differ, but the criterion is stated on the value actually tested rather than on an idealised one.
+**Adult** — `age_at_admission ≥ min_age` (default 18) on the stitched block, taking the age from the block's earliest hospitalization so that age and clock come from the same row (§5.3).
 
 **Date filter** — `site_name.lower() == "mimic"` → **no date restriction** (MIMIC timestamps are date-shifted, so a calendar filter is meaningless). Otherwise → block `admission_dttm` within `date_start` … `date_end`, default `2018-01-01` … `2025-12-31`.
 
@@ -200,7 +205,13 @@ The `trach_window_hours` clock runs from the **stitched block's** `admission_dtt
 4.  **t₀ = earliest `recorded_dttm` where `device_category == 'IMV'`**, per `encounter_block`.
 5.  `window_start = t₀ − window_hours`, `window_end = t₀ + window_hours`.
 
-Step 3 is what makes stitching effective: the waterfall runs per `hospitalization_id`, but the transition sequence `DEV` evaluates is assembled across the whole block in time order.
+Step 3 is what makes stitching effective: the waterfall runs per `hospitalization_id`, but the transition sequence §5.9 evaluates is assembled across the whole block in time order.
+
+> **The waterfall rewrites two columns, and both would fail silently.** `clifpy/utils/waterfall.py:147-149` **lower-cases** `device_category`, `device_name`, `mode_category` and `mode_name`, so post-waterfall the mCIDE value `IMV` is `imv` and `Trach Collar` is `trach collar`. A comparison against `'IMV'` on waterfalled data does not error — it matches nothing, and t₀ would come back null for every encounter. Separately, `:152-159` coerces `tracheostomy` with `pd.to_numeric`, turning the boolean into `1.0` / `0.0`.
+>
+> `01` therefore re-normalises `device_category` to mCIDE casing in a single named step immediately after the waterfall, and every comparison downstream — here and in §5.9 — is written against mCIDE values. The alternative, writing lower-case literals downstream, would leave two vocabularies in the codebase distinguished only by which side of one function call they appear on.
+>
+> The cohort trach exclusion (§5.5) is unaffected: it runs on the **raw** table, where `Trach Collar` and the boolean are still intact.
 
 ### 5.7 QC statistics
 
