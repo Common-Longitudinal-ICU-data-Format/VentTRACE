@@ -189,18 +189,38 @@ def _(mo):
 @app.cell
 def _(DATA_DIR, FILETYPE, Hospitalization, RespiratorySupport, TIMEZONE, pl):
     # Only the id column, only IMV rows — the cheapest possible pass over the big table.
+    #
+    # The filter lists casing variants (D22). It runs inside from_file, on raw site data,
+    # which is the one comparison in this pipeline that happens before our own
+    # lower-casing — so it is the one place D21 cannot protect. A site charting 'imv'
+    # would otherwise load zero rows and hand us an empty cohort with no error at all.
     _imv_rows = RespiratorySupport.from_file(
         data_directory=DATA_DIR,
         filetype=FILETYPE,
         timezone=TIMEZONE,
         columns=["hospitalization_id", "device_category"],
-        filters={"device_category": ["IMV"]},
+        filters={"device_category": ["IMV", "imv", "Imv"]},
     )
+
+    _imv_pl = pl.from_pandas(_imv_rows.df[["hospitalization_id", "device_category"]])
+    print("raw device_category casings the load actually returned:")
+    print(_imv_pl.get_column("device_category").value_counts(sort=True))
+
+    # The real match is on the lower-cased column (D21). The filter above is a coarse
+    # pre-screen; this is the comparison that decides anything.
     imv_hosp_ids = (
-        pl.from_pandas(_imv_rows.df[["hospitalization_id"]])
-        .unique()
+        _imv_pl.with_columns(device_category=pl.col("device_category").str.to_lowercase())
+        .filter(pl.col("device_category") == "imv")
         .get_column("hospitalization_id")
+        .unique()
     )
+
+    assert imv_hosp_ids.len() > 0, (
+        "no hospitalization has an IMV respiratory row. Either the site charts a "
+        "device_category casing missing from the filter list above, or device_category "
+        "uses a different vocabulary entirely. Check the value counts printed above."
+    )
+    print(f"\nhospitalizations with >=1 IMV row : {imv_hosp_ids.len():,}")
 
     # Full hospitalization table — needed unfiltered so we can map IMV hospitalizations
     # to patients, then pull back *all* hospitalizations of those patients.
@@ -289,12 +309,16 @@ def _(
         timezone=TIMEZONE,
         filters={"hospitalization_id": _cohort_hosp_ids},
     )
+    # location_category lower-cased on load like every other category column (D21).
     adt_pl = pl.from_pandas(
         _adt.df.assign(
             in_dttm=lambda d: d["in_dttm"].dt.tz_localize(None),
             out_dttm=lambda d: d["out_dttm"].dt.tz_localize(None),
         )
-    )
+    ).with_columns(location_category=pl.col("location_category").str.to_lowercase())
+
+    print("lower-cased location_category:")
+    print(adt_pl.get_column("location_category").value_counts(sort=True))
 
     _hosp_stitched_pd, _adt_stitched_pd, _mapping_pd = stitch_encounters(
         hospitalization=hosp_imv_patients.to_pandas(),
@@ -427,6 +451,12 @@ def _(adt_pl, cohort_date, consort_add, encounter_mapping, pl):
         .unique()
     )
 
+    assert blocks_with_ed_or_icu.len() > 0, (
+        "no encounter block has an 'ed' or 'icu' ADT row. Check the lower-cased "
+        "location_category value counts printed above — the site may use a different "
+        "vocabulary, in which case this filter is silently emptying the cohort."
+    )
+
     cohort_loc = cohort_date.filter(pl.col("encounter_block").is_in(blocks_with_ed_or_icu.implode()))
 
     consort_add(
@@ -471,14 +501,14 @@ def _(mo):
         find. **Both** trach signals are tested, because either alone leaks:
 
         - `tracheostomy = True` — the boolean flag; missed at sites that only chart the device
-        - `device_category = 'Trach Collar'` — a weaning device a continuously-ventilated
+        - `device_category == 'trach collar'` — a weaning device a continuously-ventilated
           trach patient may never receive
 
         The clock runs from the **stitched block's** `admission_dttm` (the minimum across
         the block), so a trach identified during an ED presentation cannot escape the
         window of the inpatient admission it was stitched to.
 
-        Evaluated on the **raw** respiratory table, where `Trach Collar` and the boolean
+        Evaluated on the **raw** respiratory table, where the trach device row and the boolean
         are still intact — the waterfall lower-cases categories and coerces the boolean
         to a float.
         """
@@ -523,19 +553,48 @@ def _(
     )
     resp_raw_pd["recorded_dttm"] = resp_raw_pd["recorded_dttm"].dt.tz_localize(None)
 
-    resp_raw = pl.from_pandas(
-        resp_raw_pd[["hospitalization_id", "recorded_dttm", "device_category", "tracheostomy"]]
-    ).join(encounter_mapping, on="hospitalization_id", how="inner")
+    # Lower-cased once, here, before any comparison (D21). Every device literal below is
+    # written in lower case to match.
+    resp_raw = (
+        pl.from_pandas(
+            resp_raw_pd[
+                ["hospitalization_id", "recorded_dttm", "device_category", "tracheostomy"]
+            ]
+        )
+        .with_columns(device_category=pl.col("device_category").str.to_lowercase())
+        .join(encounter_mapping, on="hospitalization_id", how="inner")
+    )
 
     print(f"raw respiratory rows for cohort hospitalizations : {resp_raw.height:,}")
+    print("\nlower-cased device_category across the cohort:")
+    print(resp_raw.get_column("device_category").value_counts(sort=True))
+
+    # Cross-check the D22 variant list rather than trusting it. This load is NOT filtered
+    # on device_category, so if the from_file filter missed a casing, some hospitalization
+    # here will have a lower-cased 'imv' row that never made it into imv_hosp_ids.
+    _imv_here = (
+        resp_raw.filter(pl.col("device_category") == "imv")
+        .get_column("hospitalization_id")
+        .unique()
+    )
+    _missed = set(_imv_here.to_list()) - set(imv_hosp_ids.to_list())
+    assert not _missed, (
+        f"{len(_missed):,} hospitalizations have an 'imv' row that the from_file casing "
+        "filter did not return. Add the missing casing to the filter list in step 0 — "
+        "the cohort is currently undersized and nothing else would have told you."
+    )
+    print(f"\nD22 cross-check passed: no 'imv' row was missed by the load filter.")
     return resp_raw, resp_utc_pd
 
 
 @app.cell
 def _(TRACH_WINDOW_HOURS, cohort_imv, consort_add, pl, resp_raw):
-    _is_trach_signal = pl.col("tracheostomy").eq(True) | pl.col("device_category").eq(
-        "Trach Collar"
-    )
+    # `tracheostomy` is tested for truthiness, not identity: the waterfall coerces it to
+    # 1.0/0.0 (waterfall.py:152-159). This runs on the raw table where it is still a bool,
+    # but writing it to survive either representation costs nothing.
+    _is_trach_signal = pl.col("tracheostomy").cast(pl.Boolean, strict=False) | pl.col(
+        "device_category"
+    ).eq("trach collar")
 
     blocks_with_early_trach = (
         resp_raw.join(
@@ -561,7 +620,7 @@ def _(TRACH_WINDOW_HOURS, cohort_imv, consort_add, pl, resp_raw):
         cohort.height,
         cohort.get_column("patient_id").n_unique(),
         cohort_imv.height - cohort.height,
-        "tracheostomy=True OR device_category='Trach Collar'",
+        "tracheostomy truthy OR device_category=='trach collar'",
     )
     consort_add(
         "ANALYTIC COHORT",
@@ -588,10 +647,16 @@ def _(mo):
         effective: the transition sequence `02` evaluates is assembled across the whole
         encounter in time order.
 
-        **The waterfall lower-cases `device_category`** (`waterfall.py:147-149`). A
-        comparison against `'IMV'` on waterfalled data would not error — it would match
-        nothing and return a null t0 for every encounter. We re-normalise to mCIDE casing
-        in one named step so a single vocabulary holds everywhere downstream.
+        **This is where lower-casing on load pays for itself.** The waterfall lower-cases
+        `device_category` itself (`waterfall.py:147-149`). Under a pipeline that compared
+        against mCIDE casing, that one line would silently break t0: `device_category ==
+        'IMV'` on waterfalled data does not error, it matches nothing, and every encounter
+        comes back with a null t0.
+
+        Because the column was already lower-cased on load, the waterfall's transformation
+        is a **no-op** — it writes back the values that were already there. Nothing
+        re-normalises anything, and the same literal `'imv'` is correct on both sides of
+        the call.
         """
     )
     return
@@ -625,44 +690,34 @@ def _(
         _waterfalled["recorded_dttm"].dt.tz_convert(TIMEZONE).dt.tz_localize(None)
     )
 
-    # Undo the library's lower-casing so downstream code speaks mCIDE only.
-    _MCIDE_DEVICE = {
-        "imv": "IMV",
-        "nippv": "NIPPV",
-        "cpap": "CPAP",
-        "high flow nc": "High Flow NC",
-        "face mask": "Face Mask",
-        "trach collar": "Trach Collar",
-        "nasal cannula": "Nasal Cannula",
-        "room air": "Room Air",
-        "other": "Other",
-    }
-
     resp_waterfall = (
         pl.from_pandas(
             _waterfalled[["hospitalization_id", "recorded_dttm", "device_category"]]
         )
-        .with_columns(
-            device_category=pl.col("device_category").replace_strict(
-                _MCIDE_DEVICE, default=None
-            )
-        )
+        # Belt and braces: the column arrives lower-cased both because we lower-cased it
+        # on load and because the waterfall lower-cases it again. Stating it here means the
+        # invariant holds even if either of those two facts changes.
+        .with_columns(device_category=pl.col("device_category").str.to_lowercase())
         .join(encounter_mapping, on="hospitalization_id", how="inner")
         .sort(["encounter_block", "recorded_dttm"])
     )
 
-    # replace_strict(default=None) turns any value missing from the map into a null, which
-    # would quietly delete device states rather than fail. Compare null counts before and
-    # after so an unmapped category is an error, not a shrug.
-    _n_null_before = int(_waterfalled["device_category"].isna().sum())
-    _n_null_after = resp_waterfall.get_column("device_category").null_count()
-    assert _n_null_after == _n_null_before, (
-        f"re-normalisation created {_n_null_after - _n_null_before:,} new nulls — the "
-        "waterfall emitted a device_category not in the mCIDE map."
+    # The waterfall's device heuristics can invent categories the raw table never had, so
+    # assert the vocabulary is the one we expect rather than discovering it downstream.
+    _MCIDE_DEVICE_LOWER = {
+        "imv", "nippv", "cpap", "high flow nc", "face mask",
+        "trach collar", "nasal cannula", "room air", "other",
+    }
+    _seen = set(
+        resp_waterfall.get_column("device_category").drop_nulls().unique().to_list()
     )
+    assert _seen <= _MCIDE_DEVICE_LOWER, (
+        f"waterfall emitted device_category values outside mCIDE: {sorted(_seen - _MCIDE_DEVICE_LOWER)}"
+    )
+    assert "imv" in _seen, "no 'imv' rows survived the waterfall — t0 would be null everywhere"
 
     print(f"\nwaterfalled rows : {resp_waterfall.height:,}")
-    print("\ndevice_category after re-normalisation:")
+    print("\ndevice_category after the waterfall (lower case throughout):")
     print(resp_waterfall.get_column("device_category").value_counts(sort=True))
     return (resp_waterfall,)
 
@@ -671,7 +726,7 @@ def _(
 def _(WINDOW_HOURS, cohort, pl, resp_waterfall):
     # t0 = earliest waterfalled IMV row per encounter_block.
     t0 = (
-        resp_waterfall.filter(pl.col("device_category") == "IMV")
+        resp_waterfall.filter(pl.col("device_category") == "imv")
         .group_by("encounter_block")
         .agg(t0_dttm=pl.col("recorded_dttm").min())
     )
@@ -720,7 +775,7 @@ def _(cohort_index, pl, resp_raw, resp_waterfall):
     # QC 1 — waterfall t0 vs raw t0. bfill=False makes a negative delta very unlikely, but
     # the device heuristics and the hourly HH:59:59 scaffold run regardless of bfill.
     _t0_raw = (
-        resp_raw.filter(pl.col("device_category") == "IMV")
+        resp_raw.filter(pl.col("device_category") == "imv")
         .group_by("encounter_block")
         .agg(t0_raw_dttm=pl.col("recorded_dttm").min())
     )

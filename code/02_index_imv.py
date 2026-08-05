@@ -104,7 +104,7 @@ def _(pl, resp_waterfall):
         resp_waterfall.sort(["encounter_block", "recorded_dttm", "hospitalization_id"])
         .with_columns(
             row_idx=pl.int_range(pl.len()).over("encounter_block"),
-            is_imv=(pl.col("device_category") == "IMV"),
+            is_imv=(pl.col("device_category") == "imv"),
         )
         .with_columns(
             next_is_imv=pl.col("is_imv").shift(-1).over("encounter_block"),
@@ -158,7 +158,7 @@ def _(mo):
         """
         ### Why the lookback terms are automatic
 
-        t0 is defined as the **earliest** row with `device_category = 'IMV'`, so no row
+        t0 is defined as the **earliest** row with `device_category == 'imv'`, so no row
         preceding it can be IMV. `not IMV(i-1) and not IMV(i-2)` is therefore satisfied for
         free whenever those rows exist, and the M2 rule reduces to a **lookback-depth test
         plus a sustain test**.

@@ -60,9 +60,11 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | D15 | **Encounters are stitched before any cohort criterion is applied**, with `stitch_hours = 6`. | An ED intubation and the inpatient IMV charting that follows can carry different `hospitalization_id`s. Unstitched, `PARA` fires on one and `DEV` on the other and the agreement matrix records a disagreement that is purely administrative. Stitching last would mean filtering on a unit the study does not use. |
 | D16 | **Stitching is preceded by a patient-level IMV-ever pre-filter.** | Stitching joins the full hospitalization and ADT tables and iterates to a fixed point; running it on every patient at a site is wasteful when every cohort criterion requires an IMV row. The filter is **patient**-level, not hospitalization-level, precisely because the IMV may be charted under a different `hospitalization_id` than the one anchoring the block — filtering hospitalizations here would discard the rows stitching exists to reunite. Changes no result (§5.2). |
 | D17 | **Location criterion is ED *or* ICU, evaluated across the whole stitched block.** | Set by the study lead. ED-or-ICU is what admits the ED intubation that never reaches an ICU and the ward patient intubated on ICU transfer; requiring ICU alone would drop the first group, which is exactly where the medication and device signals are most likely to diverge. |
-| D18 | **Tracheostomy in the first 24 h excludes the encounter, tested on two signals: `tracheostomy = True` *or* `device_category = 'Trach Collar'`.** | mCIDE defines `IMV` as "Endotracheal Tube Ventilation, **Tracheostomy Ventilation**" — a trach patient on a vent charts as plain `IMV` and would otherwise enter as a false intubation with no induction or paralytic to find. Either signal alone leaks: the boolean misses sites that only chart the device, and `Trach Collar` is a weaning device that a continuously-ventilated trach patient may never receive. |
+| D18 | **Tracheostomy in the first 24 h excludes the encounter, tested on two signals: `tracheostomy` truthy *or* `device_category == 'trach collar'`.** | mCIDE defines `IMV` as "Endotracheal Tube Ventilation, **Tracheostomy Ventilation**" — a trach patient on a vent charts as plain `IMV` and would otherwise enter as a false intubation with no induction or paralytic to find. Either signal alone leaks: the boolean misses sites that only chart the device, and `Trach Collar` is a weaning device that a continuously-ventilated trach patient may never receive. |
 | D19 | **`DEV` becomes the index qualifier in `02_index_imv.py`, not a method in the agreement matrix.** Encounters whose index IMV fails the M2 rule are excluded before any method runs. | Anchored on t₀, the M2 rule cannot detect a *different* event from `SED` and `PARA` — t₀ is already fixed for all three. All it can report is whether the pre-intubation period was documented and the IMV sustained. That is a statement about record completeness, not an independent signal, so scoring it against medication signals was comparing a data-availability fact to a clinical one. Making it the qualifier puts it where it belongs and leaves `SED` × `PARA` measured on encounters where the intubation is genuinely observable. |
 | D20 | **The excluded encounters are retained and analysed, not discarded.** `02` writes a classification for every cohort encounter; §8 runs the method rates over the excluded strata as a specificity probe. | The arrived-intubated group is the sharpest available test of whether `SED` is detecting intubation or ICU sedation: these patients were intubated before arrival, so any `SED` firing in the ±3 h window around their first charted IMV row is by construction *not* an induction. Throwing the group away would discard the one stratum with a known answer. |
+| D21 | **Every category column is lower-cased on load, and every literal compared against one is written in lower case.** Applies to `device_category`, `location_category`, `med_category`, `mar_action_category`, `mode_category`, `admission_type_category`, `discharge_category` — every `*_category` column the pipeline touches. | Case is the one vocabulary difference that fails *silently*. A mismatched category value does not raise; it matches zero rows, and a filter matching zero rows looks exactly like a site where the thing never happens. The waterfall already lower-cases four columns (`waterfall.py:147-149`), so the pipeline has two casings in it whether or not we plan for them. Normalising **down** rather than up means the library's own transformation is a no-op instead of something to undo, and there is exactly one rule to remember: lower-case, always. |
+| D22 | **Load-time category filters pass every casing variant**, not just the mCIDE spelling. `filters={'device_category': ['IMV', 'imv', 'Imv']}`. | D21 normalises *after* load, but a `from_file` filter runs *before* anything we control — it is applied to raw site data as charted. A site that writes `imv` would be filtered to nothing and silently produce an empty cohort. Passing the variants closes the gap at the only point in the pipeline where our own lower-casing cannot reach, and §5.2 adds a cross-check that proves the filter missed nothing. |
 
 ------------------------------------------------------------------------
 
@@ -102,6 +104,8 @@ The code must be readable by a clinician-researcher reviewing the definition, no
 - **Every filter prints its row, encounter-block and patient count** before and after, so the CONSORT and the method yields are visible while running, not only in the final artifact.
 - **Each method notebook ends with an explicit schema assertion block** against §6. Copy-pasted deliberately across both — duplication here is the point of D8.
 - **No silent defaults.** Every parameter that affects a result is read from `config.json` and echoed at the top of the notebook.
+- **Lower-case every category column immediately after load, in a single named step, before any comparison** (D21). Every literal in the notebook is then written in lower case — `'imv'`, `'trach collar'`, `'ed'`, `'icu'`, `'given'`. A notebook that compares against a mixed-case literal anywhere has a bug that will not announce itself.
+- **Every category filter must be provably non-empty.** A `filter` that returns zero rows is the expected result at a site where the thing never happens and the symptom of a vocabulary mismatch at a site where it happens constantly. Notebooks assert non-empty and print the distinct values seen, so the two cases are distinguishable without reading the data by hand.
 
 ------------------------------------------------------------------------
 
@@ -122,11 +126,16 @@ This study is close to a worst case without it. A patient given rocuronium in th
 Stitching is expensive: it joins the full hospitalization and ADT tables and iterates to a fixed point. Restrict it to patients who could possibly qualify.
 
 ```
-  1.  load respiratory_support   columns=['hospitalization_id']
-                                 filters={'device_category': ['IMV']}
-  2.  distinct hospitalization_id  →  join hospitalization  →  distinct patient_id
-  3.  P_imv = patients with ≥1 IMV row anywhere in their record
+  1.  load respiratory_support   columns=['hospitalization_id', 'device_category']
+                                 filters={'device_category': ['IMV', 'imv', 'Imv']}
+  2.  lower-case device_category, then keep == 'imv'
+  3.  distinct hospitalization_id  →  join hospitalization  →  distinct patient_id
+  4.  P_imv = patients with ≥1 IMV row anywhere in their record
 ```
+
+**Step 1 lists casing variants; step 2 does the real matching** (D22). The `from_file` filter is the one comparison in the pipeline that happens *before* our own normalisation, on raw site data as charted, so it is the one place D21 cannot protect. A site charting `imv` would otherwise load zero rows and produce an empty cohort with no error.
+
+The variant list is still a guess about a site's vocabulary, so it is **cross-checked rather than trusted**. The cohort respiratory load in §5.5 is *unfiltered* by category — it pulls every row for the cohort's hospitalizations. Lower-casing `device_category` there and recounting the encounters with an `'imv'` row must reproduce the set this step produced. If it does not, the filter missed a casing and the notebook fails rather than reporting a quietly undersized cohort.
 
 Only `hospitalization` and `adt` rows for `P_imv` are loaded and stitched. This is a **pure efficiency filter and changes no result**: every criterion below requires an IMV row, so a patient with none could never enter the cohort by any path.
 
@@ -161,9 +170,9 @@ The first of the two CONSORTs. Reported at **every** step, each with encounter-b
     │   └─ age_at_admission ≥ 18                       −n₁
     │       └─ date filter (skipped when site is MIMIC) −n₂
     │           └─ ≥1 ADT row, location_category
-    │              ∈ {ed, icu}                          −n₃
+    │              ∈ {'ed', 'icu'}                       −n₃
     │               └─ ≥1 resp row, device_category
-    │                  = 'IMV'                          −n₄
+    │                  == 'imv'                          −n₄
     │
     └─ EXCLUSION
         └─ tracheostomy or trach collar within 24h
@@ -181,17 +190,21 @@ Order matters: CONSORT reports the marginal loss at each step in this sequence, 
 
 **Date filter** — `site_name.lower() == "mimic"` → **no date restriction** (MIMIC timestamps are date-shifted, so a calendar filter is meaningless). Otherwise → block `admission_dttm` within `date_start` … `date_end`, default `2018-01-01` … `2025-12-31`.
 
-**Location** — at least one ADT row anywhere in the block with `location_category ∈ {ed, icu}`. Both are valid mCIDE values. This is deliberately **ED *or* ICU, not ICU alone**: a substantial share of intubations happen in the ED, and requiring ICU would systematically drop the patients whose induction medications are best documented.
+All category comparisons below are on the **lower-cased** column against a lower-case literal (D21).
 
-**IMV** — at least one `respiratory_support` row in the block with `device_category = 'IMV'`. Evaluated on the **raw** table, before the waterfall, so cohort membership never depends on an imputed device.
+**Location** — at least one ADT row anywhere in the block with `location_category ∈ {'ed', 'icu'}`. Both are valid mCIDE values, already lower case in mCIDE. This is deliberately **ED *or* ICU, not ICU alone**: a substantial share of intubations happen in the ED, and requiring ICU would systematically drop the patients whose induction medications are best documented.
+
+**IMV** — at least one `respiratory_support` row in the block with `device_category == 'imv'`. Evaluated on the **raw** table, before the waterfall, so cohort membership never depends on an imputed device.
 
 **Tracheostomy exclusion** — exclude the block if, within `[admission_dttm, admission_dttm + trach_window_hours]` (default 24 h), any `respiratory_support` row satisfies **either**:
 
 ```
-   tracheostomy = True                 the boolean flag
+   tracheostomy is truthy              the boolean flag
    OR
-   device_category = 'Trach Collar'    a distinct mCIDE category
+   device_category == 'trach collar'   a distinct mCIDE category, lower-cased
 ```
+
+`tracheostomy` is tested for truthiness rather than `is True` because the waterfall coerces it to `1.0` / `0.0` (`waterfall.py:152-159`). This exclusion runs on the raw table where it is still a boolean, but writing the test so it survives either representation costs nothing and removes a trap for anyone who later moves the check downstream.
 
 > **Both signals are required.** mCIDE defines `Trach Collar` as its own `device_category`, separate from the boolean `tracheostomy` column — and `IMV`'s own mCIDE description reads *"Endotracheal Tube Ventilation, **Tracheostomy Ventilation**"*, so a patient ventilated through a tracheostomy is charted as plain `IMV`. Testing only one signal leaks trach patients into a cohort about intubation. This is catalog §9.3, which no method in the catalog handled.
 
@@ -202,16 +215,18 @@ The `trach_window_hours` clock runs from the **stitched block's** `admission_dtt
 1.  Subset `respiratory_support` to all hospitalizations listed in the cohort's `list_hospitalization_id`.
 2.  Run `process_resp_support_waterfall(..., bfill=False)`.
 3.  Map rows to `encounter_block` via `list_hospitalization_id`, then order by `recorded_dttm` **within the block**.
-4.  **t₀ = earliest `recorded_dttm` where `device_category == 'IMV'`**, per `encounter_block`.
+4.  **t₀ = earliest `recorded_dttm` where `device_category == 'imv'`**, per `encounter_block`.
 5.  `window_start = t₀ − window_hours`, `window_end = t₀ + window_hours`.
 
 Step 3 is what makes stitching effective: the waterfall runs per `hospitalization_id`, but the transition sequence §5.9 evaluates is assembled across the whole block in time order.
 
-> **The waterfall rewrites two columns, and both would fail silently.** `clifpy/utils/waterfall.py:147-149` **lower-cases** `device_category`, `device_name`, `mode_category` and `mode_name`, so post-waterfall the mCIDE value `IMV` is `imv` and `Trach Collar` is `trach collar`. A comparison against `'IMV'` on waterfalled data does not error — it matches nothing, and t₀ would come back null for every encounter. Separately, `:152-159` coerces `tracheostomy` with `pd.to_numeric`, turning the boolean into `1.0` / `0.0`.
+> **This is where D21 pays for itself.** `clifpy/utils/waterfall.py:147-149` **lower-cases** `device_category`, `device_name`, `mode_category` and `mode_name`. Under a spec that compared against mCIDE casing, that single line would silently break t₀: `device_category == 'IMV'` on waterfalled data does not error, it matches nothing, and every encounter comes back with a null t₀.
 >
-> `01` therefore re-normalises `device_category` to mCIDE casing in a single named step immediately after the waterfall, and every comparison downstream — here and in §5.9 — is written against mCIDE values. The alternative, writing lower-case literals downstream, would leave two vocabularies in the codebase distinguished only by which side of one function call they appear on.
+> Because D21 already lower-cased the column on load, the waterfall's transformation is a **no-op** — the values it writes are the values that were there. No step re-normalises anything, no notebook holds two vocabularies, and the same literal `'imv'` is correct on both sides of the call.
 >
-> The cohort trach exclusion (§5.5) is unaffected: it runs on the **raw** table, where `Trach Collar` and the boolean are still intact.
+> The library also coerces `tracheostomy` to `1.0` / `0.0` with `pd.to_numeric` (`:152-159`), which is why §5.5 tests truthiness rather than identity.
+>
+> **This is worth stating as a general property, not a note about one function.** Normalising to a *canonical* vocabulary means every library that touches the data must be checked for whether it agrees with that canon. Normalising *down* means the only libraries that can hurt you are the ones that upper-case — and none do, because lower-casing is the near-universal convention. The rule is cheaper to hold than the exceptions to it.
 
 ### 5.7 QC statistics
 
@@ -264,7 +279,7 @@ Every cohort encounter gets exactly one `index_class`, assigned in this order:
 
 The first two are **observability** failures: the data needed to see a transition is not there. The third is a **judgment** failure under M2: the data is there and the rule declines it.
 
-> **`prior_row_imv` is not in this taxonomy, and cannot be.** An earlier draft listed it as a fourth failure — row `i-1` or `i-2` exists but is IMV. That condition is unreachable by construction: t₀ is defined as the *earliest* row with `device_category = 'IMV'` (§5.6), so no row preceding it can be IMV. With t₀ pinned this way, `¬IMV(i-1) ∧ ¬IMV(i-2)` is satisfied automatically whenever those rows exist, and the M2 rule reduces to a lookback-depth test plus a sustain test. The taxonomy above is therefore exhaustive: `qualified` plus three failures is a complete partition of the cohort.
+> **`prior_row_imv` is not in this taxonomy, and cannot be.** An earlier draft listed it as a fourth failure — row `i-1` or `i-2` exists but is IMV. That condition is unreachable by construction: t₀ is defined as the *earliest* row with `device_category == 'imv'` (§5.6), so no row preceding it can be IMV. With t₀ pinned this way, `¬IMV(i-1) ∧ ¬IMV(i-2)` is satisfied automatically whenever those rows exist, and the M2 rule reduces to a lookback-depth test plus a sustain test. The taxonomy above is therefore exhaustive: `qualified` plus three failures is a complete partition of the cohort.
 
 This reduction is also why `DEV` cannot be a peer method (D19). Once t₀ is fixed, the rule has no freedom left to disagree about *when* the intubation was — only to report whether the surrounding rows exist.
 
@@ -426,9 +441,12 @@ Both methods evaluate against `index_imv.parquet` and are restricted to the wind
    1.  read index_imv.parquet
    2.  explode list_hospitalization_id      →  one row per (encounter_block, hospitalization_id)
    3.  load the CLIF table filtered to those hospitalization_ids
-   4.  join back on hospitalization_id      →  attach encounter_block, t0_dttm, window bounds
-   5.  DROP hospitalization_id immediately  →  all logic below is per encounter_block
+   4.  LOWER-CASE med_category and mar_action_category    (D21)
+   5.  join back on hospitalization_id      →  attach encounter_block, t0_dttm, window bounds
+   6.  DROP hospitalization_id immediately  →  all logic below is per encounter_block
 ```
+
+Step 4 comes before any medication filtering, and the method's `med_category` list is written in lower case to match. Unlike §5.2 the medication load is **not** filtered on `med_category` at load time — the lists are short enough that filtering after lower-casing is both cheaper to reason about and immune to the casing hole D22 exists to patch. The `hospitalization_id` filter still applies at load.
 
 Step 5 is a requirement, not tidiness. A medication given in the ED presentation and an IMV row charted after transfer belong to one encounter; if `hospitalization_id` survives into the window filter or the ranking, the method silently reverts to the unstitched unit and reintroduces exactly the artifact D15 removes. Dropping the column makes that mistake impossible to write rather than merely discouraged.
 
