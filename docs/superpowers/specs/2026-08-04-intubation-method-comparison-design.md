@@ -8,21 +8,19 @@
 
 The methods catalog established that intubation detection definitions disagree, and quantified that disagreement for one signal source only: the `device_category` transition rule (M1–M4). This project measures a **second, orthogonal axis** — the *signal source* itself.
 
-Four candidate signals are compared head to head on the same patients at the same moment:
+Three candidate signals are compared head to head on the same patients at the same moment:
 
-| ID | Signal | Whiteboard item |
-|----|----|----|
-| `SED` | Intermittent sedative/induction agent administration | \(0\) |
-| `PARA` | Intermittent paralytic administration | \(1\) |
-| `DEV` | `device_category` transition non-IMV → IMV | \(2\) |
-| `INF` | Continuous sedation infusion start | \(3\) |
+| ID | Signal | Whiteboard item | Source table |
+|---|---|---|---|
+| `SED` | Induction agent administration | \(0\) | `medication_admin_intermittent` |
+| `PARA` | Paralytic administration | \(1\) | `medication_admin_intermittent` |
+| `DEV` | `device_category` transition non-IMV → IMV | \(2\) | `respiratory_support` |
 
-Two further sources serve as a **partial gold-truth reference**, not as compared methods:
+One further source serves as a **partial gold-truth reference**, not as a compared method:
 
-| ID | Signal | Whiteboard item |
-|------------------------|------------------------|------------------------|
-| `CPT` | CPT 31500 present in the hospitalization | (c1) |
-| `ICD` | ICD-9/ICD-10-PCS intubation or mechanical-ventilation code present | \(s\) |
+| ID | Signal | Whiteboard item | Source table |
+|---|---|---|---|
+| `CPT` | CPT 31500 present in the hospitalization | (c1) | `patient_procedures` |
 
 The deliverable answers two questions: **do these signals identify the same patients**, and **how is their charting distributed in time relative to the intubation**.
 
@@ -30,6 +28,8 @@ The deliverable answers two questions: **do these signals identify the same pati
 
 - **Intubation only.** Extubation is out of scope for this build; the catalog already covers it and it can be a later phase.
 - **First IMV episode only.** One index event per hospitalization. Reintubation, episode stitching, and outcome classification are out of scope.
+- **Intermittent medications only.** Both medication methods read `medication_admin_intermittent`. The continuous-infusion signal (whiteboard item 3) is out of scope — see §11.
+- **CPT is the sole reference.** ICD procedure codes are out of scope — see §11.
 - **Testing target is MIMIC**, with the pipeline written to run at any consortium site via config.
 
 ------------------------------------------------------------------------
@@ -40,16 +40,18 @@ Each decision below was made explicitly during design. Recorded with rationale s
 
 | \# | Decision | Rationale |
 |------------------------|------------------------|------------------------|
-| D1 | **Six signals: four methods under test, two reference sources.** CPT and ICD do not enter the agreement matrix. | Catalog §12.2 establishes procedure codes confirm *presence* but never *timing*, and their capture rate varies by site, payer and era. They cannot be peers to a timestamped signal. |
+| D1 | **Four signals: three methods under test, one reference source.** CPT does not enter the agreement matrix. | Catalog §12.2 establishes procedure codes confirm *presence* but never *timing*, and their capture rate varies by site, payer and era. A code cannot be a peer to a timestamped signal. |
+| D1a | **The continuous-infusion method (`INF`) is removed.** | It detects a *state* — "this patient is on sedation, therefore probably ventilated" — not the intubation event. Its signal necessarily lags t₀ and cannot distinguish an intubation from ongoing ICU sedation, so it would contribute detections without contributing evidence about timing. |
+| D1b | **The ICD reference is removed; CPT 31500 is the sole reference.** | Removing ICD-10-PCS while keeping ICD-9 would leave a reference that is effectively dead for a 2018–2025 cohort, so the reference is dropped whole rather than partially. One reference also removes the question of what to do when CPT and ICD disagree. |
 | D2 | **Device signal is one notebook using the M2 symmetric 2/2 rule**, not four notebooks for M1–M4. | The M1–M4 spread is already quantified in the catalog. Re-running it here would measure a known result and obscure the new one. |
 | D3 | **Analytic unit is one row per hospitalization**, anchored on t₀ = first charted IMV row. | Collapses event matching entirely: no greedy pairing, no order-dependence, no tolerance windows. Agreement becomes a plain binary table; timing becomes offset distributions on a shared axis. |
 | D4 | **Detection window is t₀ ± 3 hours**, symmetric. | Set by the study lead. Every method asks the same question over the same interval, so differences are attributable to the signal and not to the window. |
 | D5 | **Respiratory pre-processing is fixed: post-waterfall, single policy.** No pre/post grid. | Catalog §12.4 requires the policy be settled before methods are compared. Fixing it in one place makes the agreement numbers mean exactly one thing; changing it later is a config edit, not a rewrite. |
-| D6 | **Waterfall runs with `bfill=False`.** | `clifpy/utils/waterfall.py:12` — already the library default; `:58` confirms forward-fill only when False. Backfilling could propagate a device backwards in time and manufacture an IMV row earlier than the first real charting, sliding t₀ and with it all four ±3h windows. |
-| D7 | **No CPT code and no `billing_provider_id` in the cohort definition.** | Explicit study requirement. Distinguishes this cohort from `Induction_Variability_RSI`, which requires both. Codes enter only as the reference in notebook `06`. |
-| D8 | **Every method notebook is fully self-contained. No shared helper module.** | A bug in a shared helper corrupts all four methods *identically*, and correlated errors are indistinguishable from genuine agreement — the one failure mode an agreement study cannot tolerate. Isolation makes mistakes surface as disagreement (visible) rather than as inflated concordance (invisible). |
-| D9 | **The detection window is data, not code.** `01_cohort.py` writes `window_start` / `window_end` into `cohort_index.parquet`. | Removes the usual cost of D8. There is no window logic to duplicate across four notebooks, so there is nothing to drift, while detection logic stays fully independent. |
-| D10 | **`SED` is the induction-agent list — the drugs used to intubate — and reads `medication_admin_intermittent` only.** Propofol and fentanyl also appear in `INF`, but the methods are separated by *table*, not by drug name. | Induction agents are intermittently dosed; maintenance sedation is a continuous infusion. Same drug, different table, different clinical act. Reading propofol from both tables into `SED` would conflate intubating a patient with sedating one already ventilated. `SED` is still expected to fire often, since midazolam and fentanyl are given for many non-airway reasons — that low specificity is a reportable property of the method, not a defect to tune away before measurement. |
+| D6 | **Waterfall runs with `bfill=False`.** | `clifpy/utils/waterfall.py:12` — already the library default; `:58` confirms forward-fill only when False. Backfilling could propagate a device backwards in time and manufacture an IMV row earlier than the first real charting, sliding t₀ and with it every ±3h window. |
+| D7 | **No CPT code and no `billing_provider_id` in the cohort definition.** | Explicit study requirement. Distinguishes this cohort from `Induction_Variability_RSI`, which requires both. The CPT code enters only as the reference in notebook `05`. |
+| D8 | **Every method notebook is fully self-contained. No shared helper module.** | A bug in a shared helper corrupts every method *identically*, and correlated errors are indistinguishable from genuine agreement — the one failure mode an agreement study cannot tolerate. Isolation makes mistakes surface as disagreement (visible) rather than as inflated concordance (invisible). |
+| D9 | **The detection window is data, not code.** `01_cohort.py` writes `window_start` / `window_end` into `cohort_index.parquet`. | Removes the usual cost of D8. There is no window logic to duplicate across notebooks, so there is nothing to drift, while detection logic stays fully independent. |
+| D10 | **`SED` is the induction-agent list — the drugs used to intubate — and reads `medication_admin_intermittent` only.** | Induction agents are intermittently dosed. Propofol and fentanyl are also charted as continuous maintenance infusions, but those rows live in `medication_admin_continuous` and are never read: reading them would conflate intubating a patient with sedating one already ventilated. `SED` is still expected to fire often, since midazolam and fentanyl are given for many non-airway reasons — that low specificity is a reportable property of the method, not a defect to tune away before measurement. |
 | D11 | **Each method is a profiler, not just a detector.** It emits the ranked medication sequence around t₀ with dose, unit and lag; the binary `detected` is *derived* from that structure. | A binary answers "did the signal appear"; the ranked sequence answers "what was actually given, in what order, how far from the intubation". Deriving the binary from the ranks rather than computing it separately makes the two incapable of disagreeing. |
 | D12 | **Ranks deduplicate by `med_category`: last administration before t₀, first after, ranked nearest-first.** | Nearest-first makes rank 1 the most clinically proximate entry, so rank 1 is comparable across patients. Dedup removes a real statistical artifact — under the previous all-signals contract a patient given six fentanyl doses contributed six observations to the timing distribution and dominated it. |
 | D13 | **Ranking is over each method's own medication list only**, not over all charted medications. | Keeps every method strictly about its own signal, so the ranked output elaborates what the method detects rather than describing the ward. Consequence: rank counts are bounded by list size, so no rank cap is specified. |
@@ -62,15 +64,14 @@ Each decision below was made explicitly during design. Recorded with rationale s
 ```         
 code/
   01_cohort.py            cohort + CONSORT + waterfall + t₀ + window bounds
-  02_method_sedative.py   ┐
-  03_method_paralytic.py  │  each fully self-contained:
-  04_method_device.py     │  config → cohort_index + ONE CLIF table
-  05_method_infusion.py   ┘  → own logic → ranked JSON + parquet → assert schema
-  06_reference_codes.py   CPT 31500 + ICD codes
-  07_agreement.py         schema gatekeeper + agreement + distributions
+  02_method_sedative.py   ┐  each fully self-contained:
+  03_method_paralytic.py  │  config → cohort_index + ONE CLIF table
+  04_method_device.py     ┘  → own logic → artifacts → assert own schema
+  05_reference_cpt.py     CPT 31500 presence
+  06_agreement.py         schema gatekeeper + agreement + distributions
 ```
 
-The only things crossing a notebook boundary are **parquet artifacts** and the **schema contract in §6**. `07_agreement.py` validates the schema of every input on load and fails loudly rather than silently mis-joining.
+The only things crossing a notebook boundary are **artifacts on disk** and the **schema contract in §6**. `06_agreement.py` validates the schema of every input on load and fails loudly rather than silently mis-joining.
 
 All notebooks are marimo notebooks stored as `.py`, run as `uv run python code/NN_name.py`, matching the existing consortium convention.
 
@@ -159,13 +160,13 @@ Within the window `[window_start, window_end]` from `cohort_index.parquet`:
 
 Deduplication is **by `med_category`**, so a medication appears at most once in `before` and at most once in `after`. Repeat administrations of the same agent are collapsed to the single one nearest the intubation.
 
-**No rank cap.** Ranks are naturally bounded by the size of the method's medication list — at most **5** for `SED`, **3** for `PARA`, **3** for `INF`. A cap of 5 was considered and rejected as redundant: it exactly equals `SED`'s list length and exceeds the other two, so it can never truncate anything. Writing it would leave a constant a later reviewer reads as load-bearing when it is not.
+**No rank cap.** Ranks are naturally bounded by the size of the method's medication list — at most **5** for `SED` and **3** for `PARA`. A cap of 5 was considered and rejected as redundant: it exactly equals `SED`'s list length and exceeds `PARA`'s, so it can never truncate anything. Writing it would leave a constant a later reviewer reads as load-bearing when it is not.
 
 Ties — two different medications sharing an identical `admin_dttm` — are broken alphabetically by `med_category`, so output is deterministic across runs.
 
 ### 6.3 `method_<ID>_ranked.json` — canonical
 
-One JSON object per intubation episode, emitted by the three **medication** methods (`SED`, `PARA`, `INF`). Written as newline-delimited JSON so it streams and appends cleanly.
+One JSON object per intubation episode, emitted by the two **medication** methods (`SED`, `PARA`). Written as newline-delimited JSON so it streams and appends cleanly.
 
 ```json
 {
@@ -201,13 +202,13 @@ One JSON object per intubation episode, emitted by the three **medication** meth
 
 ### 6.4 `method_<ID>_encounter.parquet` — joinable
 
-One row per **cohort** hospitalization, including non-detections. Emitted by all four methods. This is what §8 joins on; the JSON is not join-friendly at scale.
+One row per **cohort** hospitalization, including non-detections. Emitted by all three methods. This is what §8 joins on; the JSON is not join-friendly at scale.
 
 | Column | Type | Notes |
 |---|---|---|
 | `hospitalization_id` | str | |
 | `intubation_episode_id` | str | `{hospitalization_id}_E1` |
-| `method_id` | str | one of `SED`, `PARA`, `DEV`, `INF` |
+| `method_id` | str | one of `SED`, `PARA`, `DEV` |
 | `imv_dttm` | datetime | t₀, copied from `cohort_index` |
 | `detected` | bool | see below |
 | `n_before` | int | count of ranked entries before t₀; 0 for `DEV` |
@@ -229,7 +230,7 @@ Deriving the binary from the ranked structure rather than computing it separatel
 
 ## 7. Method definitions
 
-All four evaluate against `cohort_index.parquet` and are restricted to the window `[window_start, window_end]`. The three medication methods differ **only** in which `med_category` values they admit — the ranking rule of §6.2 is identical across them.
+All three evaluate against `cohort_index.parquet` and are restricted to the window `[window_start, window_end]`. The two medication methods differ **only** in which `med_category` values they admit — the ranking rule of §6.2 is identical across them, and both read `medication_admin_intermittent`.
 
 ### `SED` — `02_method_sedative.py`
 
@@ -243,7 +244,7 @@ midazolam | etomidate | ketamine | propofol | fentanyl
 
 Ranked per §6.2. At most 5 before-ranks and 5 after-ranks.
 
-> **`SED` reads the intermittent table only — never the continuous table.** Propofol and fentanyl also appear in `INF`'s list, but the two methods never see the same rows: an induction bolus is charted in `medication_admin_intermittent`, a maintenance infusion in `medication_admin_continuous`. The separation is by table, not by drug name. Pulling propofol from both tables into `SED` would conflate the act of intubating a patient with the act of sedating one already ventilated.
+> **`SED` reads the intermittent table only — never the continuous table.** Propofol and fentanyl are also charted as continuous maintenance infusions, but those rows live in `medication_admin_continuous` and are out of scope for this build (§11). An induction bolus and a maintenance infusion are the same drug performing two different clinical acts, distinguished by which table they are charted in. Pulling propofol from both would conflate intubating a patient with sedating one already ventilated.
 
 `med_dose` and `med_dose_unit` are taken verbatim from the administration row. **No unit conversion or dose normalisation is performed** — the raw charted value is what a reviewer needs to see, and normalising would hide unit heterogeneity that is itself worth measuring across sites.
 
@@ -267,7 +268,7 @@ Source: `cohort_resp_waterfall.parquet`. Fires when t₀ is a **documented non-I
 
 **Boundary policy is `B_strict`** — if row `i-2`, `i-1` or `i+1` does not exist, the corresponding term is false and `DEV` does not fire. This matches the convention the catalog applies to M2 in §3.1 and is stated here rather than inherited from language semantics.
 
-`DEV` has no medication signal and therefore **emits no `_ranked.json`** (§6.3). It writes only `method_DEV_encounter.parquet`, with `n_before = n_after = 0` and all four `nearest_*` fields null. It contributes to the binary agreement table in §8 Tier A but not to the ranked timing analysis in Tier B.
+`DEV` has no medication signal and therefore **emits no `_ranked.json`** (§6.3). It writes only `method_DEV_encounter.parquet`, with `n_before = n_after = 0` and every `nearest_*` field null. It contributes to the binary agreement table in §8 Tier A but not to the ranked timing analysis in Tier B.
 
 When the rule does not fire, `non_detection_reason` takes the first applicable value:
 
@@ -280,61 +281,43 @@ When the rule does not fire, `non_detection_reason` takes the first applicable v
 
 > **What `DEV` actually measures.** Anchored on t₀, this method reports the fraction of the cohort whose pre-intubation period was documented at all — catalog §9.4, the arrived-intubated rate. A low `DEV` detection rate means the medication methods are firing on intubations whose device transition was never charted. That is a finding about site charting, not a failure of the method.
 
-### `INF` — `05_method_infusion.py`
-
-Source: `medication_admin_continuous`. Fires when a continuous infusion **starts** within the window, with `med_category` in:
-
-```         
-propofol | dexmedetomidine | fentanyl
-```
-
-**An infusion start is defined explicitly**, since `medication_admin_continuous` records repeated rate rows rather than start events: a row is an infusion start if, within the same hospitalization and the same `med_category`, either no earlier row exists, or the immediately preceding row is more than `infusion_gap_hours` earlier. Default `infusion_gap_hours = 6`, read from config.
-
-This rule matters. Defining the start as simply the *first* row of that `med_category` in the hospitalization would systematically miss any patient already receiving that agent for an unrelated reason before intubation — a common pattern for dexmedetomidine and fentanyl.
-
-Infusion **starts** are then ranked per §6.2, treating each start as the administration event. At most 3 before-ranks and 3 after-ranks. `med_dose` and `med_dose_unit` are the rate and rate unit recorded on the starting row, taken verbatim.
-
-> **`INF` ranks starts, not rate rows.** Deduplication by `med_category` in §6.2 would otherwise be doing two jobs at once — collapsing repeat boluses and collapsing an infusion's rate titrations. Resolving starts first means each ranked entry is one clinical decision to begin an agent, which is the thing being compared.
-
 ------------------------------------------------------------------------
 
 ## 8. Reference and agreement
 
-### `06_reference_codes.py`
+### `05_reference_cpt.py`
 
-Source: `patient_procedures` — `procedure_code`, `procedure_code_format`, `procedure_billed_dttm`. **`billing_provider_id` is not read.** Presence anywhere in the hospitalization; no timing use, per catalog §12.2.
+Source: `patient_procedures` — `procedure_code`, `procedure_code_format`. **`billing_provider_id` is not read, and `procedure_billed_dttm` is read only to confirm the row belongs to the hospitalization — never as an event time.**
 
-| Reference | Format | Codes |
-|------------------------|------------------------|------------------------|
-| `CPT` | CPT | `31500` |
-| `ICD` | ICD-10-PCS | `0BH17EZ`, `0BH18EZ` (endotracheal airway insertion) |
-| `ICD` | ICD-10-PCS | `5A1935Z`, `5A1945Z`, `5A1955Z` (mechanical ventilation \<24h / 24–96h / \>96h) |
-| `ICD` | ICD-9 | `9604` (endotracheal tube insertion) |
-| `ICD` | ICD-9 | `9670`, `9671`, `9672` (continuous mechanical ventilation) |
+| Reference | Format | Code |
+|---|---|---|
+| `CPT` | CPT | `31500` — emergency endotracheal intubation |
 
-Output: `reference_codes.parquet` — one row per cohort hospitalization with `cpt_present` and `icd_present` booleans.
+Output: `reference_cpt.parquet` — one row per cohort hospitalization with a `cpt_present` boolean.
 
-Also reports the **code capture rate**: the fraction of the cohort carrying any of these codes. Every reference-scored metric in Tier C must be read against this number first — where capture is low, the reference is uninformative at that site and is reported as such rather than scored.
+Also reports the **code capture rate**: the fraction of the cohort carrying the code. Every metric in Tier C must be read against this number first — where capture is low, the reference is uninformative at that site and is reported as such rather than scored.
 
-### `07_agreement.py`
+> **CPT 31500 is a narrow reference and its ceiling should be stated up front.** It codes *emergency* endotracheal intubation, so elective and operative airway management is not captured, and billing completeness varies by site, payer and era. Sensitivity computed against it is bounded by that capture, not by the method under test — which is precisely why it is a *partial* gold truth and not a peer in the agreement matrix (D1).
+
+### `06_agreement.py`
 
 > **All numbers in the tables below are illustrative shape, not results.** They exist to fix the output format so the notebook can be written and reviewed before any data is run. Real values come from executing the pipeline.
 
 #### Step 0 — the joined analytic table
 
-The notebook validates the schema of each `method_*_encounter.parquet` against §6.4, then joins all four plus `reference_codes.parquet` on `intubation_episode_id`. Every cohort hospitalization appears exactly once. This wide table is the input to **Tier A** and **Tier C**.
+The notebook validates the schema of each `method_*_encounter.parquet` against §6.4, then joins all three plus `reference_cpt.parquet` on `intubation_episode_id`. Every cohort hospitalization appears exactly once. This wide table is the input to **Tier A** and **Tier C**.
 
 ```         
-episode_id | SED PARA DEV INF | sed_bef para_bef inf_aft | cpt icd
------------+------------------+--------------------------+---------
- 1001_E1   |  1    1   1   1  |   -4.0    -2.0     +38.0  |  1   1
- 1002_E1   |  1    1   1   0  |   -9.0    -6.0       NaN  |  1   1
- 1003_E1   |  1    0   1   1  |  -12.0     NaN     +21.0  |  0   1
- 1004_E1   |  0    0   0   1  |    NaN     NaN    +115.0  |  0   0
- 1005_E1   |  1    1   0   1  |   -3.0    -5.0     +44.0  |  1   0
------------+------------------+--------------------------+---------
+episode_id | SED PARA DEV | sed_bef para_bef | cpt
+-----------+--------------+------------------+-----
+ 1001_E1   |  1    1   1  |   -4.0     -2.0  |  1
+ 1002_E1   |  1    1   1  |   -9.0     -6.0  |  1
+ 1003_E1   |  1    0   1  |  -12.0      NaN  |  0
+ 1004_E1   |  0    0   0  |    NaN      NaN  |  0
+ 1005_E1   |  1    1   0  |   -3.0     -5.0  |  1
+-----------+--------------+------------------+-----
  N* rows, one per cohort hospitalization
- *_bef / *_aft = nearest_before_min / nearest_after_min (rank 1)
+ *_bef = nearest_before_min (rank 1), signed minutes
  NaN where that direction had no ranked entry
  DEV omitted from the offset block — no medication signal (§7)
 ```
@@ -345,38 +328,35 @@ episode_id | SED PARA DEV INF | sed_bef para_bef inf_aft | cpt icd
 
 **A.1 Detection rate per method.** The marginal, before any pairing.
 
-| method | detected   | n     | rate |
-|--------|------------|-------|------|
-| `SED`  | ✓          | 1 842 | 0.83 |
-| `PARA` | ✓          | 1 431 | 0.65 |
-| `DEV`  | ✓          | 1 202 | 0.54 |
-| `INF`  | ✓          | 1 067 | 0.48 |
-| —      | cohort N\* | 2 214 | 1.00 |
+| method | detected | n | rate |
+|---|---|---|---|
+| `SED` | ✓ | 1 842 | 0.83 |
+| `PARA` | ✓ | 1 431 | 0.65 |
+| `DEV` | ✓ | 1 202 | 0.54 |
+| — | cohort N\* | 2 214 | 1.00 |
 
-**A.2 Pairwise agreement, 4×4.** One row per unordered pair. `both` / `only A` / `only B` / `neither` are the four cells of the 2×2, so every row is a complete contingency table and κ is recomputable from it by hand — a deliberate auditability property.
+**A.2 Pairwise agreement, 3×3.** One row per unordered pair. `both` / `only A` / `only B` / `neither` are the four cells of the 2×2, so every row is a complete contingency table and κ is recomputable from it by hand — a deliberate auditability property.
 
-| pair           | both  | only A | only B | neither | Jaccard | Cohen κ |
-|----------------|-------|--------|--------|---------|---------|---------|
-| `SED` × `PARA` | 1 388 | 454    | 43     | 329     | 0.74    | 0.51    |
-| `SED` × `DEV`  | 1 043 | 799    | 159    | 213     | 0.52    | 0.14    |
-| `SED` × `INF`  | 918   | 924    | 149    | 223     | 0.46    | 0.11    |
-| `PARA` × `DEV` | 902   | 529    | 300    | 483     | 0.52    | 0.25    |
-| `PARA` × `INF` | 811   | 620    | 256    | 527     | 0.48    | 0.24    |
-| `DEV` × `INF`  | 704   | 498    | 363    | 649     | 0.45    | 0.26    |
+| pair | both | only A | only B | neither | Jaccard | Cohen κ |
+|---|---|---|---|---|---|---|
+| `SED` × `PARA` | 1 388 | 454 | 43 | 329 | 0.74 | 0.51 |
+| `SED` × `DEV` | 1 043 | 799 | 159 | 213 | 0.52 | 0.14 |
+| `PARA` × `DEV` | 902 | 529 | 300 | 483 | 0.52 | 0.25 |
 
-**A.3 Concordance histogram.** How many of the four fired on the same hospitalization.
+**A.3 Concordance histogram.** How many of the three fired on the same hospitalization.
 
-| methods firing | n   | \%   |
-|----------------|-----|------|
-| 0              | 118 | 5.3  |
-| 1              | 341 | 15.4 |
-| 2              | 502 | 22.7 |
-| 3              | 611 | 27.6 |
-| 4              | 642 | 29.0 |
+| methods firing | n | \% |
+|---|---|---|
+| 0 | 174 | 7.9 |
+| 1 | 486 | 21.9 |
+| 2 | 712 | 32.2 |
+| 3 | 842 | 38.0 |
 
 The `0` row is the one to read first: hospitalizations that are in the cohort — so they *have* an IMV row by construction — where no method fired at all. That count is a direct measure of how much intubation goes undetected by every signal simultaneously.
 
-**A.4 Upset plot** of the 15 non-empty detection-set combinations, sorted by frequency. Plot only; the underlying counts are A.3 broken out by which specific methods fired.
+**A.4 Upset plot** of the 7 non-empty detection-set combinations, sorted by frequency. Plot only; the underlying counts are A.3 broken out by which specific methods fired.
+
+> With three methods the upset plot is small enough that its 7 combinations could be tabulated directly. It is kept as a plot because the combination *identities* — `SED`-only versus `DEV`-only, say — are the interesting part, and those read faster visually than as a table of set labels.
 
 #### Tier B — how is charting distributed in time?
 
@@ -390,8 +370,6 @@ Computed by flattening the `method_*_ranked.json` files into a long frame of ran
 | `SED` | after | 1 204 | +47.0 | +18.0 … +102.0 | 31.5 |
 | `PARA` | before | 1 402 | −4.0 | −9.0 … −2.0 | 93.1 |
 | `PARA` | after | 118 | +62.0 | +21.0 … +134.0 | 22.0 |
-| `INF` | before | 344 | −52.0 | −118.0 … −19.0 | 18.6 |
-| `INF` | after | 1 016 | +41.0 | +12.0 … +96.0 | 34.8 |
 
 **B.2 Offset by rank.** Whether the rank ladder behaves — rank 1 nearest, later ranks progressively further from t₀. A ladder that does not monotonically widen indicates a ranking bug.
 
@@ -425,35 +403,35 @@ Doses are the raw charted values with no unit conversion (§7), so `unit` must a
         −180      −90        0        +90      +180  min
           |        |         |         |         |
   PARA          ▁▂▅█▇▃▁      │
-  SED         ▁▂▄▇█▆▃▂▁      │
-  INF                        │ ▂▄▅▄▃▂▂▁▁▁
+  SED         ▁▂▄▇█▆▃▂▁      │▁▂▂▁
                              ▲ t₀
 ```
 
-The clinical read: `PARA` and `SED` should cluster tightly just *before* t₀ — the meds are given to accomplish the intubation. `INF` should sit *after* — sedation is continued once the patient is on the vent. A method whose mass falls on the wrong side of t₀ is detecting something other than the intubation.
+The clinical read: both methods should cluster tightly just *before* t₀ — induction agents and paralytics are given to accomplish the intubation. Mass appearing *after* t₀ is expected to be small and is meaningful when it appears: a post-intubation sedative bolus, or a paralytic redose. A method whose bulk falls on the wrong side of t₀ is detecting something other than the intubation.
+
+> **Both remaining methods are pre-t₀ signals**, so the forward half of the ±3h window now carries much less traffic than the backward half. The window stays symmetric — an asymmetric window would bias the comparison and would need its own justification — but expect `after` arrays to be sparse, and read a large post-t₀ mass as a signal that t₀ itself is landing late.
 
 #### Tier C — reference check
 
 **C.1 Code capture rate, reported first.** Every metric in C.2 is uninterpretable without it.
 
-| reference          | n with code | capture rate |
-|--------------------|-------------|--------------|
-| `CPT` 31500        | 1 106       | 0.50         |
-| `ICD` (any listed) | 1 794       | 0.81         |
-| either             | 1 903       | 0.86         |
+| reference | n with code | capture rate |
+|---|---|---|
+| `CPT` 31500 | 1 106 | 0.50 |
 
-**C.2 Per-method scoring**, one block per reference. Reference-positive is treated as the condition; a method's non-detection in a reference-positive encounter is a false negative.
+**C.2 Per-method scoring.** Reference-positive is treated as the condition; a method's non-detection in a reference-positive encounter is a false negative.
 
-| method | vs    | TP    | FP  | FN  | TN  | sensitivity | PPV  | F1   |
-|--------|-------|-------|-----|-----|-----|-------------|------|------|
-| `SED`  | `ICD` | 1 588 | 254 | 206 | 166 | 0.89        | 0.86 | 0.87 |
-| `PARA` | `ICD` | 1 297 | 134 | 497 | 286 | 0.72        | 0.91 | 0.80 |
-| `DEV`  | `ICD` | 1 044 | 158 | 750 | 262 | 0.58        | 0.87 | 0.70 |
-| `INF`  | `ICD` | 901   | 166 | 893 | 254 | 0.50        | 0.84 | 0.63 |
+| method | vs | TP | FP | FN | TN | sensitivity | PPV | F1 |
+|---|---|---|---|---|---|---|---|---|
+| `SED` | `CPT` | 1 004 | 838 | 102 | 270 | 0.91 | 0.54 | 0.68 |
+| `PARA` | `CPT` | 892 | 539 | 214 | 569 | 0.81 | 0.62 | 0.70 |
+| `DEV` | `CPT` | 701 | 501 | 405 | 607 | 0.63 | 0.58 | 0.61 |
 
-Repeated as a second block against `CPT`. Both blocks carry a standing caveat in the notebook output: **codes establish presence, never timing** (catalog §12.2), and where capture rate is low the reference is reported as uninformative rather than scored.
+The block carries a standing caveat in the notebook output: **codes establish presence, never timing** (catalog §12.2), and where capture rate is low the reference is reported as uninformative rather than scored.
 
-#### Outputs written by `07`
+> **Read PPV against C.1, not on its own.** At the illustrative 0.50 capture rate, half the cohort lacks the code despite having an IMV row by construction — so most "false positives" are encounters the reference simply failed to code, not encounters the method got wrong. Sensitivity is the more interpretable column here; PPV is bounded above by capture and will look poor for any method regardless of quality.
+
+#### Outputs written by `06`
 
 | File | Contents |
 |---|---|
@@ -480,7 +458,7 @@ Follows the existing rules in [`output/README.md`](../../../output/README.md) an
 
 | Directory | Contents |
 |------------------------------------|------------------------------------|
-| `output/intermediate_phi/` | `cohort.parquet`, `cohort_resp_waterfall.parquet`, `cohort_index.parquet`, `method_{SED,PARA,INF}_ranked.json`, `method_{SED,PARA,DEV,INF}_encounter.parquet`, `reference_codes.parquet` |
+| `output/intermediate_phi/` | `cohort.parquet`, `cohort_resp_waterfall.parquet`, `cohort_index.parquet`, `method_{SED,PARA}_ranked.json`, `method_{SED,PARA,DEV}_encounter.parquet`, `reference_cpt.parquet` |
 | `output/final_no_phi/` | CONSORT counts, agreement matrices, offset distribution summaries, reference-scored metrics, plots |
 
 `output/final_no_phi/` constraints: aggregates only, **minimum cell size n ≥ 10** for every reported statistic, no `patient_id`, no row-level records, no raw `.csv` / `.parquet` data files.
@@ -499,19 +477,27 @@ Extends the existing `config/config.json` schema read by `utils/config.py`.
   "timezone": "US/Eastern",
   "output_directory": "./output",
   "window_hours": 3,
-  "infusion_gap_hours": 6,
   "date_start": "2018-01-01",
   "date_end": "2025-12-31"
 }
 ```
 
-`window_hours`, `infusion_gap_hours`, `date_start` and `date_end` are new. `date_start` and `date_end` are ignored when `site_name.lower() == "mimic"`.
+`window_hours`, `date_start` and `date_end` are new. `date_start` and `date_end` are ignored when `site_name.lower() == "mimic"`.
+
+`window_hours` is the only parameter that changes a detection result, and it applies identically to both medication methods (§6.2). Everything else is a path or a site label.
 
 ------------------------------------------------------------------------
 
 ## 11. Out of scope
 
 Recorded so these are visible omissions rather than oversights.
+
+**Removed from an earlier draft of this spec:**
+
+- **The continuous-infusion method `INF`** (whiteboard item 3) — propofol / dexmedetomidine / fentanyl infusion starts. Removed per D1a. Consequently `medication_admin_continuous` is not read anywhere in the pipeline, and `infusion_gap_hours` is not a config key.
+- **The ICD reference** — ICD-10-PCS `0BH17EZ`, `0BH18EZ`, `5A1935Z`, `5A1945Z`, `5A1955Z` and ICD-9 `9604`, `9670`–`9672`. Removed per D1b. CPT 31500 is the sole reference.
+
+**Out of scope from the start:**
 
 - Extubation detection of any kind.
 - Second and subsequent intubations; reintubation labelling; episode stitching.
