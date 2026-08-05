@@ -49,7 +49,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | D7 | **No CPT code and no `billing_provider_id` in the cohort definition.** | Explicit study requirement. Distinguishes this cohort from `Induction_Variability_RSI`, which requires both. Codes enter only as the reference in notebook `06`. |
 | D8 | **Every method notebook is fully self-contained. No shared helper module.** | A bug in a shared helper corrupts all four methods *identically*, and correlated errors are indistinguishable from genuine agreement — the one failure mode an agreement study cannot tolerate. Isolation makes mistakes surface as disagreement (visible) rather than as inflated concordance (invisible). |
 | D9 | **The detection window is data, not code.** `01_cohort.py` writes `window_start` / `window_end` into `cohort_index.parquet`. | Removes the usual cost of D8. There is no window logic to duplicate across four notebooks, so there is nothing to drift, while detection logic stays fully independent. |
-| D10 | **Medication lists taken as written on the source whiteboard**, including fentanyl appearing in both `SED` and `INF`. | Deliberate. `SED` is expected to fire often because midazolam and fentanyl are given for many non-airway reasons; that low specificity is a reportable property of the method, not a defect to be tuned away before measurement. |
+| D10 | **`SED` is the induction-agent list — the drugs used to intubate — and reads `medication_admin_intermittent` only.** Propofol and fentanyl also appear in `INF`, but the methods are separated by *table*, not by drug name. | Induction agents are intermittently dosed; maintenance sedation is a continuous infusion. Same drug, different table, different clinical act. Reading propofol from both tables into `SED` would conflate intubating a patient with sedating one already ventilated. `SED` is still expected to fire often, since midazolam and fentanyl are given for many non-airway reasons — that low specificity is a reportable property of the method, not a defect to tune away before measurement. |
 | D11 | **Each method is a profiler, not just a detector.** It emits the ranked medication sequence around t₀ with dose, unit and lag; the binary `detected` is *derived* from that structure. | A binary answers "did the signal appear"; the ranked sequence answers "what was actually given, in what order, how far from the intubation". Deriving the binary from the ranks rather than computing it separately makes the two incapable of disagreeing. |
 | D12 | **Ranks deduplicate by `med_category`: last administration before t₀, first after, ranked nearest-first.** | Nearest-first makes rank 1 the most clinically proximate entry, so rank 1 is comparable across patients. Dedup removes a real statistical artifact — under the previous all-signals contract a patient given six fentanyl doses contributed six observations to the timing distribution and dominated it. |
 | D13 | **Ranking is over each method's own medication list only**, not over all charted medications. | Keeps every method strictly about its own signal, so the ranked output elaborates what the method detects rather than describing the ward. Consequence: rank counts are bounded by list size, so no rank cap is specified. |
@@ -159,7 +159,7 @@ Within the window `[window_start, window_end]` from `cohort_index.parquet`:
 
 Deduplication is **by `med_category`**, so a medication appears at most once in `before` and at most once in `after`. Repeat administrations of the same agent are collapsed to the single one nearest the intubation.
 
-**No rank cap.** Ranks are naturally bounded by the size of the method's medication list — at most 4 for `SED`, 3 for `PARA`, 3 for `INF`. An explicit cap of 5 was considered and rejected because it can never bind, and a constant that never fires reads as meaningful to a later reviewer when it is not.
+**No rank cap.** Ranks are naturally bounded by the size of the method's medication list — at most **5** for `SED`, **3** for `PARA`, **3** for `INF`. A cap of 5 was considered and rejected as redundant: it exactly equals `SED`'s list length and exceeds the other two, so it can never truncate anything. Writing it would leave a constant a later reviewer reads as load-bearing when it is not.
 
 Ties — two different medications sharing an identical `admin_dttm` — are broken alphabetically by `med_category`, so output is deterministic across runs.
 
@@ -233,13 +233,17 @@ All four evaluate against `cohort_index.parquet` and are restricted to the windo
 
 ### `SED` — `02_method_sedative.py`
 
-Source: `medication_admin_intermittent`, filtered to `mar_action_category = 'given'` and `med_category` in:
+**Induction medications — the agents used to intubate a patient. All are intermittently dosed.**
+
+Source: `medication_admin_intermittent` **only**, filtered to `mar_action_category = 'given'` and `med_category` in:
 
 ```         
-etomidate | ketamine | midazolam | fentanyl
+midazolam | etomidate | ketamine | propofol | fentanyl
 ```
 
-Ranked per §6.2. At most 4 before-ranks and 4 after-ranks.
+Ranked per §6.2. At most 5 before-ranks and 5 after-ranks.
+
+> **`SED` reads the intermittent table only — never the continuous table.** Propofol and fentanyl also appear in `INF`'s list, but the two methods never see the same rows: an induction bolus is charted in `medication_admin_intermittent`, a maintenance infusion in `medication_admin_continuous`. The separation is by table, not by drug name. Pulling propofol from both tables into `SED` would conflate the act of intubating a patient with the act of sedating one already ventilated.
 
 `med_dose` and `med_dose_unit` are taken verbatim from the administration row. **No unit conversion or dose normalisation is performed** — the raw charted value is what a reviewer needs to see, and normalising would hide unit heterogeneity that is itself worth measuring across sites.
 
@@ -406,6 +410,7 @@ Computed by flattening the `method_*_ranked.json` files into a long frame of ran
 |---|---|---|---|---|---|---|
 | `SED` | etomidate | before | 891 | −4.0 | 20.0 | mg |
 | `SED` | ketamine | before | 302 | −5.0 | 100.0 | mg |
+| `SED` | propofol | before | 418 | −6.0 | 100.0 | mg |
 | `SED` | midazolam | before | 744 | −12.0 | 2.0 | mg |
 | `SED` | fentanyl | before | 981 | −18.0 | 100.0 | mcg |
 | `PARA` | rocuronium | before | 1 044 | −3.0 | 70.0 | mg |
