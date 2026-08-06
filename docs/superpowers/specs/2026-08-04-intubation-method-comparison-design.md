@@ -551,6 +551,7 @@ The table below has two parts. The **core columns** (`encounter_block` through `
 | `nearest_after_min` | float | `delta_minutes` at after-rank 1; null if none |
 | `detected_induction_only` | bool | D40. `detected` with prep administrations removed |
 | `n_after_induction` | int | distinct `med_category` with ≥1 **non-prep** administration after t₀ |
+| `n_after_prep` | int | distinct `med_category` with ≥1 prep administration after t₀. Not the complement of `n_after_induction` — a drug with both a prep and a non-prep dose counts in both. Carried so F.4 can cross-tab against `charting_delay_min` without reopening the medication tables |
 | `n_before_during` | int | D41, descriptive. Distinct `med_category` with ≥1 administration before t₀ given during a running same-drug infusion |
 | `n_after_during` | int | D41, descriptive. The same after t₀ |
 **`detected` is derived, not independently computed:** `detected = (n_before > 0) OR (n_after > 0)`, and `detected_induction_only = (n_before > 0) OR (n_after_induction > 0)`. The before-half is common to both because D40 exempts it.

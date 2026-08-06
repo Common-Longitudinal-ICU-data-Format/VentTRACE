@@ -42,6 +42,7 @@ Copied from the existing spec. Every task's requirements implicitly include this
 - **polars throughout**; pandas only at the two clifpy boundaries, both inside `01`.
 - **No helper functions across notebooks** (D8). Repeated logic is copy-pasted deliberately.
 - **The only correct clifpy timestamp conversion** is `series.dt.tz_convert(TIMEZONE).dt.tz_localize(None)` (§5.13).
+- **The timezone ALWAYS comes from `config["timezone"]`; no code path may consult the OS zone.** This bans `datetime.timestamp()` on a site-naive value just as firmly as it bans a bare `tz_localize(None)`: `.timestamp()` interprets a naive datetime in the operating system's zone, so on a CST machine holding US/Eastern data, 10 minutes of wall clock across a DST fall-back measures as 70. Convert inside polars with `pl.col(c).dt.epoch("s")`, which consults no zone at all.
 - **Lower-case every `*_category` column immediately after load**, and write every literal in lower case (D21).
 - **Every filter prints its row, episode, block and patient counts** before and after (§4).
 - **No silent defaults.** Every parameter affecting a result is read from `config.json` and echoed at the top of the notebook.
@@ -199,6 +200,7 @@ The threshold is a clinical judgment with no empirical valley (D40.2), so the ev
 - [ ] Add the collapse rule and its six worked examples to §7.3, beside the existing scan pseudocode, so the two stages read as one algorithm.
 - [ ] Update §6.5's `PAIR` column tables with the four new columns.
 - [ ] Update the `05` diagram in `docs/pipeline_flow.md:316-345` to show the collapse stage ahead of the scan, with a concrete example (`fentanyl 12:00 + propofol 12:00 -> one SED event -> one pair`).
+- [ ] Record **D41 — the timezone always comes from `config["timezone"]`; no code path may consult the OS zone** in the §2 decisions table, naming both leaks: `tz_localize(None)` on the way in and `datetime.timestamp()` on a site-naive value on the way out. Note the one known remaining exception, `COHORT_RUN_ID` in `code/01_cohort.py:138`, which stamps `datetime.now()` in OS-local time (a provenance label, not analytic data, but ambiguous across machines in a multi-site study) � flag it, do not fix it here.
 - [ ] Record the bridge fan-out as a defect in a short verification note, alongside the before/after numbers, so the 4,110 → 1,535 drop is traceable by anyone comparing runs.
 
 **Verification:** the spec's decision table, §6.5, §7.3 and §8 all agree with the code.
