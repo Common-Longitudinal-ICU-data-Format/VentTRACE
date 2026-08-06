@@ -72,6 +72,12 @@ def _(Path, json):
     PAIR_GAP_HOURS = config["pair_gap_hours"]
     PAIR_GAP_MINUTES = PAIR_GAP_HOURS * 60.0
 
+    # D40. The scan is handed clinical agent EVENTS, not raw administration rows: repeat
+    # and co-administered doses inside this window are one push of drug, and charting them
+    # as several rows is a documentation artefact, not several airways. Same argument as
+    # above -- 01 precomputes nothing for it, so it is read here and echoed here.
+    COLLAPSE_GAP_MINUTES = float(config["collapse_gap_minutes"])
+
     # Re-declared literally, not imported from 03 or 04 (D8). They must stay identical to
     # §7.1 and §7.2; the assertion block at the end checks the declared lists against the
     # values actually present in the output.
@@ -82,9 +88,11 @@ def _(Path, json):
     print(f"site           : {SITE}")
     print(f"method         : {METHOD_ID}")
     print(f"pair_gap_hours : {PAIR_GAP_HOURS}   ({PAIR_GAP_MINUTES:.0f} min)")
+    print(f"collapse_gap   : {COLLAPSE_GAP_MINUTES:.0f} min   (agent-event fold, D40)")
     print(f"class SED      : {' | '.join(SED_CATEGORIES)}")
     print(f"class PARA     : {' | '.join(PARA_CATEGORIES)}")
     return (
+        COLLAPSE_GAP_MINUTES,
         DATA_DIR,
         FILETYPE,
         MED_CATEGORIES,
@@ -248,6 +256,203 @@ def _(MED_CATEGORIES, PARA_CATEGORIES, SED_CATEGORIES, bridge, med_all, pl):
 def _(mo):
     mo.md(
         r"""
+        ## The collapse — administrations become agent events
+
+        The scan below counts *pairings*, so what it is handed decides what a pair means. A
+        raw administration row is not a clinical event: a rapid-sequence induction is
+        charted as fentanyl at 08:14, propofol at 08:14, rocuronium at 08:15, and a repeat
+        push of the same agent two minutes later is still the same push of drug. Handed
+        those rows, the scan forms one pair per sedative row it can match and reports four
+        intubations where the chart describes one.
+
+        So before the scan runs, administrations within `collapse_gap_minutes` of each other
+        are folded into one **agent event**, separately within each drug class of each
+        encounter (D40).
+
+        ```
+        for each (encounter_block, drug_class), rows already in time order:
+            start a new event at the first row
+            each next row joins the event  if  t[row] - t[event's FIRST row] <= gap
+            otherwise it opens a new event and becomes the new anchor
+        ```
+
+        The window is **anchored on the event's first row, not chained off the previous
+        one**. Chaining would let a maintenance infusion charted every ten minutes grow into
+        a single event spanning the whole stay, which would erase the second intubation of
+        a re-intubated patient. Anchoring bounds every event at `collapse_gap_minutes` end
+        to end, which the cell after next asserts.
+
+        The fold is *within* a class, never across it — a sedative and a paralytic must stay
+        separate rows or there is nothing left for the scan to pair. It is also blind to
+        which agents are involved: a repeat of one agent and a co-administration of two are
+        the same clinical fact, one push of that class of drug, and merge identically. The
+        surviving event is labelled with every agent it contains (`fentanyl+propofol`,
+        D40.5) so nothing is thrown away, and it carries `n_admin` and `span_min` so the
+        collapse is auditable from the pair table.
+        """
+    )
+    return
+
+
+@app.cell
+def _(COLLAPSE_GAP_MINUTES):
+    def collapse_agent_events(times, categories, gap_limit_min):
+        """Fold administrations into agent events. Returns [[i, ...], ...] in time order.
+
+        `times` is minutes-since-epoch as floats, ascending, all from one drug class of one
+        encounter. The invariant is that **no event spans more than `gap_limit_min`**: a row
+        joins the current event only while it is within the limit of that event's FIRST row,
+        and the moment it is strictly past it the row opens a new event and becomes the new
+        anchor. Anchored, never chained — the comparison is against `times[event[0]]` and
+        never against `times[i - 1]`, so a steady drip of closely-spaced doses cannot walk
+        an event forward without bound.
+
+        Strictly greater, not greater-or-equal: a row exactly `gap_limit_min` past the
+        anchor still merges, so the parameter reads as "within 15 minutes" inclusively.
+
+        `categories` takes no part in the decision and is only length-checked. That is the
+        point rather than an oversight: a repeat of one agent and a co-administration of
+        two are the same clinical fact — one push of this class of drug — and must fold the
+        same way. Which agents were involved is recorded on the event afterwards, by the
+        caller, in the D40.5 label.
+        """
+        n = len(times)
+        assert len(categories) == n, "times and categories are not the same length"
+        if n == 0:
+            return []
+        events = []
+        current = [0]
+        for i in range(1, n):
+            if times[i] - times[current[0]] > gap_limit_min:
+                events.append(current)
+                current = [i]
+            else:
+                current.append(i)
+        events.append(current)
+        return events
+
+    print(f"collapse window: {COLLAPSE_GAP_MINUTES:.0f} min")
+    return (collapse_agent_events,)
+
+
+@app.cell
+def _(collapse_agent_events):
+    def _self_test():
+        """The D40 worked examples, run as assertions before any real data is touched."""
+        _X = "x"  # the grouping is blind to the agent; one filler category is enough
+        cases = [
+            # (a) same-instant co-administration merges
+            ([0, 0], [[0, 1]]),
+            # (b) exactly at the limit still merges (`>`, not `>=`)
+            ([0, 15], [[0, 1]]),
+            # (c) one minute past the limit splits
+            ([0, 16], [[0], [1]]),
+            # (d) ANCHORED, not chained: 20 is 20 min past the event start, so it splits
+            #     even though it is only 10 min past its predecessor
+            ([0, 10, 20], [[0, 1], [2]]),
+            # (e) a run inside one window stays one event
+            ([0, 5, 10, 15], [[0, 1, 2, 3]]),
+            # (f) singleton
+            ([0], [[0]]),
+        ]
+        for _k, (_t, _want) in enumerate(cases):
+            _got = collapse_agent_events(
+                [float(x) for x in _t], [_X] * len(_t), 15.0
+            )
+            assert _got == _want, f"worked example {'abcdef'[_k]}: expected {_want}, got {_got}"
+        print("D40 collapse worked examples (a)-(f) pass")
+
+    _self_test()
+    return
+
+
+@app.cell
+def _(COLLAPSE_GAP_MINUTES, collapse_agent_events, pl, scan_rows):
+    _cols = ["encounter_block", "admin_dttm", "med_category", "med_dose", "med_dose_unit",
+             "drug_class"]
+    # Partitioned by class as well as encounter: the fold must never reach across SED/PARA
+    # or there would be nothing left to pair. `maintain_order` keeps the §6.2 sort
+    # (encounter_block, admin_dttm, med_category) inside each partition, which is what makes
+    # `times` ascending and the label's lead agent reproducible.
+    _parts = scan_rows.select(_cols).partition_by(
+        ["encounter_block", "drug_class"], as_dict=True, maintain_order=True
+    )
+
+    _events = []
+    for (_eb, _cls), _blk in _parts.items():
+        _t = _blk.get_column("admin_dttm").to_list()
+        _tmin = [x.timestamp() / 60.0 for x in _t]
+        _cat = _blk.get_column("med_category").to_list()
+        _dose = _blk.get_column("med_dose").to_list()
+        _unit = _blk.get_column("med_dose_unit").to_list()
+
+        for _idx in collapse_agent_events(_tmin, _cat, COLLAPSE_GAP_MINUTES):
+            _agents = sorted(set(_cat[_k] for _k in _idx))
+            # D40.6. Dose and unit come from the earliest administration of the FIRST agent
+            # named in the label -- alphabetically first, matching the label itself, so the
+            # dose always belongs to a named agent and stays numeric (E.3 takes a median of
+            # it). `_idx` is ascending, so the first match IS the earliest.
+            _lead = next(_k for _k in _idx if _cat[_k] == _agents[0])
+            _events.append(
+                {
+                    "encounter_block": _eb,
+                    "admin_dttm": _t[_idx[0]],  # the earliest administration in the event
+                    "med_category": "+".join(_agents),  # D40.5
+                    "med_dose": _dose[_lead],
+                    "med_dose_unit": _unit[_lead],
+                    "drug_class": _cls,
+                    "n_admin": len(_idx),
+                    "span_min": round(_tmin[_idx[-1]] - _tmin[_idx[0]], 1),
+                }
+            )
+
+    agent_events = pl.DataFrame(
+        _events,
+        schema={
+            "encounter_block": scan_rows.schema["encounter_block"],
+            "admin_dttm": scan_rows.schema["admin_dttm"],
+            "med_category": pl.String,
+            "med_dose": pl.Float64,
+            "med_dose_unit": pl.String,
+            "drug_class": pl.String,
+            "n_admin": pl.Int32,
+            "span_min": pl.Float64,
+        },
+    ).sort(["encounter_block", "admin_dttm", "med_category"])  # §6.2, carried through
+
+    # The three things that can go wrong, each asserted rather than assumed.
+    assert agent_events.get_column("span_min").max() <= COLLAPSE_GAP_MINUTES, (
+        f"an event spans {agent_events.get_column('span_min').max()} min against a "
+        f"{COLLAPSE_GAP_MINUTES:.0f} min limit -- the window chained off the previous row "
+        "instead of anchoring on the event's first."
+    )
+    assert agent_events.height <= scan_rows.height, "the collapse invented rows"
+    assert agent_events.get_column("n_admin").sum() == scan_rows.height, (
+        f"n_admin sums to {agent_events.get_column('n_admin').sum():,} against "
+        f"{scan_rows.height:,} administrations -- the fold lost or duplicated rows."
+    )
+
+    _merged = agent_events.filter(pl.col("n_admin") > 1)
+    _multi = agent_events.filter(pl.col("med_category").str.contains("+", literal=True))
+    print(f"administrations in : {scan_rows.height:,}")
+    print(f"agent events out   : {agent_events.height:,}")
+    print(agent_events.group_by("drug_class").agg(
+        n_events=pl.len(),
+        n_admin=pl.col("n_admin").sum(),
+        max_n_admin=pl.col("n_admin").max(),
+        max_span_min=pl.col("span_min").max(),
+    ).sort("drug_class"))
+    print(f"\nmerged events (n_admin > 1) : {_merged.height:,}")
+    print(f"multi-agent events          : {_multi.height:,}")
+    print("\ntop merged labels:")
+    print(_merged.get_column("med_category").value_counts(sort=True).head(10))
+    return (agent_events,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
         ## The scan — one forward pass with consumption
 
         ```
@@ -343,10 +548,12 @@ def _(PAIR_GAP_MINUTES):
 
 
 @app.cell
-def _(PAIR_GAP_MINUTES, pl, scan_encounter, scan_rows):
+def _(PAIR_GAP_MINUTES, agent_events, pl, scan_encounter):
+    # AGENT EVENTS, not administration rows (D40). The scan below is unchanged -- what
+    # changed is what it is handed.
     _cols = ["encounter_block", "admin_dttm", "med_category", "med_dose", "med_dose_unit",
-             "drug_class"]
-    _by_block = scan_rows.select(_cols).partition_by("encounter_block", as_dict=True)
+             "drug_class", "n_admin", "span_min"]
+    _by_block = agent_events.select(_cols).partition_by("encounter_block", as_dict=True)
 
     _rows = []
     _unpaired = []
@@ -358,6 +565,8 @@ def _(PAIR_GAP_MINUTES, pl, scan_encounter, scan_rows):
         _cat = _blk.get_column("med_category").to_list()
         _dose = _blk.get_column("med_dose").to_list()
         _unit = _blk.get_column("med_dose_unit").to_list()
+        _nadm = _blk.get_column("n_admin").to_list()
+        _span = _blk.get_column("span_min").to_list()
 
         _pairs = scan_encounter(_tmin, _cls, PAIR_GAP_MINUTES)
         _consumed = set()
@@ -377,14 +586,22 @@ def _(PAIR_GAP_MINUTES, pl, scan_encounter, scan_rows):
                     "sed_med_dose": _dose[_si],
                     "sed_med_dose_unit": _unit[_si],
                     "sed_admin_dttm": _t[_si],
+                    # How much charting the collapse folded into this member, kept on the
+                    # pair so the fold is auditable without re-running it.
+                    "n_sed_admin": _nadm[_si],
+                    "sed_span_min": _span[_si],
                     "para_med_category": _cat[_pi],
                     "para_med_dose": _dose[_pi],
                     "para_med_dose_unit": _unit[_pi],
                     "para_admin_dttm": _t[_pi],
+                    "n_para_admin": _nadm[_pi],
+                    "para_span_min": _span[_pi],
                     "pair_dttm": _t[_i],  # the earlier of the two, by scan order
                     "gap_minutes": round(_gap, 1),
                 }
             )
+        # Unpaired EVENTS now, not unpaired administration rows -- one unpaired event may
+        # stand for several charted doses (its n_admin).
         _n_sed = sum(1 for _k2 in range(len(_cls)) if _cls[_k2] == "SED" and _k2 not in _consumed)
         _unpaired.append(
             {
@@ -398,6 +615,7 @@ def _(PAIR_GAP_MINUTES, pl, scan_encounter, scan_rows):
     unpaired_counts = pl.DataFrame(_unpaired)
 
     print(f"encounters scanned : {len(_by_block):,}")
+    print(f"agent events fed   : {agent_events.height:,}")
     print(f"pairs formed       : {0 if pairs_raw is None else pairs_raw.height:,}")
     print(f"blocks with >=1 pair : {0 if pairs_raw is None else pairs_raw.get_column('encounter_block').n_unique():,}")
     return pairs_raw, unpaired_counts
@@ -446,7 +664,9 @@ def _(PAIR_GAP_MINUTES, index_imv, pairs_raw, pl):
                 "cohort_run_id", "index_class", "index_qualified",
                 "pair_id", "pair_seq", "first_class",
                 "sed_med_category", "sed_med_dose", "sed_med_dose_unit", "sed_admin_dttm",
+                "n_sed_admin", "sed_span_min",
                 "para_med_category", "para_med_dose", "para_med_dose_unit", "para_admin_dttm",
+                "n_para_admin", "para_span_min",
                 "pair_dttm", "gap_minutes", "imv_dttm", "pair_to_t0_min", "in_window",
             ]
         )
@@ -649,14 +869,29 @@ def _(mo):
 
 @app.cell
 def _(PARA_CATEGORIES, SED_CATEGORIES, pairs, pl):
-    _sed_seen = set(pairs.get_column("sed_med_category").unique().to_list())
-    _para_seen = set(pairs.get_column("para_med_category").unique().to_list())
+    # Under D40.5 a member's med_category is the event's LABEL, so it may name several
+    # agents ("fentanyl+propofol"). Split it back apart before checking against the declared
+    # lists -- the check is about which agents reached the output, not which labels did.
+    def _agents_in(col):
+        return {
+            _a
+            for _label in pairs.get_column(col).unique().to_list()
+            for _a in _label.split("+")
+        }
+
+    _sed_seen = _agents_in("sed_med_category")
+    _para_seen = _agents_in("para_med_category")
 
     _sed_extra = sorted(_sed_seen - set(SED_CATEGORIES))
     _para_extra = sorted(_para_seen - set(PARA_CATEGORIES))
     assert not _sed_extra, f"sedative members not in the declared SED list: {_sed_extra}"
     assert not _para_extra, f"paralytic members not in the declared PARA list: {_para_extra}"
 
+    print(f"distinct SED  event labels paired : "
+          f"{pairs.get_column('sed_med_category').n_unique()}")
+    print(f"distinct PARA event labels paired : "
+          f"{pairs.get_column('para_med_category').n_unique()}")
+    print(pairs.get_column("para_med_category").value_counts(sort=True))
     print(f"SED  declared {len(SED_CATEGORIES)}, paired {len(_sed_seen)}: "
           f"{', '.join(sorted(_sed_seen))}")
     print(f"  never paired: {', '.join(sorted(set(SED_CATEGORIES) - _sed_seen)) or '—'}")
