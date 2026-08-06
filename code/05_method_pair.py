@@ -122,6 +122,35 @@ def _(TIMEZONE):
 
 
 @app.cell
+def _(pl):
+    def epoch_minutes(column="admin_dttm"):
+        """The only correct way to turn a site-naive timestamp into float minutes.
+
+        Sibling trap to `to_site_naive`, and the one that bites on the way back out.
+        `datetime.timestamp()` on a NAIVE datetime does not treat it as the wall clock it
+        is -- it silently interprets it in the **operating system's** zone and converts.
+        On a machine set to US/Central, with data in US/Eastern:
+
+            2023-11-05 01:55 -> 02:05   is 10 minutes of Eastern wall clock
+            naive .timestamp() makes it 70, because it re-applies Chicago's fall-back hour
+
+        A 60-minute artefact decides a 15-minute collapse window outright: two doses that
+        are one push of drug split into two agent events. Worse, the answer changes with the
+        machine, which is exactly what the §6.2 byte-identical-across-runs rule forbids.
+
+        `dt.epoch` reads the stored wall-clock value and consults no zone at all, so it
+        agrees with the naive subtraction the rest of the file already uses for
+        `window_start`/`window_end` and `pair_to_t0_min`.
+
+        NEVER "simplify" this back to `x.timestamp() / 60.0`. Pinned by
+        `tests/test_collapse_agent_events.py`.
+        """
+        return pl.col(column).dt.epoch("s") / 60.0
+
+    return (epoch_minutes,)
+
+
+@app.cell
 def _(PHI_DIR, pl):
     index_imv = pl.read_parquet(PHI_DIR / "index_imv.parquet")
 
@@ -367,21 +396,26 @@ def _(collapse_agent_events):
 
 
 @app.cell
-def _(COLLAPSE_GAP_MINUTES, collapse_agent_events, pl, scan_rows):
+def _(COLLAPSE_GAP_MINUTES, collapse_agent_events, epoch_minutes, pl, scan_rows):
     _cols = ["encounter_block", "admin_dttm", "med_category", "med_dose", "med_dose_unit",
              "drug_class"]
     # Partitioned by class as well as encounter: the fold must never reach across SED/PARA
     # or there would be nothing left to pair. `maintain_order` keeps the §6.2 sort
     # (encounter_block, admin_dttm, med_category) inside each partition, which is what makes
     # `times` ascending and the label's lead agent reproducible.
-    _parts = scan_rows.select(_cols).partition_by(
-        ["encounter_block", "drug_class"], as_dict=True, maintain_order=True
+    # admin_min is derived in polars, before the rows leave the frame, because
+    # `datetime.timestamp()` on these naive values would read the OS zone -- see
+    # `epoch_minutes`.
+    _parts = (
+        scan_rows.select(_cols)
+        .with_columns(admin_min=epoch_minutes())
+        .partition_by(["encounter_block", "drug_class"], as_dict=True, maintain_order=True)
     )
 
     _events = []
     for (_eb, _cls), _blk in _parts.items():
         _t = _blk.get_column("admin_dttm").to_list()
-        _tmin = [x.timestamp() / 60.0 for x in _t]
+        _tmin = _blk.get_column("admin_min").to_list()
         _cat = _blk.get_column("med_category").to_list()
         _dose = _blk.get_column("med_dose").to_list()
         _unit = _blk.get_column("med_dose_unit").to_list()
@@ -548,19 +582,25 @@ def _(PAIR_GAP_MINUTES):
 
 
 @app.cell
-def _(PAIR_GAP_MINUTES, agent_events, pl, scan_encounter):
+def _(PAIR_GAP_MINUTES, agent_events, epoch_minutes, pl, scan_encounter):
     # AGENT EVENTS, not administration rows (D40). The scan below is unchanged -- what
     # changed is what it is handed.
     _cols = ["encounter_block", "admin_dttm", "med_category", "med_dose", "med_dose_unit",
              "drug_class", "n_admin", "span_min"]
-    _by_block = agent_events.select(_cols).partition_by("encounter_block", as_dict=True)
+    # Same `epoch_minutes` as the collapse: one conversion idiom for both stages, and
+    # neither of them may ask the OS what timezone it is in.
+    _by_block = (
+        agent_events.select(_cols)
+        .with_columns(admin_min=epoch_minutes())
+        .partition_by("encounter_block", as_dict=True)
+    )
 
     _rows = []
     _unpaired = []
     for _key, _blk in _by_block.items():
         _eb = _key[0]
         _t = _blk.get_column("admin_dttm").to_list()
-        _tmin = [x.timestamp() / 60.0 for x in _t]
+        _tmin = _blk.get_column("admin_min").to_list()
         _cls = _blk.get_column("drug_class").to_list()
         _cat = _blk.get_column("med_category").to_list()
         _dose = _blk.get_column("med_dose").to_list()
@@ -611,7 +651,15 @@ def _(PAIR_GAP_MINUTES, agent_events, pl, scan_encounter):
             }
         )
 
-    pairs_raw = pl.DataFrame(_rows) if _rows else None
+    pairs_raw = (
+        # The Python round-trip above widens the fold counts to Int64; put them back to the
+        # Int32 `agent_events` declares, so the artifact's schema matches the intent.
+        pl.DataFrame(_rows).with_columns(
+            pl.col(["n_sed_admin", "n_para_admin"]).cast(pl.Int32)
+        )
+        if _rows
+        else None
+    )
     unpaired_counts = pl.DataFrame(_unpaired)
 
     print(f"encounters scanned : {len(_by_block):,}")
