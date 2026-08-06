@@ -5,6 +5,7 @@
     "timezone": "US/Eastern",
     "output_directory": "./output",
     "window_hours": 3,
+    "episode_gap_hours": 3,
     "pair_gap_hours": 3,
     "stitch_hours": 6,
     "trach_window_hours": 24,
