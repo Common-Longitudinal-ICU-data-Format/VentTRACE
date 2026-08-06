@@ -1,4 +1,4 @@
-"""Pins the agent-event collapse in `code/05_method_pair.py` (D40).
+"""Pins the agent-event collapse in `code/05_method_pair.py` (D43).
 
 The PAIR scan counts *pairings*, so what it is handed decides what a pair means. Before
 the collapse existed the scan was handed raw administration rows, and a single rapid
@@ -56,7 +56,7 @@ epoch_minutes = _load_from_notebook("epoch_minutes", {"pl": pl})
 
 GAP = 15.0
 
-# (label, times, expected grouping) — the D40 worked examples, verbatim.
+# (label, times, expected grouping) — the D43 worked examples, verbatim.
 WORKED_EXAMPLES = [
     ("a same-instant co-administration merges", [0, 0], [[0, 1]]),
     ("b exactly at the limit still merges", [0, 15], [[0, 1]]),
@@ -138,7 +138,7 @@ def test_every_event_is_within_the_gap(times):
 def test_grouping_ignores_categories():
     """A repeat of one agent and a co-administration of two fold identically.
 
-    Which agents were involved is recorded by the caller in the D40.5 label; it must play
+    Which agents were involved is recorded by the caller in the D43.5 label; it must play
     no part in the fold, or a co-administration would be scanned as two events and pair
     twice.
     """
