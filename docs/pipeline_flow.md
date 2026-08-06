@@ -346,6 +346,56 @@ No pair is counted twice, and `detected = n_pairs > 0` still holds per episode.
 
 ---
 
+### Rule 4 — was that sedative actually induction? (D40)
+
+`SED` fires on 97.7% of episodes, which is too good to be true, and part of the reason
+is that a patient who has just been intubated gets **put on a sedation drip** — and a
+drip is started with a bolus. That bolus lands in the same table, under the same drug
+name, as an induction agent.
+
+```
+   induction                          maintenance prep
+   ─────────                          ────────────────
+   propofol 150 mg                    propofol 100 mg
+        │                                  │
+        ▼                                  ▼
+   ─────●──────────[ t0 ]────────────────●──────●────────▶
+        -8 min      TUBE IN            +22 min  +30 min
+                                                propofol
+                                                DRIP STARTS
+                                                └── so the +22 dose
+                                                    was loading it
+```
+
+Rule: an intermittent dose **after t₀**, followed within `infusion_prep_minutes`
+(60) by a `start` row in `medication_admin_continuous` for the **same drug**, is
+maintenance prep and does not count as induction.
+
+**Before t₀ is exempt, and that exemption is the whole rule.** It is tempting to apply
+this symmetrically. The data says don't: 30.1% of pre-t₀ doses are followed by a drip
+within an hour against 19.8% of post-t₀ doses. A pre-t₀ bolus is *more* likely to
+precede a drip — because induction → intubation → maintenance is exactly what is
+supposed to happen. A symmetric rule would have deleted 930 induction agents.
+
+Effect: `SED` 0.9770 → 0.9150 (837 episodes), `PARA` 0.0433 → 0.0410 (31).
+
+**Nothing above Tier F uses this.** The cohort does not move and Tiers A–E keep running
+on the unrefined `detected`, because refining `02`'s rule 3 the same way would make
+every surviving episode have a non-prep induction agent *by definition* and snap `SED`
+straight back to 1.000.
+
+### The band that looks useful and isn't (D41)
+
+A dose given while a same-drug drip is **already running** is obviously not induction.
+So it was measured — and then not used. It fires on 48.9% of pre-t₀ entries and 57.5%
+of post-t₀ entries. A test that flags half of everything given *before* the airway
+event cannot tell induction from maintenance; it just reports that the patient is
+sedated. It is drawn on figure B.5 because the picture is the finding: most
+post-intubation sedative charting is maintenance, so `SED`'s sensitivity rests almost
+entirely on its pre-t₀ half.
+
+---
+
 ## 6. `06_reference_cpt.py` — the outside opinion
 
 Looks for CPT 31500 (emergency endotracheal intubation) in `patient_procedures`.
@@ -451,6 +501,8 @@ because of it.
 | — | `SED` = 5 sedatives in t₀ ± 3 h, ranked nearest-first | `03` | |
 | — | `PARA` = 3 paralytics in t₀ ± 3 h, ranked nearest-first | `04` | |
 | — | `PAIR` = opposite-class drugs < 3 h apart, forward pass with consumption | `05` | whole stay |
+| 4 | a dose **after** t₀ followed by a same-drug drip within 60 min is infusion prep, not induction | `03`, `04` | Tier F only |
+| — | `during_infusion` measured on both sides of t₀ and never acted on | `03`, `04` | figure B.5 |
 | — | pairs assigned to the nearest episode t₀ | `05` | no double counting |
 | — | reference gated on capture ≥ 0.05 before scoring | `06` | |
 | — | published cells suppressed below n = 10 | `07` | |

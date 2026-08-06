@@ -112,15 +112,15 @@ with `cohort_run_id` masked; 0 differing.
 |---|---|---|---|
 | `SED` | — | **0.977** | 13,189 |
 | `PARA` | — | 0.0433 | 584 |
-| `PAIR` | `free_running` | 0.0576 | 778 |
-| `PAIR` | `in_window` | 0.0367 | 496 |
+| `PAIR` | `free_running` | 0.0576 | 777 |
+| `PAIR` | `in_window` | 0.0367 | 495 |
 
 `SED` at 0.977 is D38 working as specified, not a finding — the eligibility filter and the
 method read the same eight drugs over the same window. The residual 311 non-detections are
 the D25 on-t₀ population plus the paralytic-only episodes.
 
-**A.3 concordance, `in_window`:** 0 methods 139 (1.03%) · 1 method 12,877 (95.39%) ·
-2 methods 60 (0.44%) · 3 methods 424 (3.14%).
+**A.3 concordance, `in_window`:** 0 methods 139 (1.03%) · 1 method 12,878 (95.39%) ·
+2 methods 59 (0.44%) · 3 methods 424 (3.14%).
 
 **Tier D.4 — the salvage.** On the 26,770 `no_induction_med` episodes, `SED`, `PARA` and
 `PAIR`-in-window are all exactly 0 (asserted — that zero is the only observable signature of
@@ -128,6 +128,14 @@ drift between `02`'s `INDUCTION_CATEGORIES` and a method's `MED_CATEGORIES`).
 `PAIR` free-running is **0.0177**, against 0.0576 in the index set — a gap of 0.0399 and a
 ratio of **3.25×**. That is ambient sedative–paralytic pairing measured on the largest
 stratum in the study, and it is the one interpretable specificity number the tier produces.
+
+## 8. Correction
+
+The `PAIR` counts in §7 were transcribed one too high — 778 / 496 against the artifact's
+actual 777 / 495, and A.3's 1-method and 2-method cells likewise. Caught while verifying
+that D40 left Tiers A-E untouched, by re-running `05` unchanged and reproducing 495. The
+error was in this record, not in the pipeline: `method_PAIR_episode.parquet` has always
+held 777 / 495. Corrected above.
 
 ## 8. Open
 

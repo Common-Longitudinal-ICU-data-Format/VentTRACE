@@ -63,6 +63,7 @@ def _(Path, json):
     SITE = config["site_name"]
     WINDOW_HOURS = config["window_hours"]
     PAIR_GAP_HOURS = config["pair_gap_hours"]
+    INFUSION_PREP_MINUTES = config["infusion_prep_minutes"]  # D40, Tier F only
     OUTPUT_DIR = Path(config["output_directory"])
     PHI_DIR = OUTPUT_DIR / "intermediate_phi"
     SHARE_DIR = OUTPUT_DIR / "final_no_phi"
@@ -77,9 +78,11 @@ def _(Path, json):
     print(f"methods        : {', '.join(METHODS)}")
     print(f"window         : +/- {WINDOW_HOURS} h")
     print(f"pair_gap_hours : {PAIR_GAP_HOURS}")
+    print(f"prep gap       : {INFUSION_PREP_MINUTES} min   (D40, Tier F only)")
     print(f"min cell       : {MIN_CELL}")
     return (
         BASES,
+        INFUSION_PREP_MINUTES,
         METHODS,
         MIN_CELL,
         PAIR_GAP_HOURS,
@@ -129,6 +132,13 @@ def _(METHODS, PHI_DIR, pl):
         "nearest_before_min": pl.Float64,
         "nearest_after_med": pl.String,
         "nearest_after_min": pl.Float64,
+        # D40 / D41. Tier F reads these and nothing else does -- Tiers A-E stay on
+        # `detected` (D42), so every number in them is comparable across the change.
+        "detected_induction_only": pl.Boolean,
+        "n_after_induction": pl.Int32,
+        "n_after_prep": pl.Int32,
+        "n_before_during": pl.Int32,
+        "n_after_during": pl.Int32,
     }
     _INDEX_PAIR_FIELDS = [
         "pair_id", "first_class", "sed_med_category", "sed_med_dose", "sed_med_dose_unit",
@@ -186,6 +196,25 @@ def _(METHODS, PHI_DIR, pl):
             f"method {_m}: {_mismatch:,} rows where `detected` disagrees with the structure "
             "it is supposed to be derived from."
         )
+
+        # Same contract for D40's variant. It shares the before-term untouched (D40 exempts
+        # the pre-t0 half) and can only ever be a subset, so a violation means the two
+        # columns were computed from different sets rather than one being a filtered form
+        # of the other -- exactly the drift the shared term exists to prevent.
+        if _m != "PAIR":
+            _io = (pl.col("n_before") > 0) | (pl.col("n_after_induction") > 0)
+            _bad = _df.filter(pl.col("detected_induction_only") != _io).height
+            assert _bad == 0, (
+                f"method {_m}: {_bad:,} rows where `detected_induction_only` disagrees with "
+                "(n_before > 0) | (n_after_induction > 0)."
+            )
+            _super = _df.filter(
+                pl.col("detected_induction_only") & ~pl.col("detected")
+            ).height
+            assert _super == 0, (
+                f"method {_m}: {_super:,} rows detected under D40 but not without it. "
+                "The variant must be a subset."
+            )
         method_tables[_m] = _df
         print(f"{_m:<5} {_df.height:,} rows   schema OK   detected-derivation OK")
 
@@ -252,6 +281,13 @@ def _(METHODS, index_strata, method_tables, pl, reference):
                 pl.col("detected").alias(f"{_m.lower()}_detected"),
                 pl.col("nearest_before_min").alias(f"{_m.lower()}_bef"),
                 pl.col("nearest_after_min").alias(f"{_m.lower()}_aft"),
+                # D40, read by Tier F alone. Carried here rather than re-read from the
+                # method table so Tier F joins nothing the other tiers have not already
+                # validated through the §6.4 schema gate.
+                pl.col("detected_induction_only").alias(
+                    f"{_m.lower()}_detected_induction_only"
+                ),
+                pl.col("n_after_prep").alias(f"{_m.lower()}_n_after_prep"),
             ),
             on="intubation_episode_id",
             how="inner",
@@ -730,6 +766,12 @@ def _(PHI_DIR, RANKED_METHODS, analytic, pl):
             "med_dose_unit": pl.String,
             "admin_dttm": pl.String,
             "delta_minutes": pl.Float64,
+            # D40 / D41, per-administration. B.5 decomposes on these. They describe the
+            # single dose the ladder kept -- the one nearest t0 -- so a RATE must never be
+            # recomputed from them (spec §6.4); that is what Tier F's own tables are for.
+            "infusion_prep": pl.Boolean,
+            "during_infusion": pl.Boolean,
+            "lag_to_infusion_min": pl.Float64,
         }
     )
     RANKED_SCHEMA = {
@@ -1339,6 +1381,195 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, enc_q, pl):
 @app.cell
 def _(mo):
     mo.md(
+        r"""
+        ## Tier F — how much of the medication signal is maintenance sedation?
+
+        The D40 sub-analysis. **This is the only tier that reads `detected_induction_only`.**
+        Tiers A–E stay on `detected` (D42), so every number above is comparable against runs
+        that predate D40, and the denominator here is the same N\*\* they use.
+
+        D38's eligibility filter is deliberately *not* refined. If an episode qualified only
+        when a non-prep induction agent were charted, every surviving episode would have one
+        by definition and `SED`'s refined rate would snap straight back to 1.000 — the same
+        circularity D38 already records, reintroduced one layer down. Leaving the filter
+        alone is what makes this measurement readable at all.
+        """
+    )
+    return
+
+
+@app.cell
+def _(COHORT_RUN_ID, RANKED_METHODS, SHARE_DIR, analytic, apply_min_cell, pl):
+    _rows = []
+    for _m in RANKED_METHODS:
+        _d = pl.col(f"{_m.lower()}_detected")
+        _i = pl.col(f"{_m.lower()}_detected_induction_only")
+        _n = analytic.height
+        _nd = analytic.filter(_d).height
+        _ni = analytic.filter(_i).height
+        _rows.append(
+            {
+                "cohort_run_id": COHORT_RUN_ID,
+                "method_id": _m,
+                "n": _n,
+                "n_detected": _nd,
+                "rate": round(_nd / _n, 4),
+                "n_detected_induction_only": _ni,
+                "rate_induction_only": round(_ni / _n, 4),
+                "rate_gap": round((_nd - _ni) / _n, 4),
+                "n_flipped": _nd - _ni,
+            }
+        )
+    f1 = pl.DataFrame(_rows)
+
+    # `n` is identical across both columns by construction (D42 holds the denominator
+    # fixed), so the gap is a pure reclassification effect and never a cohort effect. If
+    # this ever fails, D40 has leaked into the eligibility filter.
+    assert f1.get_column("n").n_unique() == 1, (
+        "the two variants are being computed on different denominators; D42 is violated"
+    )
+    f1_pub = apply_min_cell(
+        f1, ["n_detected", "n_detected_induction_only", "n_flipped"], "F.1"
+    )
+    f1_pub.write_csv(SHARE_DIR / "induction_only_comparison.csv")
+    print("F.1  detection with and without D40")
+    print(f1_pub)
+    return
+
+
+@app.cell
+def _(COHORT_RUN_ID, PHI_DIR, RANKED_METHODS, SHARE_DIR, apply_min_cell, pl):
+    _sw, _bd = [], []
+    for _m in RANKED_METHODS:
+        _sw.append(
+            pl.read_parquet(PHI_DIR / f"method_{_m}_prep_sweep.parquet")
+            .filter(pl.col("index_class") == "qualified")
+            .with_columns(method_id=pl.lit(_m))
+        )
+        _bd.append(
+            pl.read_parquet(PHI_DIR / f"method_{_m}_prep_by_drug.parquet")
+            .filter(pl.col("index_class") == "qualified")
+            .with_columns(method_id=pl.lit(_m))
+        )
+
+    f2 = (
+        pl.concat(_sw)
+        .with_columns(
+            cohort_run_id=pl.lit(COHORT_RUN_ID),
+            rate=(pl.col("n_detected") / pl.col("n_episodes")).round(4),
+            rate_all=(pl.col("n_detected_all") / pl.col("n_episodes")).round(4),
+        )
+        .select(
+            "cohort_run_id", "method_id", "threshold_minutes", "n_episodes",
+            "n_detected_all", "rate_all", "n_detected", "rate", "n_flipped",
+            "n_doses_reclassified",
+        )
+        .sort(["method_id", "threshold_minutes"])
+    )
+    f3 = (
+        pl.concat(_bd)
+        .with_columns(
+            cohort_run_id=pl.lit(COHORT_RUN_ID),
+            share=(pl.col("n_doses_reclassified") / pl.col("n_doses_after")).round(4),
+        )
+        .select(
+            "cohort_run_id", "method_id", "med_category", "threshold_minutes",
+            "n_doses_after", "n_doses_reclassified", "share",
+        )
+        .sort(["method_id", "med_category", "threshold_minutes"])
+    )
+
+    f2_pub = apply_min_cell(f2, ["n_detected", "n_flipped", "n_doses_reclassified"], "F.2")
+    f3_pub = apply_min_cell(f3, ["n_doses_after", "n_doses_reclassified"], "F.3")
+    f2_pub.write_csv(SHARE_DIR / "infusion_prep_sweep.csv")
+    f3_pub.write_csv(SHARE_DIR / "infusion_prep_by_drug.csv")
+
+    print("F.2  threshold sweep")
+    print(f2_pub)
+    print(
+        "\nF.3  by medication -- fentanyl infusions are analgesia and propofol infusions are\n"
+        "     sedation, so the two have no reason to share a bolus-to-drip lag. A pooled\n"
+        "     number would be an average of two different clinical behaviours."
+    )
+    print(f3_pub.filter(pl.col("threshold_minutes") == 60))
+    return (f2_pub,)
+
+
+@app.cell
+def _(
+    COHORT_RUN_ID,
+    RANKED_METHODS,
+    SHARE_DIR,
+    analytic,
+    apply_min_cell,
+    index_strata,
+    pl,
+):
+    # F.4. This table exists to EXPOSE a confound in D40, not to confirm it. The only thing
+    # separating "induction bolus then maintenance drip" from "maintenance loading dose then
+    # drip" is which side of t0 the bolus falls on -- and under D34 t0 is the waterfalled
+    # IMV row, which arrives LATE under exactly the high-stress conditions that produce an
+    # intubation. If the prep rate climbs with charting_delay_min, D40 is partly deleting
+    # the signal it was built to protect. Reported whichever way it comes out; the primary
+    # rates do not depend on D40 at all (D42), which is what makes that safe.
+    _strata = (
+        pl.when(pl.col("charting_delay_min").is_null()).then(pl.lit("not_charted"))
+        .when(pl.col("charting_delay_min") == 0).then(pl.lit("0"))
+        .when(pl.col("charting_delay_min") <= 30).then(pl.lit("1-30"))
+        .when(pl.col("charting_delay_min") <= 60).then(pl.lit("31-60"))
+        .when(pl.col("charting_delay_min") <= 180).then(pl.lit("61-180"))
+        .otherwise(pl.lit(">180"))
+        .alias("delay_stratum")
+    )
+    _ORDER = ["0", "1-30", "31-60", "61-180", ">180", "not_charted"]
+
+    _base = analytic.join(index_strata, on="intubation_episode_id", how="left").with_columns(
+        _strata
+    )
+    _rows = []
+    for _m in RANKED_METHODS:
+        _rows.append(
+            _base.group_by("delay_stratum")
+            .agg(
+                n_episodes=pl.len(),
+                n_with_prep=(pl.col(f"{_m.lower()}_n_after_prep") > 0).sum(),
+                n_flipped=(
+                    pl.col(f"{_m.lower()}_detected")
+                    & ~pl.col(f"{_m.lower()}_detected_induction_only")
+                ).sum(),
+            )
+            .with_columns(method_id=pl.lit(_m), cohort_run_id=pl.lit(COHORT_RUN_ID))
+        )
+    f4 = (
+        pl.concat(_rows)
+        .with_columns(
+            prep_rate=(pl.col("n_with_prep") / pl.col("n_episodes")).round(4),
+            _ord=pl.col("delay_stratum").replace_strict(
+                {_s: _i for _i, _s in enumerate(_ORDER)}, default=99, return_dtype=pl.Int32
+            ),
+        )
+        .sort(["method_id", "_ord"])
+        .drop("_ord")
+        .select(
+            "cohort_run_id", "method_id", "delay_stratum", "n_episodes",
+            "n_with_prep", "prep_rate", "n_flipped",
+        )
+    )
+    f4_pub = apply_min_cell(f4, ["n_episodes", "n_with_prep", "n_flipped"], "F.4")
+    f4_pub.write_csv(SHARE_DIR / "prep_by_charting_delay.csv")
+    print("F.4  prep rate by charting-delay stratum")
+    print(f4_pub)
+    print(
+        "\n  A rate that RISES with the delay stratum means D40 is reclassifying induction\n"
+        "  agents that were charted before a late vent row. A flat rate means the two are\n"
+        "  independent and D40 is measuring what it claims."
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
         """
         ## Figures
 
@@ -1522,6 +1753,115 @@ def _(COLORS, MIN_CELL, RANKED_METHODS, SITE, WINDOW_HOURS, finish, pl, plt, ran
         f"comparable. Bins holding 1..{MIN_CELL - 1} entries are dropped ({_suppressed} "
         "entries). PAIR is absent by design — it has no rank ladder (D30); its timing is "
         "Tier E.",
+    )
+    return
+
+
+@app.cell
+def _(COLORS, MIN_CELL, RANKED_METHODS, SITE, finish, pl, plt, ranked_long):
+    # F8 -- B.5. A NEW figure beside B.4 rather than a replacement for it, so B.4 stays
+    # byte-comparable against runs that predate D40.
+    #
+    # The three bands are mutually exclusive and `during_infusion` takes precedence, because
+    # "a drip was already running" is the stronger and less inferential statement. Reading
+    # the figure, follow the induction band across t0: it should peak in the last half-hour
+    # before zero and fall away immediately after.
+    _lim, _bin = 180, 10
+    _edges = list(range(-_lim, _lim + _bin, _bin))
+    _centers = [(_edges[_i] + _edges[_i + 1]) / 2 for _i in range(len(_edges) - 1)]
+    _BANDS = [
+        ("induction", "#2c6fbb", "induction agent"),
+        ("prep", "#e8a33d", "infusion prep — bolus, then same-drug drip (D40)"),
+        ("during", "#b03b4e", "given during a running same-drug infusion (D41)"),
+    ]
+
+    _lab = (
+        pl.when(pl.col("during_infusion")).then(pl.lit("during"))
+        .when(pl.col("infusion_prep")).then(pl.lit("prep"))
+        .otherwise(pl.lit("induction"))
+        .alias("band")
+    )
+    _src = ranked_long.filter(pl.col("delta_minutes").abs() <= _lim).with_columns(_lab)
+
+    _fig, _axes = plt.subplots(len(RANKED_METHODS), 1, figsize=(11, 7.6), sharex=True)
+    _suppressed = 0
+    for _ax, _m in zip(_axes, RANKED_METHODS):
+        _sub = _src.filter(pl.col("method_id") == _m)
+        _tot = _sub.height
+        _stack = [0.0] * len(_centers)
+        for _key, _colour, _legend in _BANDS:
+            _v = _sub.filter(pl.col("band") == _key).get_column("delta_minutes").to_list()
+            _counts = [0] * len(_centers)
+            for _x in _v:
+                _counts[min(int((_x + _lim) // _bin), len(_counts) - 1)] += 1
+            _suppressed += sum(_c for _c in _counts if 0 < _c < MIN_CELL)
+            _counts = [0 if 0 < _c < MIN_CELL else _c for _c in _counts]
+            _pct = [100.0 * _c / max(_tot, 1) for _c in _counts]
+            _top = [_stack[_i] + _pct[_i] for _i in range(len(_pct))]
+            _ax.fill_between(_centers, _stack, _top, step="mid", color=_colour,
+                             alpha=0.88, linewidth=0, label=_legend)
+            _stack = _top
+        _ax.step(_centers, _stack, where="mid", color="#222222", linewidth=1.0)
+        _ax.axvline(0, color="#111111", linewidth=1.2)
+        _ax.set_ylabel(f"% of {_m} entries")
+        _ax.set_title(f"{_m}  (n={_tot:,} ranked entries)", loc="left",
+                      fontsize=9.5, fontweight="bold", color=COLORS[_m])
+        _ax.set_xlim(-_lim, _lim)
+
+    _axes[0].legend(frameon=False, fontsize=8.5, loc="upper right")
+    _axes[-1].set_xlabel("minutes relative to t0")
+    _axes[-1].set_xticks(range(-_lim, _lim + 1, 30))
+    # suptitle, not set_title on axes[0] -- that would overwrite the per-method label the
+    # loop just set and leave the top panel unidentified.
+    _fig.suptitle(
+        f"B.5  medication timing around t0, decomposed — {SITE}",
+        x=0.085, ha="left", fontweight="bold", fontsize=11,
+    )
+    _fig.tight_layout(rect=[0, 0, 1, 0.97])
+    finish(
+        _fig,
+        "timing_offset_decomposed.png",
+        f"{_bin}-minute bins, each method normalised to its own total. Bands are mutually "
+        "exclusive and `during_infusion` wins a tie. `infusion_prep` is zero before t0 by "
+        f"construction — D40 exempts that half. Bins holding 1..{MIN_CELL - 1} entries are "
+        f"dropped ({_suppressed} entries).",
+    )
+    return
+
+
+@app.cell
+def _(SHARE_DIR, COLORS, INFUSION_PREP_MINUTES, SITE, f2_pub, finish, pl, plt):
+    # F9 -- F.2, drawn off the published table so suppression is inherited (D26).
+    _fig, _ax = plt.subplots(figsize=(9, 4.4))
+    for _m in f2_pub.get_column("method_id").unique(maintain_order=True).to_list():
+        _s = f2_pub.filter(pl.col("method_id") == _m).sort("threshold_minutes")
+        _base = _s.get_column("rate_all").to_list()[0]
+        # Each method is drawn as a FRACTION of its own unrefined rate. On a shared absolute
+        # axis PARA (0.043) is a flat line against the floor next to SED (0.977), which
+        # reads as "no effect" when what it has is a smaller denominator -- the same reason
+        # B.4 is normalised per method.
+        _ax.plot(
+            _s.get_column("threshold_minutes").to_list(),
+            [100.0 * _r / _base for _r in _s.get_column("rate").to_list()],
+            marker="o", markersize=4, linewidth=1.7, color=COLORS[_m],
+            label=f"{_m}  (unrefined rate {_base:.4f} = 100%)",
+        )
+    _ax.axvline(INFUSION_PREP_MINUTES, color="#111111", linewidth=1.0, linestyle="--")
+    _ax.text(INFUSION_PREP_MINUTES + 2, _ax.get_ylim()[0] + 0.4,
+             f"configured\n{INFUSION_PREP_MINUTES} min", fontsize=8, va="bottom")
+    _ax.set_xlabel("infusion_prep_minutes — how long after a dose the same-drug drip may start")
+    _ax.set_ylabel("detection retained, % of unrefined")
+    _ax.set_xticks(f2_pub.get_column("threshold_minutes").unique().sort().to_list())
+    _ax.legend(frameon=False, fontsize=8.5)
+    _ax.grid(alpha=0.25)
+    _ax.set_title(f"F.2  infusion-prep threshold sweep — {SITE}", loc="left",
+                  fontweight="bold")
+    finish(
+        _fig,
+        "infusion_prep_sweep.png",
+        "A curve that has gone flat has stopped finding prep and started finding "
+        "coincidence. The configured value is one point on the grid and carries no special "
+        "status in the underlying table.",
     )
     return
 
@@ -1883,6 +2223,10 @@ def _(SHARE_DIR):
         "specificity_gap.csv",
         "pair_count_distribution.csv", "pair_gap_distribution.csv",
         "pair_agent_combinations.csv", "pair_index_offsets.csv", "pair_t0_concordance.csv",
+        # Tier F -- D40/D41
+        "induction_only_comparison.csv", "infusion_prep_sweep.csv",
+        "infusion_prep_by_drug.csv", "prep_by_charting_delay.csv",
+        "infusion_prep_sweep.png", "timing_offset_decomposed.png",
         "consort_flow.png", "index_class_strata.png", "episode_funnel.png",
         "charting_delay.png", "timing_offset_distribution.png", "timing_by_medication.png",
         "agreement_overview.png", "specificity_gap.png",
