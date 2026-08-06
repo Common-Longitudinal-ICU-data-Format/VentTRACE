@@ -208,7 +208,7 @@ The delay is measurable, and it is now published rather than avoided:
 | p95 | 55 min |
 | p99 | **540 min (9 h)** |
 | max | 6,389 min (4.4 days) |
-| never charted in the episode | 6 episodes |
+| never charted in the episode | 7 episodes |
 
 That p99 tail is the argument made visible. **The delay is never negative** — the
 waterfall only ever relabels nulls and never deletes a charted row, so its IMV can
@@ -261,7 +261,11 @@ only be at or before the charted one. `02` asserts that.
 ```
 
 11,675 blocks have one episode · 701 have two · 99 have three · tail out to seven.
-**997 episodes are reintubations** (`ep_num > 1`).
+**1,940 episodes are reintubations** (`ep_num > 1`), across 1,654 blocks.
+
+`ep_num` counts *sustained* episodes, not just qualified ones. A ventilation episode
+with no induction charted is still a ventilation episode, so an intubation that
+follows one really is the block's second.
 
 This cost no schema churn: §6.1 of the spec already wrote the id as
 `{encounter_block}_E1` with a note that the suffix existed so reintubation could be
@@ -274,7 +278,7 @@ added later without changing any key. Later arrived.
 | `no_lookback` | t₀ is the block's first respiratory row — arrived intubated | 7,130 (52.8%) |
 | `imv_charted` | some human charted a device in this episode | 13,494 |
 | `charting_delay_min` | first charted IMV − t₀ | see table above |
-| `ep_num` | 1 = index intubation, >1 = reintubation | 997 are >1 |
+| `ep_num` | 1 = index intubation, >1 = reintubation | 1,940 are >1 |
 
 These are strata for `07`, not filters. The single subsetting decision in the whole
 pipeline lives in `07`.

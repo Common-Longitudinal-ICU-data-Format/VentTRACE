@@ -2139,7 +2139,7 @@ checks = [
   ('qualified episodes', q.height, 13500),
   ('qualified blocks', q['encounter_block'].n_unique(), 12503),
   ('qualified patients', q['patient_id'].n_unique(), 11935),
-  ('reintubations', q.filter(pl.col('ep_num')>1).height, 997),
+  ('reintubations', q.filter(pl.col('ep_num')>1).height, 1940),
   ('no_lookback', q.filter(pl.col('no_lookback')).height, 7130),
 ]
 for name, got, want in checks:
@@ -2233,4 +2233,6 @@ every published CSV, PHI scan, and a minimum-cell-size audit."
 
 **Type consistency.** `intubation_episode_id` is `String` everywhere and formed only in Task 4. `ep_num` is `Int32` everywhere, formed in Task 3 and filled for rejected candidates in Task 4. `charting_delay_min` is `Float64` and nullable. `find_episode_starts(df, gap) -> DataFrame[encounter_block, recorded_dttm, sustained]` is defined once in Task 2 and used in Tasks 2 only. `unit_counts(df) -> dict` is defined in Task 9 and used in Task 10. `detected_expr(method, basis)` is pre-existing in `07` and unchanged. `_rates(df, group_col, label_col)` is defined in Task 10 Step 2 and reused in Steps 3 and 4 — it is returned from that cell so the later cells can take it as an argument.
 
-**Known gap, flagged not fixed.** Task 3's `no_lookback` count (Step 7) is over the *sustained* set and will not match the spec's 7,130, which is over the *qualified* set produced in Task 4. The step says so explicitly rather than setting an expectation that will look like a failure.
+**Known gap, flagged not fixed.** Task 3's `no_lookback` count (Step 7) is over the *sustained* set and will not match the spec's 7,130, which is over the *qualified* set produced in Task 4. The step says so explicitly rather than setting an expectation that will look like a failure. The same applies to the charting-delay diagnostics `02` prints, which are over the sustained set while `charting_delay.csv` is written over the qualified one.
+
+**Corrected after the first run.** The reintubation expectation was **997**, taken from a prototype that numbered `ep_num` over the *qualified* set. The implementation numbers over the *sustained* set and the correct value is **1,940** in 1,654 blocks. The implementation is right: a `no_induction_med` episode is still a real sustained ventilation, so an intubation following one genuinely is the block's second. Numbering only qualified episodes would also make Tier D.2 circular — "an earlier episode also had induction charted" describes the filter, not the patient.
