@@ -241,16 +241,37 @@ def _(METHODS, PHI_DIR, pl):
 
     pairs = pl.read_parquet(PHI_DIR / "method_PAIR_pairs.parquet")
     reference = pl.read_parquet(PHI_DIR / "reference_cpt.parquet")
+
+    # D43.2's evidence, and the one input here that is already aggregated. The distribution
+    # is over raw medication ADMINISTRATIONS, and this notebook does not open the
+    # medication table -- its inputs are the method artifacts, and reaching past them for a
+    # raw table would put a second, unvalidated reading of the CLIF data in the publishing
+    # layer. So 05, which already holds every row, emits counts only -- one n per
+    # (delta minute, same_agent) -- and 07 does what only 07 does: suppress, write, draw.
+    collapse_deltas = pl.read_parquet(PHI_DIR / "pair_collapse_deltas.parquet")
+    _COLLAPSE_COLS = ["cohort_run_id", "delta_min", "same_agent", "n", "max_delta_min",
+                      "n_beyond_max_delta"]
+    assert list(collapse_deltas.columns) == _COLLAPSE_COLS, (
+        f"pair_collapse_deltas.parquet has {collapse_deltas.columns}, expected "
+        f"{_COLLAPSE_COLS}. Re-run 05."
+    )
+    assert collapse_deltas.select(["delta_min", "same_agent"]).is_duplicated().sum() == 0, (
+        "the collapse-evidence table has more than one row per (delta, same_agent) cell"
+    )
+
     print(f"PAIR pairs table : {pairs.height:,} pairs")
     print(f"CPT              : {reference.height:,} rows")
-    return method_tables, pairs, reference
+    print(f"collapse deltas  : {collapse_deltas.height:,} cells "
+          f"({collapse_deltas.get_column('n').sum():,} intervals)")
+    return collapse_deltas, method_tables, pairs, reference
 
 
 @app.cell
-def _(METHODS, method_tables, pairs, reference):
+def _(METHODS, collapse_deltas, method_tables, pairs, reference):
     _run_ids = {m: method_tables[m].get_column("cohort_run_id").unique().to_list() for m in METHODS}
     _run_ids["PAIRS"] = pairs.get_column("cohort_run_id").unique().to_list()
     _run_ids["CPT"] = reference.get_column("cohort_run_id").unique().to_list()
+    _run_ids["DELTAS"] = collapse_deltas.get_column("cohort_run_id").unique().to_list()
 
     for _k, _v in _run_ids.items():
         assert len(_v) == 1, f"{_k} carries {len(_v)} cohort_run_ids: {_v}"
@@ -582,6 +603,15 @@ def _(analytic, pairs, pl):
     # pairs belonging to a DIFFERENT episode and scores them against the wrong t0. That
     # fans the frame out and makes the explained counts exceed the count being explained --
     # which is how this was caught.
+    #
+    # D43's agent-event collapse was expected to add a THIRD boundary class here and does
+    # not, which is why the two below are still the whole story. An agent event is dated by
+    # its EARLIEST administration, and that row is one 04 already sees, so folding cannot
+    # move a paralytic across a window edge that 04 does not also cross: the fold only ever
+    # discards LATER rows of the same class, never introduces an earlier one. A merged event
+    # whose first paralytic is outside the window is outside it for both notebooks, and one
+    # whose first paralytic is inside is inside for both. The decomposition below therefore
+    # still closes exactly -- only_b 62 = D25 32 + section 6.5 30, 0 unexplained.
     _susp = analytic.filter(
         pl.col("pair_detected_in_window") & ~pl.col("para_detected")
     ).select("intubation_episode_id")
@@ -1457,6 +1487,52 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, ep_q, pl):
 
 
 @app.cell
+def _(COLLAPSE_GAP_MINUTES, MIN_CELL, SHARE_DIR, apply_min_cell, collapse_deltas, pl):
+    # E.7 -- the evidence for collapse_gap_minutes, published rather than asserted (D43.2).
+    # Consecutive same-drug-class administrations in the peri-intubation window, by the gap
+    # between them, split by whether the two rows name the same agent (a redose) or
+    # different agents (a co-administration). Those are the two things the fold merges and
+    # they are not the same phenomenon.
+    e7 = collapse_deltas
+    e7_pub = apply_min_cell(e7, ["n"], "E.7")
+
+    # n_beyond_max_delta is a whole-table MARGIN, not a cell, so it is not handed to
+    # apply_min_cell -- putting it there would drop every row of the table on account of one
+    # number. It is still a count of real intervals, so it is withheld in the same 1..9
+    # range, and F11 says "withheld" rather than printing a number it does not have.
+    _beyond = int(e7.get_column("n_beyond_max_delta")[0])
+    if 0 < _beyond < MIN_CELL:
+        e7_pub = e7_pub.with_columns(n_beyond_max_delta=pl.lit(None, dtype=pl.Int32))
+        print(f"  [E.7] n_beyond_max_delta withheld under the n>={MIN_CELL} rule")
+
+    e7_pub.write_csv(SHARE_DIR / "pair_collapse_deltas.csv")
+
+    _max = int(e7.get_column("max_delta_min")[0])
+    _d = {(r["delta_min"], r["same_agent"]): r["n"] for r in e7.to_dicts()}
+    _diff = lambda lo, hi: sum(v for (k, s), v in _d.items() if lo <= k <= hi and not s)
+    _same = lambda lo, hi: sum(v for (k, s), v in _d.items() if lo <= k <= hi and s)
+
+    print(f"E.7 gap between consecutive same-class administrations, peri-intubation "
+          f"({e7.get_column('n').sum():,} intervals in 0..{_max} min, {_beyond:,} beyond)")
+    print(f"{'':<12}{'different agent':>16}{'same agent':>13}{'ratio':>8}")
+    for _lo, _hi, _lab in ((0, 0, "delta 0"), (1, 1, "delta 1"),
+                           (0, 1, "delta <= 1"), (2, _max, f"delta 2..{_max}")):
+        _a, _b = _diff(_lo, _hi), _same(_lo, _hi)
+        print(f"  {_lab:<10}{_a:>16,}{_b:>13,}{(_a / _b if _b else float('nan')):>8.2f}")
+    print(
+        f"\n  Co-administration -- two DIFFERENT agents of one class -- is a delta <= 1 min\n"
+        f"  phenomenon and is spent by one minute. From delta 2 the two series run at the\n"
+        f"  same rate, which is routine repeat dosing and nothing else: there is NO valley\n"
+        f"  at {COLLAPSE_GAP_MINUTES:.0f} min, or anywhere else, for the threshold to sit in.\n"
+        f"  {COLLAPSE_GAP_MINUTES:.0f} minutes is a CLINICAL definition of one induction "
+        f"sequence (D43.2) and this\n"
+        f"  table is published so a reader can see exactly what it is and is not fitted to.\n"
+        f"  The spikes at every multiple of 5 are the charting grid, present in both series."
+    )
+    return e7, e7_pub
+
+
+@app.cell
 def _(mo):
     mo.md(
         r"""
@@ -2267,6 +2343,135 @@ def _(SHARE_DIR, finish, pl, plt):
 
 
 @app.cell
+def _(
+    COLLAPSE_GAP_MINUTES,
+    COLORS,
+    GREY,
+    MIN_CELL,
+    SITE,
+    WINDOW_HOURS,
+    e7_pub,
+    finish,
+    plt,
+):
+    # F11 -- E.7, the picture the 15-minute threshold has to survive. Drawn from the
+    # PUBLISHED table (D26), so a suppressed cell is a missing point here exactly as it is a
+    # missing row there, and the figure cannot disagree with the CSV beside it.
+    #
+    # Lines rather than bars: 92 bars in two overlapping series is unreadable, and the
+    # question is where the two CROSS, which a line answers and a bar chart hides. Log y
+    # because delta 0 is two orders of magnitude above the tail -- on a linear axis every
+    # point past delta 2 is flat against the axis, which is the opposite of the finding.
+    _max = int(e7_pub.get_column("max_delta_min")[0])
+    _beyond = e7_pub.get_column("n_beyond_max_delta")[0]
+    _cells = {(r["delta_min"], r["same_agent"]): r["n"] for r in e7_pub.to_dicts()}
+    # 05 always emits the complete 0..max x {same, different} grid and asserts it, so any
+    # shortfall in the published height is the n >= 10 rule and nothing else.
+    _n_sup = 2 * (_max + 1) - e7_pub.height
+    _n_zero = sum(1 for _v in _cells.values() if _v == 0)
+
+    def _tot(_same, _lo, _hi):
+        return sum(_v for (_k, _s), _v in _cells.items() if _s is _same and _lo <= _k <= _hi)
+
+    _fig, _ax = plt.subplots(figsize=(11.5, 5.0))
+    _ax.axvspan(0, COLLAPSE_GAP_MINUTES, color=COLORS["PAIR"], alpha=0.09, zorder=0)
+    _ax.axvline(COLLAPSE_GAP_MINUTES, color=COLORS["PAIR"], linewidth=1.2, zorder=1)
+
+    for _same, _label, _color, _style, _marker in (
+        (False, "different agent  —  co-administration", COLORS["PAIR"], "-", "o"),
+        (True, "same agent  —  redose", GREY, "--", "s"),
+    ):
+        _pts = [
+            (_k, _cells[(_k, _same)])
+            for _k in range(_max + 1)
+            if (_k, _same) in _cells and _cells[(_k, _same)] > 0
+        ]
+        _ax.plot(
+            [_p[0] for _p in _pts], [_p[1] for _p in _pts], _style, marker=_marker,
+            ms=3.6, linewidth=1.6, color=_color, label=_label, zorder=3,
+        )
+
+    _ax.set_yscale("log")
+    _ax.set_xlim(-1, _max + 1)
+    _ax.set_xticks(range(0, _max + 1, 5))
+    _ax.set_xlabel(
+        "Δ — minutes between consecutive administrations of the same drug class"
+    )
+    _ax.set_ylabel("intervals (log scale)")
+    _ax.legend(frameon=False, fontsize=8.5, loc="upper right")
+
+    # The two numbers the figure exists to show, spelled out rather than left to be read off
+    # a log axis: the delta-0 tower and the delta>=2 agreement.
+    _ax.annotate(
+        f"{_cells[(0, False)]:,}",
+        xy=(0, _cells[(0, False)]), xytext=(2.2, _cells[(0, False)] * 1.15),
+        fontsize=8.5, color=COLORS["PAIR"], fontweight="bold",
+    )
+    _ax.annotate(
+        f"{_cells[(0, True)]:,}",
+        xy=(0, _cells[(0, True)]), xytext=(1.4, _cells[(0, True)] * 0.55),
+        fontsize=8.5, color=GREY,
+    )
+    _ax.text(
+        COLLAPSE_GAP_MINUTES + 0.5, _ax.get_ylim()[1] * 0.55,
+        f"  collapse window\n  {COLLAPSE_GAP_MINUTES:.0f} min (D43.2)",
+        fontsize=8.5, color=COLORS["PAIR"], va="top",
+    )
+
+    _r0 = _cells[(0, False)] / _cells[(0, True)] if _cells.get((0, True)) else float("nan")
+    _rt = _tot(False, 2, _max) / _tot(True, 2, _max) if _tot(True, 2, _max) else float("nan")
+    _ax.set_title(
+        f"E.7  the collapse window is a clinical choice, not a valley — {SITE}\n"
+        f"Δ=0  {_cells[(0, False)]:,} different-agent vs {_cells[(0, True)]:,} same-agent "
+        f"({_r0:.1f}x)     Δ≥2  {_tot(False, 2, _max):,} vs {_tot(True, 2, _max):,} "
+        f"({_rt:.2f}x — the same rate)",
+        loc="left", fontweight="bold", fontsize=10,
+    )
+    # Just enough room under the axis label for the caption to start; `finish` hangs the
+    # caption below the figure and bbox_inches="tight" grows the canvas to hold it, so a
+    # large reservation here is pure white space between the two.
+    _fig.subplots_adjust(bottom=0.16)
+    finish(
+        _fig,
+        "pair_collapse_deltas.png",
+        f"Consecutive administrations of one drug class within the ±{WINDOW_HOURS} h "
+        "peri-intubation window, by the gap between them, split by whether the two rows "
+        "name different agents (a co-administration) or the same agent (a redose) — the two "
+        "things the D43 fold merges. Co-administration is a Δ ≤ 1 min phenomenon: "
+        f"{_cells[(0, False)]:,} vs {_cells[(0, True)]:,} intervals at Δ = 0 and "
+        f"{_cells[(1, False)]:,} vs {_cells[(1, True)]:,} at Δ = 1. From Δ = 2 onward the "
+        f"two series run at the same rate ({_tot(False, 2, _max):,} different-agent against "
+        f"{_tot(True, 2, _max):,} same-agent), so past one minute there is no "
+        "co-administration signal left — only routine repeat dosing. THE SHADED BAND IS THE "
+        f"WINDOW ACTUALLY USED: {COLLAPSE_GAP_MINUTES:.0f} min was chosen as a clinical "
+        "definition of one induction sequence, NOT fitted to a valley in this distribution — "
+        "there is no valley here to fit, and the threshold is wide because a charted "
+        "induction is, not because the data marks that spot. The spikes at every multiple of "
+        "5 min are the charting grid; they are in both series, and the one at Δ = 15 is grid, "
+        "not boundary. "
+        + (
+            f"{_beyond:,} intervals longer than {_max} min are not shown. "
+            if _beyond is not None
+            else f"The count of intervals longer than {_max} min is withheld under the "
+                 f"n>={MIN_CELL} rule. "
+        )
+        + (
+            f"{_n_sup} cell(s) hold 1..{MIN_CELL - 1} intervals and are absent rather than "
+            f"zero, taking at most {9 * _n_sup} intervals out of the curves. "
+            if _n_sup
+            else f"No cell fell in the 1..{MIN_CELL - 1} range, so nothing is suppressed. "
+        )
+        + (
+            f"{_n_zero} cell(s) are exactly zero and cannot be drawn on a log axis; they are "
+            "published in the CSV."
+            if _n_zero
+            else "Every cell is non-zero."
+        ),
+    )
+    return
+
+
+@app.cell
 def _(CAPTURE_RATE, N_INDEX, REFERENCE_INFORMATIVE, SHARE_DIR, a1, gap, joined):
     print("=" * 78)
     print("SUMMARY")
@@ -2318,6 +2523,7 @@ def _(SHARE_DIR):
         "charting_delay.png", "timing_offset_distribution.png", "timing_by_medication.png",
         "agreement_overview.png", "specificity_gap.png",
         "pair_offset_distribution.png", "pair_agent_combinations.png",
+        "pair_collapse_deltas.csv", "pair_collapse_deltas.png",
     }
     _actual = {p.name for p in SHARE_DIR.iterdir() if p.suffix in (".csv", ".png")}
     assert not (_expected - _actual), f"declared but MISSING: {sorted(_expected - _actual)}"

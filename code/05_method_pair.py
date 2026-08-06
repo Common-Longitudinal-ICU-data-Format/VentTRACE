@@ -487,6 +487,169 @@ def _(COLLAPSE_GAP_MINUTES, collapse_agent_events, epoch_minutes, pl, scan_rows)
 def _(mo):
     mo.md(
         r"""
+        ### The evidence for the 15 minutes (D43.2)
+
+        The window above is a **clinical** definition — the span over which a charted run of
+        pushes is one induction — and it is *not* fitted to a valley in the data, because
+        there is no valley to fit. That claim has to be publishable rather than asserted, so
+        the distribution behind it is computed here and published by `07` as
+        `pair_collapse_deltas.csv` / `.png`.
+
+        It is computed **here** and not there for the same reason the collapse itself is
+        here: the distribution is over raw *administrations*, and `07` never opens the
+        medication table — its inputs are the method artifacts. So `05`, which already holds
+        every row, emits an **aggregated counts-only** table (one `n` per Δ-minute per
+        same/different-agent), and `07` suppresses, writes and draws it. No row-level record
+        and no identifier crosses over.
+
+        The measure is the gap between **consecutive same-class administrations** inside a
+        block's ±`window_hours` peri-intubation window, split by whether the two rows name
+        the same agent (a redose) or different agents (a co-administration). Those are the
+        two things the fold merges, and they behave differently: co-administration is a
+        Δ ≤ 1 min phenomenon, while redosing is flat. Where the co-administration curve
+        meets the redose curve is where the collapse stops buying anything — and that
+        happens far below 15 minutes.
+        """
+    )
+    return
+
+
+@app.cell
+def _(
+    COHORT_RUN_ID,
+    COLLAPSE_GAP_MINUTES,
+    PHI_DIR,
+    epoch_minutes,
+    index_imv,
+    pl,
+    scan_rows,
+):
+    # D43.2's evidence table. COUNTS ONLY -- one row per (Δ minute, same_agent), no
+    # patient, no encounter, no timestamp. 07 applies the n >= 10 rule to it and draws the
+    # figure from what it publishes (D26).
+    COLLAPSE_DELTA_MAX_MIN = 45  # three collapse windows; past it the two series are flat
+
+    # Peri-intubation context, deliberately -- unlike the scan itself, which is
+    # free-running (D27). Over a whole stay the count is dominated by maintenance dosing on
+    # the ward and in the ICU, which is not the behaviour the fold is defined against. The
+    # question "does 15 minutes separate one induction from the next" is only meaningful
+    # near an intubation.
+    #
+    # `.unique()` first: index_imv is at episode grain (D35), so a block contributes one
+    # window per episode. Rows are marked in-window if they fall inside ANY of them, then
+    # de-duplicated back to one row per administration -- an administration inside two
+    # overlapping windows is still one administration and must not count twice.
+    _windows = index_imv.select(["encounter_block", "window_start", "window_end"]).unique()
+
+    _rows = scan_rows.select(
+        ["encounter_block", "admin_dttm", "med_category", "drug_class"]
+    ).with_row_index("_rid")
+
+    _peri_ids = (
+        _rows.join(_windows, on="encounter_block", how="inner")
+        .filter(
+            (pl.col("admin_dttm") >= pl.col("window_start"))
+            & (pl.col("admin_dttm") <= pl.col("window_end"))
+        )
+        .select("_rid")
+        .unique()
+    )
+
+    # Partitioned exactly as the fold is -- (encounter_block, drug_class) -- so the interval
+    # being measured is the interval the fold decides on. admin_min via `epoch_minutes`,
+    # never `datetime.timestamp()`; see that helper for why the difference is an hour.
+    _intervals = (
+        _rows.join(_peri_ids, on="_rid", how="semi")
+        .sort(["encounter_block", "drug_class", "admin_dttm", "med_category"])
+        .with_columns(admin_min=epoch_minutes())
+        .with_columns(
+            _prev_min=pl.col("admin_min").shift(1).over(["encounter_block", "drug_class"]),
+            _prev_cat=pl.col("med_category").shift(1).over(["encounter_block", "drug_class"]),
+        )
+        .drop_nulls("_prev_min")  # the first row of each partition opens no interval
+        .with_columns(
+            delta_min=(pl.col("admin_min") - pl.col("_prev_min")).round(0).cast(pl.Int32),
+            same_agent=pl.col("med_category") == pl.col("_prev_cat"),
+        )
+    )
+    _beyond = _intervals.filter(pl.col("delta_min") > COLLAPSE_DELTA_MAX_MIN).height
+
+    # The full 0..MAX x {same, different} grid, zeros included. A cell of exactly zero is
+    # publishable and MEANS something ("this never happened"); leaving it as an absent row
+    # would be indistinguishable from a row the n >= 10 rule removed.
+    _grid = pl.DataFrame(
+        {"delta_min": pl.int_range(0, COLLAPSE_DELTA_MAX_MIN + 1, eager=True).cast(pl.Int32)}
+    ).join(pl.DataFrame({"same_agent": [False, True]}), how="cross")
+
+    collapse_deltas = (
+        _grid.join(
+            _intervals.filter(pl.col("delta_min") <= COLLAPSE_DELTA_MAX_MIN)
+            .group_by(["delta_min", "same_agent"])
+            .agg(n=pl.len()),
+            on=["delta_min", "same_agent"],
+            how="left",
+        )
+        .with_columns(
+            cohort_run_id=pl.lit(COHORT_RUN_ID),
+            n=pl.col("n").fill_null(0).cast(pl.Int32),
+            max_delta_min=pl.lit(COLLAPSE_DELTA_MAX_MIN, dtype=pl.Int32),
+            # Carried so the figure can state its truncated mass without reopening a PHI
+            # frame. It is a whole-cohort margin, not a cell, and 07 withholds it if it
+            # ever lands in the disclosive range.
+            n_beyond_max_delta=pl.lit(_beyond, dtype=pl.Int32),
+        )
+        .select(
+            ["cohort_run_id", "delta_min", "same_agent", "n", "max_delta_min",
+             "n_beyond_max_delta"]
+        )
+        .sort(["delta_min", "same_agent"])
+    )
+
+    assert collapse_deltas.height == 2 * (COLLAPSE_DELTA_MAX_MIN + 1), (
+        f"the grid is {collapse_deltas.height} rows, not "
+        f"{2 * (COLLAPSE_DELTA_MAX_MIN + 1)}. 07 derives the suppressed-cell count by "
+        "subtracting the published height from this, so a ragged grid would report "
+        "suppression that never happened."
+    )
+    assert collapse_deltas.get_column("n").sum() + _beyond == _intervals.height, (
+        "the binned counts and the beyond-max count do not add up to the intervals "
+        "measured; the table would understate its own denominator."
+    )
+    assert not set(collapse_deltas.columns) & {"patient_id", "encounter_block",
+                                              "hospitalization_id", "admin_dttm"}, (
+        "an identifier reached the collapse-evidence table. It is published by 07 and must "
+        "stay counts-only."
+    )
+
+    collapse_deltas.write_parquet(PHI_DIR / "pair_collapse_deltas.parquet")
+
+    _d = {(r["delta_min"], r["same_agent"]): r["n"] for r in collapse_deltas.to_dicts()}
+    _diff_le1 = _d[(0, False)] + _d[(1, False)]
+    _same_le1 = _d[(0, True)] + _d[(1, True)]
+    _diff_ge2 = sum(v for (k, s), v in _d.items() if k >= 2 and not s)
+    _same_ge2 = sum(v for (k, s), v in _d.items() if k >= 2 and s)
+    print(f"peri-intubation intervals measured : {_intervals.height:,}")
+    print(f"  within 0..{COLLAPSE_DELTA_MAX_MIN} min                    : "
+          f"{collapse_deltas.get_column('n').sum():,}")
+    print(f"  beyond {COLLAPSE_DELTA_MAX_MIN} min (not tabulated)      : {_beyond:,}")
+    print(f"\n            different agent   same agent")
+    print(f"  delta 0   {_d[(0, False)]:>13,}   {_d[(0, True)]:>10,}")
+    print(f"  delta 1   {_d[(1, False)]:>13,}   {_d[(1, True)]:>10,}")
+    print(f"  <= 1 min  {_diff_le1:>13,}   {_same_le1:>10,}")
+    print(f"  >= 2 min  {_diff_ge2:>13,}   {_same_ge2:>10,}")
+    print(
+        f"\nThe co-administration signal is spent by delta 1; from delta 2 the two series "
+        f"run at the same rate.\nThe fold nevertheless uses "
+        f"{COLLAPSE_GAP_MINUTES:.0f} min -- a clinical induction sequence, NOT a valley in "
+        "this distribution (D43.2).\npair_collapse_deltas.parquet -> 07"
+    )
+    return COLLAPSE_DELTA_MAX_MIN, collapse_deltas
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
         ## The scan — one forward pass with consumption
 
         ```

@@ -1154,6 +1154,8 @@ The sweep exists because **`infusion_prep_minutes` cannot be defended from first
 | `pair_index_offsets.csv` | E.4 |
 | `pair_t0_concordance.csv` | E.5 |
 | `pair_offset_distribution.png` | E.6 |
+| `pair_collapse_deltas.csv` | E.7 — gap between consecutive same-class administrations in the peri-intubation window, per Δ minute 0–45, split same-agent (redose) vs different-agent (co-administration). Computed by `05`, which is the only notebook that holds the administrations, and emitted as counts only |
+| `pair_collapse_deltas.png` | E.7, the two series on a log y-axis with the chosen collapse window shaded — the published evidence that D43.2's 15 minutes is a clinical definition and not a fitted valley |
 | `pair_agent_combinations.png` | E.3, sedative × paralytic heatmap, counts annotated |
 | `consort_flow.png` | CONSORT A and B as one two-panel figure, drawn from the two CSVs |
 | `index_class_strata.png` | §5.10 taxonomy — the denominator map, `qualified` highlighted |
@@ -1184,7 +1186,7 @@ Follows the existing rules in [`output/README.md`](../../../output/README.md) an
 
 | Directory | Contents |
 |------------------------------------|------------------------------------|
-| `output/intermediate_phi/` | `cohort.parquet`, `cohort_resp_waterfall.parquet`, `cohort_resp_imv_raw.parquet`, `cohort_index.parquet`, `cohort_qc.csv`, `index_imv.parquet`, `method_{SED,PARA}_ranked.json`, `method_{SED,PARA,PAIR}_episode.parquet`, `method_PAIR_pairs.parquet`, `reference_cpt.parquet` |
+| `output/intermediate_phi/` | `cohort.parquet`, `cohort_resp_waterfall.parquet`, `cohort_resp_imv_raw.parquet`, `cohort_index.parquet`, `cohort_qc.csv`, `index_imv.parquet`, `method_{SED,PARA}_ranked.json`, `method_{SED,PARA,PAIR}_episode.parquet`, `method_PAIR_pairs.parquet`, `pair_collapse_deltas.parquet`, `reference_cpt.parquet` |
 | `output/final_no_phi/` | both CONSORT count sets, `index_class_rates.csv`, `charting_delay.csv`, agreement matrices, offset distribution summaries, reference-scored metrics, specificity tables, plots |
 
 `output/final_no_phi/` constraints: aggregates only, **minimum cell size n ≥ 10** for every reported statistic, no `patient_id`, no row-level records, no raw `.csv` / `.parquet` data files.
