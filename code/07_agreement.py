@@ -111,9 +111,10 @@ def _(mo):
 @app.cell
 def _(METHODS, PHI_DIR, pl):
     _CORE = {
+        "intubation_episode_id": pl.String,
         "encounter_block": pl.Int32,
         "patient_id": pl.String,
-        "intubation_episode_id": pl.String,
+        "ep_num": pl.Int32,
         "cohort_run_id": pl.String,
         "index_class": pl.String,
         "index_qualified": pl.Boolean,
@@ -140,7 +141,7 @@ def _(METHODS, PHI_DIR, pl):
         + [f"near_{c}" for c in _INDEX_PAIR_FIELDS]
     )
 
-    ENCOUNTER_SCHEMA = {
+    EPISODE_SCHEMA = {
         "SED": (list(_CORE) + list(_RANKED_TAIL), {**_CORE, **_RANKED_TAIL}),
         "PARA": (list(_CORE) + list(_RANKED_TAIL), {**_CORE, **_RANKED_TAIL}),
         "PAIR": (list(_CORE) + _PAIR_TAIL, _CORE),
@@ -148,8 +149,14 @@ def _(METHODS, PHI_DIR, pl):
 
     method_tables = {}
     for _m in METHODS:
-        _df = pl.read_parquet(PHI_DIR / f"method_{_m}_encounter.parquet")
-        _cols, _types = ENCOUNTER_SCHEMA[_m]
+        _stale = PHI_DIR / f"method_{_m}_encounter.parquet"
+        assert not _stale.exists(), (
+            f"{_stale.name} is present from the pre-D35 design. It holds one row per "
+            "encounter and would supply the wrong denominator silently. Delete it and "
+            f"re-run 0{'345'[METHODS.index(_m)]}."
+        )
+        _df = pl.read_parquet(PHI_DIR / f"method_{_m}_episode.parquet")
+        _cols, _types = EPISODE_SCHEMA[_m]
 
         assert list(_df.columns) == _cols, (
             f"method {_m}: columns do not match its contract.\n"
@@ -218,8 +225,24 @@ def _(METHODS, method_tables, pairs, reference):
 
 
 @app.cell
-def _(METHODS, method_tables, pl, reference):
-    _keys = ["intubation_episode_id", "encounter_block", "index_class", "index_qualified"]
+def _(PHI_DIR, pl):
+    # 02's index artifact, read for its STRATA only -- the labels it attaches without
+    # excluding on (§5.10). The methods do not carry these and should not: they are
+    # properties of the index event, and a method copying a column it neither computes nor
+    # can validate is exactly the silent-drift risk D14 warns about.
+    index_strata = pl.read_parquet(PHI_DIR / "index_imv.parquet").select(
+        ["intubation_episode_id", "no_lookback", "imv_charted", "charting_delay_min"]
+    )
+    assert index_strata.get_column("intubation_episode_id").is_unique().all()
+    print(f"index strata loaded : {index_strata.height:,} episodes")
+    print(f"  no_lookback true  : {index_strata.get_column('no_lookback').sum():,}")
+    return (index_strata,)
+
+
+@app.cell
+def _(METHODS, index_strata, method_tables, pl, reference):
+    _keys = ["intubation_episode_id", "encounter_block", "patient_id", "ep_num",
+             "index_class", "index_qualified"]
     joined = method_tables[METHODS[0]].select(_keys)
 
     for _m in ("SED", "PARA"):
@@ -250,17 +273,28 @@ def _(METHODS, method_tables, pl, reference):
         reference.select("intubation_episode_id", "cpt_present"),
         on="intubation_episode_id",
         how="inner",
+    ).join(
+        # Index strata, joined from 02's own artifact rather than carried through every
+        # method table. `no_lookback` is a property of the index event, not a method
+        # output, so putting it in the §6.4 core would make three notebooks copy a column
+        # none of them computes or can check.
+        index_strata,
+        on="intubation_episode_id",
+        how="inner",
     )
 
     assert joined.height == method_tables[METHODS[0]].height, (
-        "the join lost or duplicated encounters; every cohort encounter must appear exactly once"
+        "the join lost or duplicated rows; every candidate episode must appear exactly once"
     )
+    assert joined.get_column("intubation_episode_id").is_unique().all()
     # A window hit is a property of a pair, so it cannot exist without one.
     assert joined.filter(
         pl.col("pair_detected_in_window") & ~pl.col("pair_detected")
     ).height == 0, "detected_in_window is true where no pair exists"
 
-    print(f"joined analytic table : {joined.height:,} rows (one per cohort encounter)")
+    print(f"joined analytic table : {joined.height:,} rows (one per candidate episode)")
+    print(f"  distinct blocks     : {joined.get_column('encounter_block').n_unique():,}")
+    print(f"  distinct patients   : {joined.get_column('patient_id').n_unique():,}")
     print(joined.head(6))
     return (joined,)
 
@@ -270,8 +304,10 @@ def _(joined, pl):
     analytic = joined.filter(pl.col("index_class") == "qualified")
     N_INDEX = analytic.height
 
-    print(f"N*  cohort encounters : {joined.height:,}")
+    print(f"candidate episodes    : {joined.height:,}")
     print(f"N** index set         : {N_INDEX:,}   <- the denominator for Tiers A, B, C and E")
+    print(f"  blocks              : {analytic.get_column('encounter_block').n_unique():,}")
+    print(f"  patients            : {analytic.get_column('patient_id').n_unique():,}")
     return N_INDEX, analytic
 
 
@@ -311,12 +347,48 @@ def _(MIN_CELL, pl):
             return pl.col(f"{method.lower()}_detected")
         return pl.col("pair_detected" if basis == "free_running" else "pair_detected_in_window")
 
-    return apply_min_cell, detected_expr
+    def unit_counts(df):
+        """Episodes, blocks and patients for one frame.
+
+        Reported on every rate table under D35: a block may contribute several episodes, so
+        an episode rate and an encounter rate are different numbers and a table naming
+        neither is ambiguous. It also makes the dependence visible where it matters --
+        kappa assumes independent units, and a block contributing seven episodes violates
+        that quietly.
+        """
+        return {
+            "n_episodes": df.height,
+            "n_blocks": df.get_column("encounter_block").n_unique(),
+            "n_patients": df.get_column("patient_id").n_unique(),
+        }
+
+    return apply_min_cell, detected_expr, unit_counts
 
 
 @app.cell
 def _(mo):
-    mo.md("""## Tier A — do the methods find the same patients?""")
+    mo.md(
+        """
+        ## Tier A — do the methods find the same episodes?
+
+        **Read this tier as conditional, not marginal (D38).** An episode qualifies only if
+        one of the eight method medication categories was charted `given` in the window, and
+        `SED` and `PARA` read those same eight categories over that same window in that same
+        table. So `SED ∨ PARA` is true for every episode in the denominator **by
+        construction**, and the question is narrower than the heading: not *do the methods
+        find the same intubations*, but **given that an induction agent was charted, do the
+        methods catalog it the same way**.
+
+        The `SED−/PARA−` cell of A.2 and the concordance-0 row of A.3 are therefore near-
+        empty by definition. What lands in them is the **D25 on-t₀ population** — an
+        administration falling exactly on t₀ belongs to neither half-open direction, so the
+        episode passes the filter and still scores `detected = false`. Both are labelled as
+        such rather than reported as agreement evidence.
+
+        `PAIR` is exempt: it is free-running (D27), so it can fire on an episode the window
+        filter rejected and its cells are not constrained.
+        """
+    )
     return
 
 
@@ -449,24 +521,27 @@ def _(
 
 
 @app.cell
-def _(analytic, method_tables, pairs, pl):
+def _(analytic, pairs, pl):
     # The PARA x PAIR `only_b` cell -- PAIR+ and PARA- on the matched basis -- is the design's
     # cross-notebook integrity check, so a non-zero count is decomposed here rather than left
     # for someone to dig out by hand. Two boundary effects put a legitimate floor under it,
     # and anything NOT explained by them is the bug the check exists to catch.
-    _susp = (
-        analytic.filter(pl.col("pair_detected_in_window") & ~pl.col("para_detected"))
-        .select("encounter_block")
-    )
+    #
+    # Keyed on intubation_episode_id, NOT encounter_block. Under D35 a block holds several
+    # episodes and D39 assigns each pair to one of them, so joining on the block pulls in
+    # pairs belonging to a DIFFERENT episode and scores them against the wrong t0. That
+    # fans the frame out and makes the explained counts exceed the count being explained --
+    # which is how this was caught.
+    _susp = analytic.filter(
+        pl.col("pair_detected_in_window") & ~pl.col("para_detected")
+    ).select("intubation_episode_id")
     print(f"PARA x PAIR, only_b (PAIR+ & PARA-) on in_window : {_susp.height}")
 
     if _susp.height:
-        _idx = method_tables["PAIR"].select("encounter_block", "imv_dttm")
-        _bounds = (
-            method_tables["SED"].select("encounter_block").join(_idx, on="encounter_block")
-        )
+        # `pairs` already carries imv_dttm -- the t0 of the episode D39 assigned it to --
+        # so no join to a method table is needed to get the right anchor.
         _d = (
-            pairs.join(_susp, on="encounter_block", how="inner")
+            pairs.join(_susp, on="intubation_episode_id", how="semi")
             .filter(pl.col("in_window"))
             .with_columns(
                 # (1) D25: a paralytic charted exactly on t0 is in neither half-open
@@ -482,21 +557,23 @@ def _(analytic, method_tables, pairs, pl):
                 > 180,
             )
         )
-        _explained = _d.filter(pl.col("para_at_t0") | pl.col("para_outside"))
-        print(
-            f"  explained by D25 (paralytic exactly on t0)      : "
-            f"{_d.filter(pl.col('para_at_t0')).height}"
+        # Per EPISODE, not per pair: the cell being decomposed counts episodes, so an
+        # episode is explained when at least one of its in-window pairs is.
+        _by_ep = _d.group_by("intubation_episode_id").agg(
+            any_at_t0=pl.col("para_at_t0").any(),
+            any_outside=pl.col("para_outside").any(),
         )
-        print(
-            f"  explained by §6.5 (in_window is on pair_dttm)   : "
-            f"{_d.filter(~pl.col('para_at_t0') & pl.col('para_outside')).height}"
-        )
-        _unexplained = _d.height - _explained.height
-        assert _unexplained == 0, (
-            f"{_unexplained} PAIR+/PARA- pairs are explained by NEITHER boundary rule. That is "
-            "the list-or-window disagreement this check exists to catch: 05 and 04 are not "
-            "reading the paralytic list the same way.\n"
-            + str(_d.filter(~pl.col("para_at_t0") & ~pl.col("para_outside")))
+        _n_t0 = _by_ep.filter(pl.col("any_at_t0")).height
+        _n_out = _by_ep.filter(~pl.col("any_at_t0") & pl.col("any_outside")).height
+        print(f"  explained by D25 (paralytic exactly on t0)      : {_n_t0}")
+        print(f"  explained by §6.5 (in_window is on pair_dttm)   : {_n_out}")
+
+        _bad = _by_ep.filter(~pl.col("any_at_t0") & ~pl.col("any_outside"))
+        assert _bad.height == 0, (
+            f"{_bad.height} PAIR+/PARA- episodes are explained by NEITHER boundary rule. "
+            "That is the list-or-window disagreement this check exists to catch: 05 and 04 "
+            "are not reading the paralytic list the same way.\n"
+            + str(_d.join(_bad.select("intubation_episode_id"), on="intubation_episode_id"))
         )
         print("  unexplained                                    : 0  — integrity check passes")
     return
@@ -832,88 +909,228 @@ def _(BASES, COHORT_RUN_ID, METHODS, SHARE_DIR, analytic, detected_expr, pl):
 def _(mo):
     mo.md(
         """
-        ## Tier D — specificity probe on the excluded strata
+        ## Tier D — specificity
 
-        The one place the non-qualified encounters are used, and the only stratum in the
-        study where the truth is known without a gold standard.
+        Same methods, same window, same code — only the stratum changes.
 
-        **`arrived_intubated` is the row with a known answer.** Those patients were intubated
-        before they arrived, so nothing in the window around their first charted IMV row can
-        be an induction. Every detection there is a false positive **by construction** — no
-        reference, no adjudication, no assumption about coding.
+        **This tier was weakened by D37 and says so.** It used to rest on
+        `arrived_intubated`: those patients were intubated before arrival, so any `SED`
+        firing around their first charted IMV row was a false positive *by construction* —
+        the one stratum in the study whose answer was known without a gold standard.
+
+        D37 admits that group to the primary analysis, on the argument that an empty
+        pre-period usually means nobody charted room air rather than that ventilation
+        predates the record. That argument is sound and the group is worth analysing, but it
+        costs the study its known-answer stratum. The four contrasts below are the best
+        available replacement and **each names its own confounder**. None is a
+        false-positive count by construction.
+
+        **D.4 is the salvage.** `SED`, `PARA` and `PAIR`'s windowed reading are identically
+        zero on the `no_induction_med` stratum, because D38 built that stratum out of their
+        own medication list. `PAIR` on the free-running basis is not constrained — its scan
+        covers the whole block — so its rate there measures ambient sedative–paralytic
+        pairing on the largest stratum in the study.
         """
     )
     return
 
 
 @app.cell
-def _(BASES, COHORT_RUN_ID, METHODS, SHARE_DIR, apply_min_cell, detected_expr, joined, pl):
-    _aggs = {}
+def _(BASES, COHORT_RUN_ID, METHODS, detected_expr, pl, unit_counts):
+    # One shape for D.1-D.3: group a frame by a column, emit counts and rates for every
+    # method-basis series. Defined once here and taken as an argument by the three cells
+    # below -- the alternative is three copies of the same eight-line aggregation, which is
+    # the duplication D8 wants BETWEEN notebooks, not within one cell block.
+    SERIES = []
     for _basis in BASES:
         for _m in METHODS:
             if _m != "PAIR" and _basis != BASES[0]:
                 continue
-            _name = f"{_m}_{_basis}" if _m == "PAIR" else _m
-            _aggs[f"n_detected_{_name}"] = detected_expr(_m, _basis).sum()
+            SERIES.append((_m, _basis, f"{_m}_{_basis}" if _m == "PAIR" else _m))
 
-    d1 = (
-        joined.group_by("index_class")
-        .agg(n=pl.len(), **_aggs)
-        .with_columns(
-            **{
-                f"rate_{_k[len('n_detected_'):]}": (pl.col(_k) / pl.col("n")).round(4)
-                for _k in _aggs
+    def strat_rates(df, group_col, label_col):
+        _rows = []
+        for _key, _sub in df.group_by(group_col, maintain_order=True):
+            _v = _key[0] if isinstance(_key, tuple) else _key
+            _r = {
+                "cohort_run_id": COHORT_RUN_ID,
+                label_col: str(_v),
+                **unit_counts(_sub),
             }
-        )
-        .sort("n", descending=True)
-        .with_columns(cohort_run_id=pl.lit(COHORT_RUN_ID))
-        .select(
-            ["cohort_run_id", "index_class", "n"]
-            + list(_aggs)
-            + [f"rate_{_k[len('n_detected_'):]}" for _k in _aggs]
-        )
-    )
+            for _m, _basis, _name in SERIES:
+                _n = int(_sub.select(detected_expr(_m, _basis)).to_series().sum())
+                _r[f"n_detected_{_name}"] = _n
+                _r[f"rate_{_name}"] = round(_n / _sub.height, 4) if _sub.height else None
+            _rows.append(_r)
+        return pl.DataFrame(_rows)
 
-    d1_pub = apply_min_cell(d1, ["n"] + list(_aggs), "D.1")
-    d1_pub.write_csv(SHARE_DIR / "specificity_by_index_class.csv")
-    print("D.1 detection rate by index_class")
-    print(d1_pub)
+    def count_cols(df):
+        return [c for c in df.columns if c.startswith("n_")]
 
-    SERIES = [_k[len("n_detected_"):] for _k in _aggs]
-    return SERIES, d1, d1_pub
+    return SERIES, count_cols, strat_rates
 
 
 @app.cell
-def _(COHORT_RUN_ID, SERIES, SHARE_DIR, d1_pub, pl):
-    _lookup = {r["index_class"]: r for r in d1_pub.to_dicts()}
+def _(SHARE_DIR, analytic, apply_min_cell, count_cols, strat_rates):
+    d1 = strat_rates(analytic.sort("no_lookback"), "no_lookback", "no_lookback")
+    d1_pub = apply_min_cell(d1, count_cols(d1), "D.1")
+    d1_pub.write_csv(SHARE_DIR / "specificity_by_lookback.csv")
+    print("D.1 detection rate by no_lookback, within the index set")
+    print("  no_lookback = t0 is the block's first respiratory row -- the old")
+    print("  arrived_intubated group, now included (D37) rather than excluded.")
+    print("  CONFOUNDER: case mix. These patients are disproportionately transfers.")
+    print(d1_pub)
+    return (d1_pub,)
+
+
+@app.cell
+def _(SHARE_DIR, analytic, apply_min_cell, count_cols, pl, strat_rates):
+    _binned = analytic.with_columns(
+        ep_group=pl.when(pl.col("ep_num") == 1).then(pl.lit("1")).otherwise(pl.lit(">1"))
+    ).sort("ep_group")
+    d2 = strat_rates(_binned, "ep_group", "ep_num")
+    d2_pub = apply_min_cell(d2, count_cols(d2), "D.2")
+    d2_pub.write_csv(SHARE_DIR / "specificity_by_ep_num.csv")
+    print("D.2 detection rate by episode number -- new under D35")
+    print("  CONFOUNDER: illness trajectory. A reintubation happens deep in an ICU stay,")
+    print("  where the ambient rate of sedative charting is far higher than at admission.")
+    print(d2_pub)
+    return (d2_pub,)
+
+
+@app.cell
+def _(SHARE_DIR, apply_min_cell, count_cols, joined, pl, strat_rates):
+    _probe = joined.filter(
+        pl.col("index_class").is_in(["qualified", "not_sustained"])
+    ).sort("index_class")
+    d3 = strat_rates(_probe, "index_class", "index_class")
+    d3_pub = apply_min_cell(d3, count_cols(d3), "D.3")
+    d3_suppressed = set(d3.get_column("index_class").to_list()) - set(
+        d3_pub.get_column("index_class").to_list()
+    )
+    d3_pub.write_csv(SHARE_DIR / "specificity_not_sustained.csv")
+    print("D.3 qualified vs not_sustained -- the residual probe")
+    print("  An IMV row followed within episode_gap_hours by a different device is a")
+    print("  charting blip. Neither should carry an induction.")
+    print("  CONFOUNDER: a not_sustained episode adjacent to a real intubation elsewhere")
+    print("  in the same block can borrow its medications.")
+    print(d3_pub)
+    if d3_suppressed:
+        print(f"  NOTE: {sorted(d3_suppressed)} withheld entirely under the n>=10 rule.")
+        print("  The D summary below reports that as `suppressed`, not as a missing value.")
+    return d3_pub, d3_suppressed
+
+
+@app.cell
+def _(COHORT_RUN_ID, SERIES, SHARE_DIR, detected_expr, joined, pl):
+    _nim = joined.filter(pl.col("index_class") == "no_induction_med")
+
     _rows = []
-    for _s in SERIES:
-        _q = _lookup.get("qualified", {}).get(f"rate_{_s}")
-        _a = _lookup.get("arrived_intubated", {}).get(f"rate_{_s}")
+    for _m, _basis, _name in SERIES:
+        _interp = _m == "PAIR" and _basis == "free_running"
+        _n = int(_nim.select(detected_expr(_m, _basis)).to_series().sum())
         _rows.append(
             {
                 "cohort_run_id": COHORT_RUN_ID,
-                "series": _s,
+                "series": _name,
+                "n_stratum": _nim.height,
+                "n_detected": _n,
+                "rate": round(_n / _nim.height, 4) if _nim.height else None,
+                "interpretable": _interp,
+                "note": ""
+                if _interp
+                else "0 by construction (D38) -- this reports the filter, not a result",
+            }
+        )
+    d4 = pl.DataFrame(_rows)
+
+    # The three degenerate rows MUST be zero. If one is not, 02's INDUCTION_CATEGORIES and
+    # this method's own MED_CATEGORIES have drifted apart -- and that drift is otherwise
+    # SILENT: the cohort simply stops being the cohort the methods measure, and Tier A's
+    # denominator is wrong with nothing in any output to show it. This is the one place it
+    # is observable, so it is asserted here rather than trusted.
+    _nonzero = d4.filter(~pl.col("interpretable") & (pl.col("n_detected") > 0))
+    assert _nonzero.height == 0, (
+        f"{_nonzero.to_dicts()} fired on the no_induction_med stratum. Those episodes were "
+        "rejected by 02 for containing none of the eight induction agents in the window, so "
+        "a windowed method cannot detect one there. 02's INDUCTION_CATEGORIES and this "
+        "method's MED_CATEGORIES have drifted apart (D38)."
+    )
+
+    d4.write_csv(SHARE_DIR / "specificity_pair_free_running.csv")
+    print(f"D.4 the no_induction_med stratum, n = {_nim.height:,}")
+    print("  PAIR free_running is the only interpretable row: its scan covers the whole")
+    print("  block, so it is not constrained by the window filter that built this stratum.")
+    print(d4)
+    return (d4,)
+
+
+@app.cell
+def _(COHORT_RUN_ID, SERIES, SHARE_DIR, d3_pub, d3_suppressed, d4, pl):
+    _d3 = {r["index_class"]: r for r in d3_pub.to_dicts()}
+    _d4 = {r["series"]: r for r in d4.to_dicts()}
+
+    _rows = []
+    for _m, _basis, _name in SERIES:
+        if _name == "PAIR_free_running":
+            _contrast = "D.4 no_induction_med"
+            _comp = _d4[_name]["rate"]
+            _status = "ok" if _comp is not None else "not_available"
+        else:
+            _contrast = "D.3 not_sustained"
+            _comp = _d3.get("not_sustained", {}).get(f"rate_{_name}")
+            # A null comparator is NOT the same statement as a withheld one, and a bare
+            # null in the headline specificity table reads as "not computed". The rate
+            # itself stays unpublished: the stratum size is public in consort_index.csv,
+            # so a rate would make the suppressed count recoverable by multiplication --
+            # which is the whole reason the row was withheld.
+            if _comp is not None:
+                _status = "ok"
+            elif "not_sustained" in d3_suppressed:
+                _status = "suppressed_n_below_10"
+            else:
+                _status = "not_available"
+        _q = _d3.get("qualified", {}).get(f"rate_{_name}")
+        _rows.append(
+            {
+                "cohort_run_id": COHORT_RUN_ID,
+                "series": _name,
+                "contrast": _contrast,
                 "rate_qualified": _q,
-                "rate_arrived_intubated": _a,
-                "gap": round(_q - _a, 4) if _q is not None and _a is not None else None,
+                "rate_comparator": _comp,
+                "comparator_status": _status,
+                "gap": round(_q - _comp, 4) if _q is not None and _comp is not None else None,
                 # Reported alongside the difference because at low absolute rates the
                 # difference collapses toward zero for arithmetic reasons rather than for want
                 # of specificity. 0.016 vs 0.004 is a gap of 0.012, which looks like nothing,
                 # and a ratio of 4, which is the statement a gap of 0.43 makes at high rates.
-                "ratio": round(_q / _a, 2) if _q is not None and _a else None,
+                "ratio": round(_q / _comp, 2) if _q is not None and _comp else None,
+                "known_answer": False,
             }
         )
 
     gap = pl.DataFrame(_rows)
     gap.write_csv(SHARE_DIR / "specificity_gap.csv")
-    print("D.1 gap table")
+    print("D summary")
     print(gap)
+    _sup = [r["series"] for r in _rows if r["comparator_status"].startswith("suppressed")]
+    if _sup:
+        print(
+            f"\n  {len(_sup)} of {len(_rows)} contrasts have NO published gap: the "
+            "not_sustained row was withheld\n"
+            "  entirely under the n>=10 rule because one of its counts fell in the 1-9 "
+            "range.\n"
+            "  Suppression here is row-level by design -- blanking one cell in a table "
+            "whose margins\n"
+            "  are published is often recoverable by subtraction. The gap is withheld, "
+            "not missing."
+        )
     print(
-        "\n  The strata differ clinically, not only in observability — arrived-intubated\n"
-        "  patients are transfers, and transfers differ in acuity and sedation practice. The\n"
-        "  gap is therefore a BOUND on specificity, not an unconfounded estimate. It is still\n"
-        "  the strongest specificity evidence available without chart review."
+        "\n  A method whose gap approaches zero is not detecting intubation -- it is\n"
+        "  detecting being in an ICU. That reading survives D37 intact.\n"
+        "  What does NOT survive is the claim that the comparator is false-positive by\n"
+        "  construction: `known_answer` is false on every row, and each contrast's\n"
+        "  confounder is printed with its own table above."
     )
     return (gap,)
 
@@ -1177,14 +1394,21 @@ def _(COLORS, GREY, NullFormatter, SHARE_DIR, SITE, finish, pl, plt):
     _b = pl.read_csv(SHARE_DIR / "consort_index.csv")
 
     _fig, _axes = plt.subplots(1, 2, figsize=(13, 5.5))
-    for _ax, _df, _title, _color in (
-        (_axes[0], _a, "CONSORT A — cohort", GREY),
-        (_axes[1], _b, "CONSORT B — index", COLORS["SED"]),
+    # The two CONSORTs count DIFFERENT units and the column names say so: A is per
+    # encounter block, B is per episode (D35). Reading both through one hardcoded column
+    # name is what broke when the unit changed, so the unit is looked up per panel.
+    for _ax, _df, _title, _color, _unit in (
+        (_axes[0], _a, "CONSORT A — cohort (blocks)", GREY, "n_encounters"),
+        (_axes[1], _b, "CONSORT B — index (episodes)", COLORS["SED"], "n_episodes"),
     ):
+        assert _unit in _df.columns, (
+            f"{_title} has no {_unit} column; it has {_df.columns}. The CONSORT unit "
+            "changed without this figure being told."
+        )
         _steps = _df.get_column("step").to_list()
         _n = [
             v if v is not None else _df.get_column("n_patients").to_list()[i]
-            for i, v in enumerate(_df.get_column("n_encounters").to_list())
+            for i, v in enumerate(_df.get_column(_unit).to_list())
         ]
         _y = list(range(len(_steps)))[::-1]
         _ax.barh(_y, _n, color=_color, alpha=0.85, height=0.62)
@@ -1208,6 +1432,8 @@ def _(COLORS, GREY, NullFormatter, SHARE_DIR, SITE, finish, pl, plt):
     finish(
         _fig,
         "consort_flow.png",
+        "Left panel counts encounter blocks, right panel counts intubation episodes — a "
+        "block may contribute several (D35), so the two axes are not the same unit. "
         "Bars are cumulative survivors at each step; parenthesised figures are the exclusion "
         "at that step. Panel A counts patients until stitching defines an encounter.",
     )
@@ -1246,9 +1472,9 @@ def _(COLORS, SITE, finish, joined, pl, plt):
     finish(
         _fig,
         "index_class_strata.png",
-        "Only `qualified` (highlighted) feeds Tiers A-C and E. The other four are "
-        "observability failures, and `arrived_intubated` is the Tier D stratum whose truth "
-        "is known.",
+        "Only `qualified` (highlighted) feeds Tiers A-C and E. `not_sustained` is the "
+        "residual Tier D probe; `no_induction_med` is method-negative by construction for "
+        "the two windowed methods (D38) and informative only for PAIR free-running.",
     )
     return
 
@@ -1397,45 +1623,74 @@ def _(COLORS, N_INDEX, SHARE_DIR, SITE, a2, a3, finish, pl, plt):
 
 
 @app.cell
-def _(COLORS, SERIES, SITE, d1, finish, gap, pl, plt):
+def _(COLORS, SITE, finish, gap, plt):
     # F6 -- Tier D. The one figure where a small bar is the good result.
-    _order = ["qualified", "arrived_intubated", "prior_row_imv", "insufficient_lookback",
-              "imv_not_sustained"]
-    _d = d1.filter(pl.col("index_class").is_in(_order))
-    _present = [c for c in _order if c in _d.get_column("index_class").to_list()]
-    _lookup = {r["index_class"]: r for r in _d.to_dicts()}
+    #
+    # Drawn from the SUMMARY table rather than from a stratum table, because after the D37
+    # rewrite the four series no longer share one comparator: SED, PARA and PAIR-in-window
+    # are contrasted against not_sustained (D.3) and PAIR-free-running against
+    # no_induction_med (D.4). Each bar pair carries its own contrast in the tick label.
+    _rows = [r for r in gap.to_dicts() if r["rate_qualified"] is not None]
     _color = {"SED": COLORS["SED"], "PARA": COLORS["PARA"],
               "PAIR_free_running": "#9ed4ab", "PAIR_in_window": COLORS["PAIR"]}
 
-    _fig, _ax = plt.subplots(figsize=(12, 5.0))
-    _w = 0.8 / len(SERIES)
-    for _k, _s in enumerate(SERIES):
-        _x = [i + (_k - (len(SERIES) - 1) / 2) * _w for i in range(len(_present))]
-        _vals = [_lookup[c][f"rate_{_s}"] for c in _present]
-        _ax.bar(_x, _vals, width=_w, color=_color.get(_s, "#999999"), label=_s)
-        for _xx, _vv in zip(_x, _vals):
-            _ax.text(_xx, _vv, f"{_vv:.3f}", ha="center", va="bottom", fontsize=7, rotation=90)
+    _fig, _ax = plt.subplots(figsize=(11, 5.0))
+    _w = 0.38
+    _x = list(range(len(_rows)))
+    _ax.bar(
+        [i - _w / 2 for i in _x], [r["rate_qualified"] for r in _rows], _w,
+        color=[_color.get(r["series"], "#999999") for r in _rows], label="qualified",
+    )
+    # A withheld comparator is drawn as NO bar, never as a zero-height one: a 0.0 bar is a
+    # claim that the rate is zero, which is a different and much stronger statement than
+    # "this was suppressed under the n>=10 rule".
+    _have = [(i, r) for i, r in enumerate(_rows) if r["rate_comparator"] is not None]
+    if _have:
+        _ax.bar(
+            [i + _w / 2 for i, _ in _have], [r["rate_comparator"] for _, r in _have], _w,
+            color=[_color.get(r["series"], "#999999") for _, r in _have], alpha=0.45,
+            hatch="//", label="comparator",
+        )
+    for _i, _r in enumerate(_rows):
+        _ax.text(_i - _w / 2, _r["rate_qualified"], f"{_r['rate_qualified']:.3f}",
+                 ha="center", va="bottom", fontsize=7, rotation=90)
+        if _r["rate_comparator"] is not None:
+            _ax.text(_i + _w / 2, _r["rate_comparator"], f"{_r['rate_comparator']:.3f}",
+                     ha="center", va="bottom", fontsize=7, rotation=90)
+        else:
+            _ax.text(_i + _w / 2, 0, " withheld\n n<10", ha="center", va="bottom",
+                     fontsize=6.5, color="#888888", rotation=90)
 
-    _ax.set_xticks(range(len(_present)))
-    _ax.set_xticklabels([f"{c}\nn={_lookup[c]['n']:,}" for c in _present], fontsize=8.5)
+    _ax.set_xticks(_x)
+    _ax.set_xticklabels([f"{r['series']}\n{r['contrast']}" for r in _rows], fontsize=8.5)
+    _n_sup = sum(1 for r in _rows if r["rate_comparator"] is None)
     _ax.set_ylabel("detection rate")
-    _ax.set_ylim(top=_ax.get_ylim()[1] * 1.18)
+    _ax.set_ylim(top=_ax.get_ylim()[1] * 1.20)
     _ax.legend(frameon=False, fontsize=8)
 
     # Ratio alongside the difference: at PAIR's absolute rates a gap of 0.012 and a gap of
     # 0.000 look alike on the axis, and they are not alike.
     _gaps = "   ".join(
         f"{r['series']} {r['gap']:.3f} ({r['ratio']}x)"
-        for r in gap.to_dicts() if r["gap"] is not None
+        for r in _rows if r["gap"] is not None
     )
-    _ax.set_title(f"Tier D — specificity probe — {SITE}\n{_gaps}", loc="left",
+    _ax.set_title(f"Tier D — specificity — {SITE}\n{_gaps}", loc="left",
                   fontweight="bold", fontsize=10)
+    _fig.subplots_adjust(bottom=0.28)
     finish(
         _fig,
         "specificity_gap.png",
-        "Every detection in `arrived_intubated` is a false positive by construction. The gap "
-        "between it and `qualified` bounds specificity; a gap near zero means the method is "
-        "detecting ICU residence, not intubation.",
+        "Detection rate in the index set against each method's comparator stratum. A gap "
+        "near zero means the method is detecting ICU residence, not intubation. NO bar "
+        "here is a false-positive count by construction: D37 admitted arrived_intubated to "
+        "the primary analysis, and it was the only stratum whose answer was known. Each "
+        "contrast's confounder is named in Tier D."
+        + (
+            f" {_n_sup} comparator bar(s) are absent because the stratum was withheld "
+            "entirely under the n>=10 rule -- absent, not zero."
+            if _n_sup
+            else ""
+        ),
     )
     return
 
@@ -1523,25 +1778,120 @@ def _(SITE, e3_pub, finish, plt):
 
 
 @app.cell
+def _(SHARE_DIR, finish, pl, plt):
+    # F9 -- CONSORT B as a funnel. Drawn from the published CSV, never from the PHI frames
+    # (D26): a figure recomputed from the source could disagree with the table beside it and
+    # the reader has no way to tell which is right.
+    _c = pl.read_csv(SHARE_DIR / "consort_index.csv")
+    _fig, _ax = plt.subplots(figsize=(9.5, 4.6))
+    _steps = _c.get_column("step").to_list()
+    _eps = _c.get_column("n_episodes").to_list()
+    _y = list(range(len(_steps)))
+    _ax.barh(_y, _eps, color="#4C72B0")
+    _ax.set_yticks(_y)
+    _ax.set_yticklabels(_steps, fontsize=9)
+    _ax.invert_yaxis()
+    _ax.set_xlabel("episodes")
+    for _i, (_e, _b, _p) in enumerate(
+        zip(_eps, _c.get_column("n_blocks"), _c.get_column("n_patients"))
+    ):
+        _ax.text(_e, _i, f"  {_e:,} ep / {_b:,} blk / {_p:,} pt", va="center", fontsize=8)
+    _ax.set_xlim(0, max(_eps) * 1.55)
+    finish(
+        _fig,
+        "episode_funnel.png",
+        "CONSORT B. Three units on every step: under D35 a block may contribute several "
+        "episodes, so an episode count and an encounter count are different quantities and "
+        "a reader tracking blocks through 01 needs the bridge.",
+    )
+    return
+
+
+@app.cell
+def _(SHARE_DIR, finish, pl, plt):
+    # F10 -- the charting delay, the quantity D34 was decided on. Published rather than
+    # avoided: under D23 this was a hazard to be designed around, and D34 makes it a result.
+    _d = pl.read_csv(SHARE_DIR / "charting_delay.csv")
+    _sup = int(_d.get_column("n_suppressed_bins")[0]) if _d.height else 0
+    _order = ["0", "1-4", "5-14", "15-29", "30-59", "60-119", "120-239", "240-479",
+              "480-1439", "1440+"]
+    _present = [b for b in _order if b in _d.get_column("bin").to_list()]
+    _lookup = {r["bin"]: r["n"] for r in _d.to_dicts()}
+
+    _fig, _ax = plt.subplots(figsize=(9.5, 4.4))
+    _ax.bar(range(len(_present)), [_lookup[b] for b in _present], color="#DD8452")
+    _ax.set_xticks(range(len(_present)))
+    _ax.set_xticklabels(_present, rotation=16, ha="right", fontsize=9)
+    _ax.set_xlabel("first charted IMV row minus t0  (minutes)")
+    _ax.set_ylabel("episodes")
+    _ax.set_yscale("log")
+    for _i, _b in enumerate(_present):
+        _ax.text(_i, _lookup[_b], f"{_lookup[_b]:,}", ha="center", va="bottom", fontsize=7)
+    _fig.subplots_adjust(bottom=0.30)
+    finish(
+        _fig,
+        "charting_delay.png",
+        "How late the device field is filled in relative to the settings-based inference "
+        "that anchors t0 (D34). Zero for most episodes, but the p99 is nine hours -- a "
+        "charting delay, not a settings-reading error, which is the argument for the "
+        f"anchor. {_sup} bin(s) suppressed below n = 10 and dropped rather than merged (D26).",
+    )
+    return
+
+
+@app.cell
 def _(CAPTURE_RATE, N_INDEX, REFERENCE_INFORMATIVE, SHARE_DIR, a1, gap, joined):
     print("=" * 78)
     print("SUMMARY")
     print("=" * 78)
-    print(f"cohort N*                  {joined.height:,}")
-    print(f"index set N**              {N_INDEX:,}")
+    print(f"candidate episodes         {joined.height:,}")
+    print(f"index set N**              {N_INDEX:,} episodes / "
+          f"{analytic.get_column('encounter_block').n_unique():,} blocks / "
+          f"{analytic.get_column('patient_id').n_unique():,} patients")
     for _r in a1.to_dicts():
         print(
             f"  {_r['method_id']:<5} {_r['pair_basis']:<13} rate {_r['rate']:.4f}  "
             f"(n={_r['n_detected']:,})"
         )
-    print("  specificity, qualified vs arrived_intubated:")
+    print("  specificity, qualified vs each comparator (no known-answer stratum, D37):")
     for _r in gap.to_dicts():
-        print(f"    {_r['series']:<20} gap {_r['gap']}   ratio {_r['ratio']}x")
+        print(f"    {_r['series']:<20} vs {_r['contrast']:<22} "
+              f"gap {_r['gap']}   ratio {_r['ratio']}x")
     print(f"CPT 31500 capture          {CAPTURE_RATE:.4f}  informative={REFERENCE_INFORMATIVE}")
     print()
     print(f"artifacts in {SHARE_DIR}:")
     for _p in sorted(SHARE_DIR.iterdir()):
         print(f"  {_p.name}")
+    return
+
+
+
+@app.cell
+def _(SHARE_DIR):
+    # §8's "Outputs written by 07" plus the two CONSORTs and 02's tables. Declared here so a
+    # table added without a spec entry -- or promised in the spec and never written -- fails
+    # loudly at the end of the run instead of being noticed months later by its absence.
+    _expected = {
+        "consort_cohort.csv", "cohort_qc.csv",
+        "consort_index.csv", "index_class_rates.csv", "charting_delay.csv",
+        "agreement_detection_rates.csv", "agreement_pairwise.csv",
+        "agreement_concordance.csv", "agreement_combinations.csv",
+        "timing_offset_summary.csv", "timing_offset_by_rank.csv", "timing_by_medication.csv",
+        "reference_capture_rate.csv", "reference_scoring.csv",
+        "specificity_by_lookback.csv", "specificity_by_ep_num.csv",
+        "specificity_not_sustained.csv", "specificity_pair_free_running.csv",
+        "specificity_gap.csv",
+        "pair_count_distribution.csv", "pair_gap_distribution.csv",
+        "pair_agent_combinations.csv", "pair_index_offsets.csv", "pair_t0_concordance.csv",
+        "consort_flow.png", "index_class_strata.png", "episode_funnel.png",
+        "charting_delay.png", "timing_offset_distribution.png", "timing_by_medication.png",
+        "agreement_overview.png", "specificity_gap.png",
+        "pair_offset_distribution.png", "pair_agent_combinations.png",
+    }
+    _actual = {p.name for p in SHARE_DIR.iterdir() if p.suffix in (".csv", ".png")}
+    assert not (_expected - _actual), f"declared but MISSING: {sorted(_expected - _actual)}"
+    assert not (_actual - _expected), f"present but UNDECLARED: {sorted(_actual - _expected)}"
+    print(f"output manifest conforms to §8: {len(_actual)} artifacts")
     return
 
 

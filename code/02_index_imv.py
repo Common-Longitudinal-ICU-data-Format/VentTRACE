@@ -272,10 +272,27 @@ def _(mo):
 
 
 @app.cell
-def _(EPISODE_GAP, find_episode_starts, pl, resp_waterfall):
-    candidates = find_episode_starts(
-        resp_waterfall.sort(["encounter_block", "recorded_dttm"]), EPISODE_GAP
-    ).rename({"recorded_dttm": "t0_dttm"})
+def _(EPISODE_GAP, WINDOW, find_episode_starts, pl, resp_waterfall):
+    # The window is fixed here, for EVERY candidate -- including the ones rule 2 rejects.
+    # D20 runs the methods over the rejected rows so Tier D has a probe, and a rejected
+    # candidate with a null window silently detects nothing: the methods filter on
+    # `admin_dttm >= window_start`, which is false against null. Tier D.3 would then compare
+    # a real rate against a fabricated 0.0 and read it as perfect specificity.
+    candidates = (
+        find_episode_starts(
+            resp_waterfall.sort(["encounter_block", "recorded_dttm"]), EPISODE_GAP
+        )
+        .rename({"recorded_dttm": "t0_dttm"})
+        .with_columns(
+            window_start=pl.col("t0_dttm") - WINDOW,
+            window_end=pl.col("t0_dttm") + WINDOW,
+        )
+    )
+
+    assert candidates.get_column("window_start").null_count() == 0, (
+        "a candidate episode has no window. Every candidate must carry one -- the methods "
+        "run over the rejected rows too (D20) and a null window makes them silently blind."
+    )
 
     n_candidates = candidates.height
     n_sustained = candidates.filter("sustained").height
@@ -302,7 +319,7 @@ def _(mo):
 
 
 @app.cell
-def _(WINDOW, candidates, pl):
+def _(candidates, pl):
     # ep_num is assigned over the SUSTAINED set only, so the ids a reader sees are the ones
     # the study uses. Numbering candidates instead would leave a gap in the sequence for
     # every rejected row, which reads as missing data rather than as a rejection.
@@ -311,8 +328,6 @@ def _(WINDOW, candidates, pl):
         .sort(["encounter_block", "t0_dttm"])
         .with_columns(
             ep_num=pl.int_range(1, pl.len() + 1).over("encounter_block").cast(pl.Int32),
-            window_start=pl.col("t0_dttm") - WINDOW,
-            window_end=pl.col("t0_dttm") + WINDOW,
         )
     )
 
@@ -576,9 +591,11 @@ def _(mo):
 
 @app.cell
 def _(candidates, cohort_index, episodes_gated, pl):
+    # The window comes through with them: a rejected candidate is still scored by the
+    # methods (D20), so it needs the same window a qualified one has.
     _rejected = (
         candidates.filter(~pl.col("sustained"))
-        .select(["encounter_block", "t0_dttm"])
+        .select(["encounter_block", "t0_dttm", "window_start", "window_end"])
         .with_columns(index_class=pl.lit("not_sustained"))
     )
     _evaluated = episodes_gated.with_columns(
@@ -643,6 +660,15 @@ def _(candidates, cohort_index, episodes_gated, pl):
         "some candidate episodes have no patient -- a block in the waterfall is absent "
         "from cohort_index"
     )
+    # Every row the methods will run over must carry a window, whatever its class.
+    for _c in ("t0_dttm", "window_start", "window_end"):
+        _nulls = index_imv_all.get_column(_c).null_count()
+        assert _nulls == 0, (
+            f"{_nulls:,} candidate episodes have a null {_c}, broken down as "
+            f"{index_imv_all.filter(pl.col(_c).is_null()).get_column('index_class').value_counts().to_dicts()}. "
+            "The methods filter on the window, so a null one makes them silently detect "
+            "nothing and Tier D reads the artifact as specificity."
+        )
 
     index_class_counts = (
         index_imv_all.get_column("index_class")
