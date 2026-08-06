@@ -458,8 +458,10 @@ than mis-joining, then runs five tiers.
   ┌── Tier E ── pair structure and independent timing ───────────────┐
   │   PAIR is the only method that derives its OWN intubation        │
   │   timestamp, so it is the only one that can disagree with the    │
-  │   device about WHEN. E.5 is the headline: only 25% of first      │
-  │   pairs land within ±30 min of t0, and 60% are beyond ±180 min.  │
+  │   device about WHEN. E.5 is the headline, and the live numbers   │
+  │   are in pair_t0_concordance.csv — read them there rather than   │
+  │   from here: 37.2% of first pairs land within ±30 min of t0,     │
+  │   and 36.4% are beyond ±180 min.                                 │
   └──────────────────────────────────────────────────────────────────┘
 ```
 
