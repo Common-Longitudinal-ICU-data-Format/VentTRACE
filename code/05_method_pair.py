@@ -135,13 +135,18 @@ def _(index_imv, pl):
     # `pair_to_t0_min` and `in_window` after the scan has already run (D27).
     bridge = (
         index_imv.select(
-            ["encounter_block", "list_hospitalization_id", "t0_dttm", "window_start", "window_end"]
+            ["encounter_block", "list_hospitalization_id"]
         )
         .explode("list_hospitalization_id")
         .rename({"list_hospitalization_id": "hospitalization_id"})
     )
     bridge_hosp_ids = bridge.get_column("hospitalization_id").unique().to_list()
 
+    # Block-level, deliberately -- and this is the ONE bridge in the pipeline that must
+    # not carry intubation_episode_id. The scan is free-running over the whole block (D27),
+    # so fanning the administrations out to episodes here would run the forward pass once
+    # per episode and break D28's consumption across the boundary. Episodes rejoin below,
+    # after the pairs exist (D39).
     print(f"encounter blocks   : {bridge.get_column('encounter_block').n_unique():,}")
     print(f"hospitalization ids: {len(bridge_hosp_ids):,}")
     return bridge, bridge_hosp_ids
@@ -377,7 +382,7 @@ def _(PAIR_GAP_MINUTES, pl, scan_encounter, scan_rows):
 
     print(f"encounters scanned : {len(_by_block):,}")
     print(f"pairs formed       : {0 if pairs_raw is None else pairs_raw.height:,}")
-    print(f"encounters with >=1 pair : {0 if pairs_raw is None else pairs_raw.get_column('encounter_block').n_unique():,}")
+    print(f"blocks with >=1 pair : {0 if pairs_raw is None else pairs_raw.get_column('encounter_block').n_unique():,}")
     return pairs_raw, unpaired_counts
 
 
@@ -388,12 +393,25 @@ def _(PAIR_GAP_MINUTES, index_imv, pairs_raw, pl):
     pairs = (
         pairs_raw.join(
             index_imv.select(
-                ["encounter_block", "patient_id", "intubation_episode_id", "cohort_run_id",
-                 "index_class", "index_qualified", "t0_dttm", "window_start", "window_end"]
+                ["encounter_block", "intubation_episode_id", "patient_id", "ep_num",
+                 "cohort_run_id", "index_class", "index_qualified", "t0_dttm",
+                 "window_start", "window_end"]
             ),
             on="encounter_block",
             how="inner",
         )
+        # D39. Under D35 a block holds several episodes, so the join above fans each pair
+        # out to every episode of its block. Keep the episode whose t0 is NEAREST to
+        # pair_dttm, ties to the earlier episode via ep_num. Nearest-t0 needs no new
+        # concept -- every pair already carries a distance to a t0 -- and it PARTITIONS
+        # rather than overlaps, which the next cell asserts.
+        .with_columns(
+            _dist=(pl.col("pair_dttm") - pl.col("t0_dttm")).dt.total_seconds().abs()
+        )
+        .sort(["encounter_block", "pair_seq", "_dist", "ep_num"])
+        .group_by(["encounter_block", "pair_seq"], maintain_order=True)
+        .first()
+        .drop("_dist")
         .with_columns(
             pair_id=pl.col("encounter_block").cast(pl.String)
             + "_P"
@@ -407,8 +425,9 @@ def _(PAIR_GAP_MINUTES, index_imv, pairs_raw, pl):
         )
         .select(
             [
-                "encounter_block", "patient_id", "intubation_episode_id", "cohort_run_id",
-                "index_class", "index_qualified", "pair_id", "pair_seq", "first_class",
+                "intubation_episode_id", "encounter_block", "patient_id", "ep_num",
+                "cohort_run_id", "index_class", "index_qualified",
+                "pair_id", "pair_seq", "first_class",
                 "sed_med_category", "sed_med_dose", "sed_med_dose_unit", "sed_admin_dttm",
                 "para_med_category", "para_med_dose", "para_med_dose_unit", "para_admin_dttm",
                 "pair_dttm", "gap_minutes", "imv_dttm", "pair_to_t0_min", "in_window",
@@ -428,7 +447,19 @@ def _(PAIR_GAP_MINUTES, index_imv, pairs_raw, pl):
         > pl.min_horizontal("sed_admin_dttm", "para_admin_dttm")
     ).height == 0, "pair_dttm is not the earlier administration"
 
-    print(f"pairs : {pairs.height:,}")
+    # D39 is a PARTITION, not a labelling: summing over a block's episodes must recover
+    # the block's pair count. A pair scored into two episodes would inflate every rate in
+    # Tier E and would not show up anywhere else.
+    assert pairs.height == pairs_raw.height, (
+        f"the episode assignment changed the pair count: {pairs_raw.height:,} scanned, "
+        f"{pairs.height:,} assigned. D39 must partition -- a pair kept against two "
+        "episodes is double-counted, one dropped is lost."
+    )
+    assert pairs.get_column("intubation_episode_id").null_count() == 0, (
+        "some pairs were not assigned to an episode. Every pair is in a block and every "
+        "block in index_imv has at least one candidate episode, so the join key is wrong."
+    )
+    print(f"pairs : {pairs.height:,}   (D39 assignment conserved every one)")
     print(pairs.get_column("first_class").value_counts(sort=True))
     print(f"\nin_window pairs : {pairs.get_column('in_window').sum():,} "
           f"({100 * pairs.get_column('in_window').mean():.1f}%)")
@@ -469,11 +500,11 @@ def _(pairs, pl):
 
     def _index_pair(prefix, sort_by, descending):
         return (
-            pairs.sort(["encounter_block"] + sort_by, descending=[False] + descending)
-            .group_by("encounter_block", maintain_order=True)
+            pairs.sort(["intubation_episode_id"] + sort_by, descending=[False] + descending)
+            .group_by("intubation_episode_id", maintain_order=True)
             .first()
             .select(
-                ["encounter_block"]
+                ["intubation_episode_id"]
                 + [pl.col(c).alias(f"{prefix}_{c}") for c in INDEX_PAIR_FIELDS]
             )
         )
@@ -485,7 +516,7 @@ def _(pairs, pl):
         "near", [pl.col("pair_to_t0_min").abs().alias("_abs"), "pair_seq"], [False, False]
     )
 
-    print(f"encounters with an index pair : {first_pair.height:,}")
+    print(f"episodes with an index pair : {first_pair.height:,}")
     return first_pair, near_pair
 
 
@@ -499,27 +530,32 @@ def _(
     pl,
     unpaired_counts,
 ):
-    _agg = pairs.group_by("encounter_block").agg(
+    # Aggregated per EPISODE, over the pairs D39 assigned to it -- not per block.
+    _agg = pairs.group_by("intubation_episode_id").agg(
         n_pairs=pl.len(),
         detected_in_window=pl.col("in_window").any(),
     )
 
-    method_encounter = (
+    method_episode = (
         index_imv.select(
             [
+                "intubation_episode_id",
                 "encounter_block",
                 "patient_id",
-                "intubation_episode_id",
+                "ep_num",
                 "cohort_run_id",
                 "index_class",
                 "index_qualified",
                 pl.col("t0_dttm").alias("imv_dttm"),
             ]
         )
-        .join(_agg, on="encounter_block", how="left")
+        .join(_agg, on="intubation_episode_id", how="left")
+        # unpaired_counts is a BLOCK-level quantity: the scan never paired those rows, so
+        # there is no pair_dttm to assign them by (D32, D39). They are joined on the block
+        # and therefore repeat across a block's episodes -- read them per block, not summed.
         .join(unpaired_counts, on="encounter_block", how="left")
-        .join(first_pair, on="encounter_block", how="left")
-        .join(near_pair, on="encounter_block", how="left")
+        .join(first_pair, on="intubation_episode_id", how="left")
+        .join(near_pair, on="intubation_episode_id", how="left")
         .with_columns(
             method_id=pl.lit(METHOD_ID),
             n_pairs=pl.col("n_pairs").fill_null(0).cast(pl.Int32),
@@ -541,30 +577,37 @@ def _(
             # §6.4 core, minus the ranked columns PAIR has no analogue for, plus the §6.5
             # pair extension.
             [
-                "encounter_block", "patient_id", "intubation_episode_id", "cohort_run_id",
-                "index_class", "index_qualified", "method_id", "imv_dttm", "detected",
+                "intubation_episode_id", "encounter_block", "patient_id", "ep_num",
+                "cohort_run_id", "index_class", "index_qualified", "method_id",
+                "imv_dttm", "detected",
                 "n_pairs", "n_unpaired_sed", "n_unpaired_para", "detected_in_window",
                 "first_is_nearest",
             ]
-            + [c for c in first_pair.columns if c != "encounter_block"]
-            + [c for c in near_pair.columns if c != "encounter_block"]
+            + [c for c in first_pair.columns if c != "intubation_episode_id"]
+            + [c for c in near_pair.columns if c != "intubation_episode_id"]
         )
-        .sort("encounter_block")
+        .sort(["encounter_block", "ep_num"])
     )
 
-    assert method_encounter.height == index_imv.height, "one row per cohort encounter required"
-    assert method_encounter.filter(
+    assert method_episode.height == index_imv.height, "one row per candidate episode required"
+    assert method_episode.get_column("intubation_episode_id").is_unique().all()
+    # The pairs table is canonical, so the counts on this table must add back up to it.
+    assert method_episode.get_column("n_pairs").sum() == pairs.height, (
+        f"n_pairs sums to {method_episode.get_column('n_pairs').sum():,} against "
+        f"{pairs.height:,} pair rows -- the episode aggregation lost or duplicated pairs."
+    )
+    assert method_episode.filter(
         pl.col("detected") & pl.col("first_pair_id").is_null()
-    ).height == 0, "a detected encounter is missing its first index pair"
-    assert method_encounter.filter(
+    ).height == 0, "a detected episode is missing its first index pair"
+    assert method_episode.filter(
         ~pl.col("detected") & pl.col("first_pair_id").is_not_null()
-    ).height == 0, "an undetected encounter carries an index pair"
+    ).height == 0, "an undetected episode carries an index pair"
     # detected_in_window can only be true where detected is -- the window flag is computed
     # per pair, so a window hit without a pair is impossible.
-    assert method_encounter.filter(
+    assert method_episode.filter(
         pl.col("detected_in_window") & ~pl.col("detected")
     ).height == 0, "detected_in_window without a pair"
-    return (method_encounter,)
+    return (method_episode,)
 
 
 @app.cell
@@ -615,9 +658,9 @@ def _(PARA_CATEGORIES, SED_CATEGORIES, pairs, pl):
 
 
 @app.cell
-def _(METHOD_ID, PAIR_GAP_HOURS, PHI_DIR, method_encounter, pairs, pl):
+def _(METHOD_ID, PAIR_GAP_HOURS, PHI_DIR, method_episode, pairs, pl):
     pairs.write_parquet(PHI_DIR / f"method_{METHOD_ID}_pairs.parquet")
-    method_encounter.write_parquet(PHI_DIR / f"method_{METHOD_ID}_encounter.parquet")
+    method_episode.write_parquet(PHI_DIR / f"method_{METHOD_ID}_episode.parquet")
 
     # No _ranked.json: PAIR is exempt from the §6.2 ranking rule (D30). Writing an empty one
     # would invite 07 to read it.
@@ -625,10 +668,14 @@ def _(METHOD_ID, PAIR_GAP_HOURS, PHI_DIR, method_encounter, pairs, pl):
         "a stale method_PAIR_ranked.json is present from an earlier design. Delete it — "
         "PAIR emits no ranked artifact (D30) and 07 must not find one."
     )
+    assert not (PHI_DIR / f"method_{METHOD_ID}_encounter.parquet").exists(), (
+        f"method_{METHOD_ID}_encounter.parquet is present from the pre-D35 design. Delete "
+        "it -- it holds one row per encounter and 07 must not find it."
+    )
 
-    _qual = method_encounter.filter(pl.col("index_qualified"))
+    _qual = method_episode.filter(pl.col("index_qualified"))
     print(f"method_{METHOD_ID}_pairs.parquet       {pairs.height:,} pairs -> {PHI_DIR}")
-    print(f"method_{METHOD_ID}_encounter.parquet   {method_encounter.height:,} rows")
+    print(f"method_{METHOD_ID}_episode.parquet     {method_episode.height:,} rows")
     print(f"pair_gap_hours written into the run    {PAIR_GAP_HOURS}")
     print()
     print(
@@ -646,7 +693,7 @@ def _(METHOD_ID, PAIR_GAP_HOURS, PHI_DIR, method_encounter, pairs, pl):
         print(_d.get_column("first_pair_to_t0_min").describe())
     print("\ndetection by index_class (free-running | in-window):")
     print(
-        method_encounter.group_by("index_class")
+        method_episode.group_by("index_class")
         .agg(
             n=pl.len(),
             rate_free=pl.col("detected").mean().round(4),
