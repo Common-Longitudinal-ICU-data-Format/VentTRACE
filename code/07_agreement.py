@@ -258,6 +258,17 @@ def _(METHODS, PHI_DIR, pl):
     assert collapse_deltas.select(["delta_min", "same_agent"]).is_duplicated().sum() == 0, (
         "the collapse-evidence table has more than one row per (delta, same_agent) cell"
     )
+    assert collapse_deltas.height > 0, "pair_collapse_deltas.parquet is empty; re-run 05."
+    # The grid must arrive COMPLETE. E.7 and F11 derive the suppressed-cell count by
+    # subtracting the published height from the grid this column declares, so a ragged input
+    # would silently make the figure report suppression that never happened. 05 asserts it on
+    # the way out; 07 validates every input on the way in rather than trusting that.
+    _COLLAPSE_GRID = 2 * (int(collapse_deltas.get_column("max_delta_min")[0]) + 1)
+    assert collapse_deltas.height == _COLLAPSE_GRID, (
+        f"pair_collapse_deltas.parquet is {collapse_deltas.height} rows, not the complete "
+        f"{_COLLAPSE_GRID}-cell grid its max_delta_min = "
+        f"{collapse_deltas.get_column('max_delta_min')[0]} declares. Re-run 05."
+    )
 
     print(f"PAIR pairs table : {pairs.height:,} pairs")
     print(f"CPT              : {reference.height:,} rows")
@@ -1507,18 +1518,49 @@ def _(COLLAPSE_GAP_MINUTES, MIN_CELL, SHARE_DIR, apply_min_cell, collapse_deltas
 
     e7_pub.write_csv(SHARE_DIR / "pair_collapse_deltas.csv")
 
+    # Everything below is read off e7_pub, the frame that was just written, NOT off e7. A
+    # console summary is not a published artifact, but printing pre-suppression numbers
+    # beside a suppressed CSV is the same mistake D26 exists to prevent: the reader would
+    # have two different tables of the same quantity and no way to tell which is the one
+    # that left the building. max_delta_min is the exception and comes from e7 -- it is a
+    # constant of the input contract rather than a count, suppression cannot change it, and
+    # taking it from the input keeps this line alive even if every cell were withheld.
     _max = int(e7.get_column("max_delta_min")[0])
-    _d = {(r["delta_min"], r["same_agent"]): r["n"] for r in e7.to_dicts()}
-    _diff = lambda lo, hi: sum(v for (k, s), v in _d.items() if lo <= k <= hi and not s)
-    _same = lambda lo, hi: sum(v for (k, s), v in _d.items() if lo <= k <= hi and s)
+    _d = {(r["delta_min"], r["same_agent"]): r["n"] for r in e7_pub.to_dicts()}
 
+    def _span(_lo, _hi, _flag):
+        """Total over PUBLISHED cells in the span, and how many of them were withheld.
+
+        The two are returned together because a sum that quietly omits a withheld cell reads
+        as a smaller true number -- and for a single-delta row it reads as zero, which is the
+        one thing the n >= 10 rule is careful never to say by accident.
+        """
+        _keys = [(_k, _flag) for _k in range(_lo, _hi + 1)]
+        _have = [_k for _k in _keys if _k in _d]
+        return sum(_d[_k] for _k in _have), len(_keys) - len(_have)
+
+    _beyond_pub = e7_pub.get_column("n_beyond_max_delta")[0] if e7_pub.height else None
+    _beyond_txt = (
+        f"{_beyond_pub:,}" if _beyond_pub is not None else f"withheld (<{MIN_CELL})"
+    )
+    _n_sup_e7 = e7.height - e7_pub.height
     print(f"E.7 gap between consecutive same-class administrations, peri-intubation "
-          f"({e7.get_column('n').sum():,} intervals in 0..{_max} min, {_beyond:,} beyond)")
+          f"({e7_pub.get_column('n').sum():,} intervals in 0..{_max} min, "
+          f"{_beyond_txt} beyond)")
     print(f"{'':<12}{'different agent':>16}{'same agent':>13}{'ratio':>8}")
     for _lo, _hi, _lab in ((0, 0, "delta 0"), (1, 1, "delta 1"),
                            (0, 1, "delta <= 1"), (2, _max, f"delta 2..{_max}")):
-        _a, _b = _diff(_lo, _hi), _same(_lo, _hi)
-        print(f"  {_lab:<10}{_a:>16,}{_b:>13,}{(_a / _b if _b else float('nan')):>8.2f}")
+        (_a, _amiss), (_b, _bmiss) = _span(_lo, _hi, False), _span(_lo, _hi, True)
+        _as = f"{_a:,}" + ("*" if _amiss else "")
+        _bs = f"{_b:,}" + ("*" if _bmiss else "")
+        # A ratio between two numbers, one of which is missing part of itself, is not a
+        # ratio. Withheld on either side and the column says so instead of guessing.
+        _rs = f"{_a / _b:.2f}" if _b and not (_amiss or _bmiss) else "—"
+        print(f"  {_lab:<10}{_as:>16}{_bs:>13}{_rs:>8}")
+    if _n_sup_e7:
+        print(f"  * incomplete: {_n_sup_e7} cell(s) withheld under the n>={MIN_CELL} rule are "
+              "absent from these totals, exactly as they are absent from the CSV and the "
+              "figure. Absent, not zero.")
     print(
         f"\n  Co-administration -- two DIFFERENT agents of one class -- is a delta <= 1 min\n"
         f"  phenomenon and is spent by one minute. From delta 2 the two series run at the\n"
@@ -1529,7 +1571,7 @@ def _(COLLAPSE_GAP_MINUTES, MIN_CELL, SHARE_DIR, apply_min_cell, collapse_deltas
         f"  table is published so a reader can see exactly what it is and is not fitted to.\n"
         f"  The spikes at every multiple of 5 are the charting grid, present in both series."
     )
-    return e7, e7_pub
+    return (e7_pub,)
 
 
 @app.cell
@@ -2355,8 +2397,15 @@ def _(
     plt,
 ):
     # F11 -- E.7, the picture the 15-minute threshold has to survive. Drawn from the
-    # PUBLISHED table (D26), so a suppressed cell is a missing point here exactly as it is a
-    # missing row there, and the figure cannot disagree with the CSV beside it.
+    # PUBLISHED table and nothing else (D26), so the figure cannot disagree with the CSV
+    # beside it. What that costs is that any of these cells may be ABSENT, and the three
+    # places that read one have to degrade differently rather than assume it is there:
+    # the curves skip it (`_pts` filters on membership), the annotations are not drawn at
+    # all (a point with no count has no y coordinate to hang off), and the title and caption
+    # say "withheld" through `_fmt`. At this site the smallest of the four numbers named
+    # below is 223, so none of that fires -- but a smaller federated site is exactly where
+    # the n >= 10 rule bites, and a KeyError halfway through the publishing run is the worst
+    # available way to find out.
     #
     # Lines rather than bars: 92 bars in two overlapping series is unreadable, and the
     # question is where the two CROSS, which a line answers and a bar chart hides. Log y
@@ -2372,6 +2421,15 @@ def _(
 
     def _tot(_same, _lo, _hi):
         return sum(_v for (_k, _s), _v in _cells.items() if _s is _same and _lo <= _k <= _hi)
+
+    def _fmt(_delta, _same):
+        """A published count, or the fact that it was withheld -- never a guess."""
+        _v = _cells.get((_delta, _same))
+        return f"{_v:,}" if _v is not None else f"withheld (<{MIN_CELL})"
+
+    def _ratio(_a, _b, _dp):
+        """A ratio only where BOTH cells survived publication; otherwise say nothing."""
+        return "" if _a is None or not _b else f" ({_a / _b:.{_dp}f}x)"
 
     _fig, _ax = plt.subplots(figsize=(11.5, 5.0))
     _ax.axvspan(0, COLLAPSE_GAP_MINUTES, color=COLORS["PAIR"], alpha=0.09, zorder=0)
@@ -2401,30 +2459,32 @@ def _(
     _ax.legend(frameon=False, fontsize=8.5, loc="upper right")
 
     # The two numbers the figure exists to show, spelled out rather than left to be read off
-    # a log axis: the delta-0 tower and the delta>=2 agreement.
-    _ax.annotate(
-        f"{_cells[(0, False)]:,}",
-        xy=(0, _cells[(0, False)]), xytext=(2.2, _cells[(0, False)] * 1.15),
-        fontsize=8.5, color=COLORS["PAIR"], fontweight="bold",
-    )
-    _ax.annotate(
-        f"{_cells[(0, True)]:,}",
-        xy=(0, _cells[(0, True)]), xytext=(1.4, _cells[(0, True)] * 0.55),
-        fontsize=8.5, color=GREY,
-    )
+    # a log axis: the delta-0 tower and the delta>=2 agreement. A withheld cell is simply not
+    # annotated -- it has no count to print and no y coordinate to print it at, and the
+    # caption is where the reader is told it was withheld.
+    for _same, _dx, _dy, _color, _weight in (
+        (False, 2.2, 1.15, COLORS["PAIR"], "bold"),
+        (True, 1.4, 0.55, GREY, "normal"),
+    ):
+        _v = _cells.get((0, _same))
+        if _v:
+            _ax.annotate(
+                f"{_v:,}", xy=(0, _v), xytext=(_dx, _v * _dy),
+                fontsize=8.5, color=_color, fontweight=_weight,
+            )
     _ax.text(
         COLLAPSE_GAP_MINUTES + 0.5, _ax.get_ylim()[1] * 0.55,
         f"  collapse window\n  {COLLAPSE_GAP_MINUTES:.0f} min (D43.2)",
         fontsize=8.5, color=COLORS["PAIR"], va="top",
     )
 
-    _r0 = _cells[(0, False)] / _cells[(0, True)] if _cells.get((0, True)) else float("nan")
-    _rt = _tot(False, 2, _max) / _tot(True, 2, _max) if _tot(True, 2, _max) else float("nan")
+    _r0_txt = _ratio(_cells.get((0, False)), _cells.get((0, True)), 1)
+    _rt_a, _rt_b = _tot(False, 2, _max), _tot(True, 2, _max)
+    _rt_txt = "" if not _rt_b else f" ({_rt_a / _rt_b:.2f}x — the same rate)"
     _ax.set_title(
         f"E.7  the collapse window is a clinical choice, not a valley — {SITE}\n"
-        f"Δ=0  {_cells[(0, False)]:,} different-agent vs {_cells[(0, True)]:,} same-agent "
-        f"({_r0:.1f}x)     Δ≥2  {_tot(False, 2, _max):,} vs {_tot(True, 2, _max):,} "
-        f"({_rt:.2f}x — the same rate)",
+        f"Δ=0  {_fmt(0, False)} different-agent vs {_fmt(0, True)} same-agent"
+        f"{_r0_txt}     Δ≥2  {_rt_a:,} vs {_rt_b:,}{_rt_txt}",
         loc="left", fontweight="bold", fontsize=10,
     )
     # Just enough room under the axis label for the caption to start; `finish` hangs the
@@ -2438,10 +2498,10 @@ def _(
         "peri-intubation window, by the gap between them, split by whether the two rows "
         "name different agents (a co-administration) or the same agent (a redose) — the two "
         "things the D43 fold merges. Co-administration is a Δ ≤ 1 min phenomenon: "
-        f"{_cells[(0, False)]:,} vs {_cells[(0, True)]:,} intervals at Δ = 0 and "
-        f"{_cells[(1, False)]:,} vs {_cells[(1, True)]:,} at Δ = 1. From Δ = 2 onward the "
-        f"two series run at the same rate ({_tot(False, 2, _max):,} different-agent against "
-        f"{_tot(True, 2, _max):,} same-agent), so past one minute there is no "
+        f"{_fmt(0, False)} vs {_fmt(0, True)} intervals at Δ = 0 and "
+        f"{_fmt(1, False)} vs {_fmt(1, True)} at Δ = 1. From Δ = 2 onward the "
+        f"two series run at the same rate ({_rt_a:,} different-agent against "
+        f"{_rt_b:,} same-agent), so past one minute there is no "
         "co-administration signal left — only routine repeat dosing. THE SHADED BAND IS THE "
         f"WINDOW ACTUALLY USED: {COLLAPSE_GAP_MINUTES:.0f} min was chosen as a clinical "
         "definition of one induction sequence, NOT fitted to a valley in this distribution — "

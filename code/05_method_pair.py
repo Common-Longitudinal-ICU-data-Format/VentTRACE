@@ -643,7 +643,7 @@ def _(
         f"{COLLAPSE_GAP_MINUTES:.0f} min -- a clinical induction sequence, NOT a valley in "
         "this distribution (D43.2).\npair_collapse_deltas.parquet -> 07"
     )
-    return COLLAPSE_DELTA_MAX_MIN, collapse_deltas
+    return (collapse_deltas,)
 
 
 @app.cell
