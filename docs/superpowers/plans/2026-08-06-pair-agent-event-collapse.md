@@ -57,9 +57,10 @@ Verified by simulation before the plan was written. An implementer whose run dis
 > **Corrected after Task 2.** The simulation read the medication parquet directly with polars
 > `convert_time_zone`; the pipeline loads through clifpy and `to_site_naive`, which is the only
 > correct conversion here (§5.13, pinned by `tests/test_clifpy_tz_boundary.py`). The two differ by
-> one hour, so rows straddling a DST transition shift relative to each other. Every pair-level
-> number was unaffected (a uniform shift cannot change a delta) and matched exactly; only the event
-> census moved, by 4 in 276,450. The numbers below are the notebook's, which are authoritative.
+> one hour, so rows straddling a DST transition shift relative to each other. The shift is NOT
+> uniform, and D39 assigns pairs to episodes by absolute distance to t0, so episode-level counts
+> moved too. Pair and block counts were unaffected. The numbers below are the notebook's, which
+> are authoritative.
 
 | Quantity | Before | After |
 |---|---|---|
@@ -73,7 +74,7 @@ Verified by simulation before the plan was written. An implementer whose run dis
 | **pairs emitted** | 4,110 | **1,535** |
 | blocks with ≥1 pair | 1,216 | 1,215 |
 | episodes with ≥1 pair | 1,273 | 1,271 |
-| episodes with exactly 1 pair | 780 (61%) | **1,073 (84.4%)** |
+| episodes with exactly 1 pair | 780 (61%) | **1,075 (84.5%)** |
 | max pairs per block | 52 | 9 |
 | `sed_med_category` distinct values | 4 | **12** |
 | `para_med_category` distinct values | 2 | 2 (`rocuronium` 1,127, `vecuronium` 408) |
