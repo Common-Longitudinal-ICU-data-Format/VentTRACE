@@ -20,16 +20,22 @@ Two separate causes were measured (diagnostics in the session scratchpad, `dx1`�
 
 **Cause 2 — no agent-event collapse.** Co-administration of two different same-class agents is a Δ=0 phenomenon (83% at exactly 0 min, 96% by 1 min; `fentanyl+propofol` n=4,127 and `fentanyl+midazolam` n=3,436 peri-intubation). D28's "step over, don't consume" already prevents that from making extra pairs, so collapsing sedatives alone is a ~0.4% no-op. The residual multi-pair episodes are driven by **repeat paralytic dosing** — `108083_E3` has five vecuronium doses across 50 minutes. Those separations have no empirical valley (median 209 min; 12% within 15 min), so the threshold is a **clinical definition, not a fit to the data**, and must be documented as such.
 
-### Decisions taken (record these as **D40** in the spec)
+### Decisions taken (record these as **D43** in the spec)
+
+> **Numbering.** A concurrent branch (`infusion-prep-reclassification`, commit `007da19`)
+> claimed D40, D41 and D42 in the same spec's §2 table, for the infusion-prep
+> reclassification of post-t₀ sedatives. That work is already committed to the spec;
+> this plan's decisions were only ever in this document, so they renumber to **D43**
+> (the collapse, six sub-decisions) and **D44** (timezone always from config).
 
 | # | Decision | Rationale |
 |---|---|---|
-| D40.1 | Bridge in `05` is de-duplicated with `.unique()` | Each hospitalization belongs to exactly one block (verified: 0 hospitalizations appear in >1 block), so the map is 1:1 and duplicate rows are meaningless. |
-| D40.2 | Collapse window is **15 minutes**, from `config.json` key `collapse_gap_minutes` | A clinical definition of one induction sequence. **No empirical valley supports it** — this must be stated wherever it is reported. |
-| D40.3 | Grouping key is **`drug_class`** (SED vs PARA), not CLIF `med_group` | `med_group` splits fentanyl (`analgesia`) from propofol (`sedation`), which would fail to merge the single most common co-administration. D38 already measured and declined `med_group`. |
-| D40.4 | Merging is **anchored, not chained** — a new event starts when a row is more than the window past the event's **first** administration | Chained merging has an unbounded span (measured max 115 min at MIMIC). Anchored costs 1.8% more events and makes `span <= collapse_gap_minutes` an assertable invariant. |
-| D40.5 | `sed_med_category` / `para_med_category` carry a **combined label**, agents sorted alphabetically and joined with `+` | Preserves the clinical picture and makes every merge auditable in the output. |
-| D40.6 | `med_dose` / `med_dose_unit` refer to the **first agent named in the label** | Doses of different drugs cannot be summed (mg vs mcg; §7.3 forbids unit conversion). Keeping them numeric preserves E.3's `median_sed_dose`. The rule is self-consistent because the label is alphabetically sorted. |
+| D43.1 | Bridge in `05` is de-duplicated with `.unique()` | Each hospitalization belongs to exactly one block (verified: 0 hospitalizations appear in >1 block), so the map is 1:1 and duplicate rows are meaningless. |
+| D43.2 | Collapse window is **15 minutes**, from `config.json` key `collapse_gap_minutes` | A clinical definition of one induction sequence. **No empirical valley supports it** — this must be stated wherever it is reported. |
+| D43.3 | Grouping key is **`drug_class`** (SED vs PARA), not CLIF `med_group` | `med_group` splits fentanyl (`analgesia`) from propofol (`sedation`), which would fail to merge the single most common co-administration. D38 already measured and declined `med_group`. |
+| D43.4 | Merging is **anchored, not chained** — a new event starts when a row is more than the window past the event's **first** administration | Chained merging has an unbounded span (measured max 115 min at MIMIC). Anchored costs 1.8% more events and makes `span <= collapse_gap_minutes` an assertable invariant. |
+| D43.5 | `sed_med_category` / `para_med_category` carry a **combined label**, agents sorted alphabetically and joined with `+` | Preserves the clinical picture and makes every merge auditable in the output. |
+| D43.6 | `med_dose` / `med_dose_unit` refer to the **first agent named in the label** | Doses of different drugs cannot be summed (mg vs mcg; §7.3 forbids unit conversion). Keeping them numeric preserves E.3's `median_sed_dose`. The rule is self-consistent because the label is alphabetically sorted. |
 
 ---
 
@@ -74,7 +80,7 @@ Verified by simulation before the plan was written. An implementer whose run dis
 | multi-agent events (label contains `+`) | — | 58,493 |
 | **pairs emitted** | 4,110 | **1,535** |
 | blocks with ≥1 pair | 1,216 | 1,215 |
-| episodes with ≥1 pair | 1,273 | 1,271 |
+| episodes with ≥1 pair | 1,273 | 1,272 |
 | episodes with exactly 1 pair | 780 (61%) | **1,075 (84.5%)** |
 | max pairs per block | 52 | 9 |
 | `sed_med_category` distinct values | 4 | **12** |
@@ -92,7 +98,7 @@ Most common merged labels: `fentanyl+propofol` (29,030 events), `fentanyl+midazo
 | `config/config.json`, `config/config_template.json` | Add `collapse_gap_minutes: 15` |
 | `code/05_method_pair.py` | Bridge `.unique()`; collapse stage; combined labels; widened assertions |
 | `code/07_agreement.py` | Schema gate; Tier E rekey + widened E.3; PARA×PAIR integrity repair; new figure; manifest |
-| `docs/superpowers/specs/2026-08-04-intubation-method-comparison-design.md` | D40; §6.5 columns; §7.3 collapse rule; §8 manifest |
+| `docs/superpowers/specs/2026-08-04-intubation-method-comparison-design.md` | D43; §6.5 columns; §7.3 collapse rule; §8 manifest |
 | `docs/pipeline_flow.md` | §5 PAIR diagram |
 | `tests/test_collapse_agent_events.py` | **New** — pytest for the collapse function |
 
@@ -131,8 +137,8 @@ Most common merged labels: `fentanyl+propofol` (29,030 events), `fentanyl+midazo
 - [ ] Apply the collapse to `scan_rows`, producing a new frame `agent_events` in its own cell, partitioned by `(encounter_block, drug_class)` and fed rows already sorted by `["encounter_block", "admin_dttm", "med_category"]` (the existing §6.2 sort at `05:207-210` — do not change it; determinism depends on it).
 - [ ] Each event carries:
   - `admin_dttm` = the **earliest** administration in the event
-  - `med_category` = `"+".join(sorted(set(agents)))` — D40.5
-  - `med_dose`, `med_dose_unit` = the values of the earliest administration **of the first agent named in the label** — D40.6. Keep the dtypes as they are (`Float64` / `String`); E.3's `median_sed_dose` depends on `med_dose` staying numeric.
+  - `med_category` = `"+".join(sorted(set(agents)))` — D43.5
+  - `med_dose`, `med_dose_unit` = the values of the earliest administration **of the first agent named in the label** — D43.6. Keep the dtypes as they are (`Float64` / `String`); E.3's `median_sed_dose` depends on `med_dose` staying numeric.
   - `n_admin` = number of administrations folded in
   - `span_min` = last minus first administration, in minutes
 - [ ] Assert the invariants: `span_min <= COLLAPSE_GAP_MINUTES` for every event; event count is ≤ row count; the sum of `n_admin` equals the input row count (nothing lost, nothing duplicated).
@@ -141,7 +147,7 @@ Most common merged labels: `fentanyl+propofol` (29,030 events), `fentanyl+midazo
 - [ ] Add `n_sed_admin`, `n_para_admin`, `sed_span_min`, `para_span_min` to the emitted pair rows.
 - [ ] Add a pytest at `tests/test_collapse_agent_events.py` covering the same six worked examples plus a property check that concatenating the returned index-lists reproduces `range(n)` exactly.
 
-**Verification:** the collapse print reports **276,446 events** from 370,687 administrations (SED 274,329 / PARA 2,117), max span exactly 15.0, and `method_PAIR_pairs.parquet` has **1,535 rows**.
+**Verification:** the collapse print reports **276,450 events** from 370,687 administrations (SED 274,333 / PARA 2,117), max span exactly 15.0, and `method_PAIR_pairs.parquet` has **1,535 rows**.
 
 ---
 
@@ -183,7 +189,7 @@ Most common merged labels: `fentanyl+propofol` (29,030 events), `fentanyl+midazo
 
 ## Task 6 — Publish the collapse-evidence figure and table
 
-The threshold is a clinical judgment with no empirical valley (D40.2), so the evidence for it must be published rather than left in a scratchpad.
+The threshold is a clinical judgment with no empirical valley (D43.2), so the evidence for it must be published rather than left in a scratchpad.
 
 - [ ] Add a CSV `pair_collapse_deltas.csv`: for each Δ bin in 0–45 min, the count of consecutive same-`drug_class` intervals split by whether the two administrations are the **same agent** (a redose) or **different agents** (co-administration), restricted to the peri-intubation context. Apply `MIN_CELL` suppression. This is the table the figure is drawn from (D26).
 - [ ] Add a figure `pair_collapse_deltas.png` following the F7 pattern at `07:1698-1739` — manual binning, `MIN_CELL` suppression, dropped mass stated in the caption, `finish(...)` for saving. Use `COLORS` and shade the chosen window. The caption must state that the co-administration signal sits at Δ ≤ 1 min while the threshold is 15 min, and say why (a clinical induction sequence, not a fitted valley).
@@ -196,11 +202,11 @@ The threshold is a clinical judgment with no empirical valley (D40.2), so the ev
 
 ## Task 7 — Record the decisions in the spec and the flow doc
 
-- [ ] Add **D40** (all six sub-decisions above) to the §2 decisions table in `docs/superpowers/specs/2026-08-04-intubation-method-comparison-design.md`, each with its rationale. D40.2 must state plainly that no empirical valley supports 15 minutes.
+- [ ] Add **D43** (all six sub-decisions above) to the §2 decisions table in `docs/superpowers/specs/2026-08-04-intubation-method-comparison-design.md`, each with its rationale. D43.2 must state plainly that no empirical valley supports 15 minutes.
 - [ ] Add the collapse rule and its six worked examples to §7.3, beside the existing scan pseudocode, so the two stages read as one algorithm.
 - [ ] Update §6.5's `PAIR` column tables with the four new columns.
 - [ ] Update the `05` diagram in `docs/pipeline_flow.md:316-345` to show the collapse stage ahead of the scan, with a concrete example (`fentanyl 12:00 + propofol 12:00 -> one SED event -> one pair`).
-- [ ] Record **D41 — the timezone always comes from `config["timezone"]`; no code path may consult the OS zone** in the §2 decisions table, naming both leaks: `tz_localize(None)` on the way in and `datetime.timestamp()` on a site-naive value on the way out. Note the one known remaining exception, `COHORT_RUN_ID` in `code/01_cohort.py:138`, which stamps `datetime.now()` in OS-local time (a provenance label, not analytic data, but ambiguous across machines in a multi-site study) � flag it, do not fix it here.
+- [ ] Record **D44 — the timezone always comes from `config["timezone"]`; no code path may consult the OS zone** in the §2 decisions table, naming both leaks: `tz_localize(None)` on the way in and `datetime.timestamp()` on a site-naive value on the way out. Note the one known remaining exception, `COHORT_RUN_ID` in `code/01_cohort.py:138`, which stamps `datetime.now()` in OS-local time (a provenance label, not analytic data, but ambiguous across machines in a multi-site study) — flag it, do not fix it here.
 - [ ] Record the bridge fan-out as a defect in a short verification note, alongside the before/after numbers, so the 4,110 → 1,535 drop is traceable by anyone comparing runs.
 
 **Verification:** the spec's decision table, §6.5, §7.3 and §8 all agree with the code.
@@ -209,7 +215,7 @@ The threshold is a clinical judgment with no empirical valley (D40.2), so the ev
 
 ## Verification — end to end
 
-1. `uv run python code/05_method_pair.py` — bridge `43,006 -> 34,419`; **276,446** agent events; **1,535** pairs; all assertions pass.
+1. `uv run python code/05_method_pair.py` — bridge `43,006 -> 34,419`; **276,450** agent events; **1,535** pairs; all assertions pass.
 2. `uv run python code/07_agreement.py` — schema gate passes; PARA×PAIR decomposition fully explained; manifest assertion passes.
 3. `uv run pytest tests/ -v` — including the new `test_collapse_agent_events.py`.
 4. Re-run `05` and `07` a second time and confirm every published CSV is byte-identical (the determinism property the previous rewrite established).

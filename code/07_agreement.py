@@ -64,6 +64,10 @@ def _(Path, json):
     WINDOW_HOURS = config["window_hours"]
     PAIR_GAP_HOURS = config["pair_gap_hours"]
     INFUSION_PREP_MINUTES = config["infusion_prep_minutes"]  # D40, Tier F only
+    # D43. Named here only so the published captions can state the fold's width: 05 does the
+    # collapsing, but E.2's gap distribution is now measured between agent EVENTS, and a
+    # reader cannot interpret that number without knowing how wide an event may be.
+    COLLAPSE_GAP_MINUTES = float(config["collapse_gap_minutes"])
     OUTPUT_DIR = Path(config["output_directory"])
     PHI_DIR = OUTPUT_DIR / "intermediate_phi"
     SHARE_DIR = OUTPUT_DIR / "final_no_phi"
@@ -79,9 +83,11 @@ def _(Path, json):
     print(f"window         : +/- {WINDOW_HOURS} h")
     print(f"pair_gap_hours : {PAIR_GAP_HOURS}")
     print(f"prep gap       : {INFUSION_PREP_MINUTES} min   (D40, Tier F only)")
+    print(f"collapse_gap   : {COLLAPSE_GAP_MINUTES:.0f} min   (agent-event fold, D43)")
     print(f"min cell       : {MIN_CELL}")
     return (
         BASES,
+        COLLAPSE_GAP_MINUTES,
         INFUSION_PREP_MINUTES,
         METHODS,
         MIN_CELL,
@@ -140,10 +146,18 @@ def _(METHODS, PHI_DIR, pl):
         "n_before_during": pl.Int32,
         "n_after_during": pl.Int32,
     }
+    # D43. Mirrors INDEX_PAIR_FIELDS in 05 EXACTLY, order included -- the assert below is a
+    # list-equality check, so a column in the right set but the wrong place fails the run.
+    # n_*_admin and *_span_min are the fold's audit trail (how many administration rows the
+    # 15-minute anchored collapse merged into that member, and how far apart the first and
+    # last of them were), so they sit with the rest of their member's columns rather than
+    # being appended at the end.
     _INDEX_PAIR_FIELDS = [
-        "pair_id", "first_class", "sed_med_category", "sed_med_dose", "sed_med_dose_unit",
-        "para_med_category", "para_med_dose", "para_med_dose_unit", "gap_minutes",
-        "pair_to_t0_min",
+        "pair_id", "first_class",
+        "sed_med_category", "sed_med_dose", "sed_med_dose_unit", "n_sed_admin", "sed_span_min",
+        "para_med_category", "para_med_dose", "para_med_dose_unit", "n_para_admin",
+        "para_span_min",
+        "gap_minutes", "pair_to_t0_min",
     ]
     _PAIR_TAIL = (
         ["n_pairs", "n_unpaired_sed", "n_unpaired_para", "detected_in_window", "first_is_nearest"]
@@ -1195,47 +1209,90 @@ def _(mo):
 @app.cell
 def _(analytic, pairs, pl):
     pairs_q = pairs.filter(pl.col("index_class") == "qualified")
-    enc_q = analytic.select(
-        "encounter_block", "n_pairs", "first_is_nearest",
+    # One row per QUALIFIED EPISODE, not per encounter -- `analytic` has been episode-keyed
+    # since D35 and the name now says so.
+    ep_q = analytic.select(
+        "intubation_episode_id", "encounter_block", "n_pairs", "first_is_nearest",
         "first_pair_to_t0_min", "near_pair_to_t0_min",
     )
-    # The index pairs of each encounter, used by E.2 and E.3.
+    # The index pair of each EPISODE -- the basis for E.1's fold statistics, E.2 and E.3.
+    #
+    # Grouped on intubation_episode_id, NOT encounter_block. Under D35 a block may hold
+    # several episodes and D39 assigns every pair to exactly one of them; grouping on the
+    # block therefore kept only the earliest episode's pair and silently dropped every
+    # later episode's index pair from the basis. Sorting by pair_seq (block scan order,
+    # hence chronological) and taking the first per episode reproduces `_index_pair` in
+    # 05, so E.2 and E.3 read the same pair that the episode table publishes as `first_`.
     first_pairs_q = (
-        pairs_q.sort(["encounter_block", "pair_seq"])
-        .group_by("encounter_block", maintain_order=True)
+        pairs_q.sort(["intubation_episode_id", "pair_seq"])
+        .group_by("intubation_episode_id", maintain_order=True)
         .first()
     )
+    assert first_pairs_q.height == pairs_q.get_column("intubation_episode_id").n_unique()
 
-    print(f"pairs on the index set  : {pairs_q.height:,}")
-    print(f"encounters contributing : {pairs_q.get_column('encounter_block').n_unique():,}")
-    return enc_q, first_pairs_q, pairs_q
+    print(f"pairs on the index set     : {pairs_q.height:,}")
+    print(f"episodes contributing      : "
+          f"{pairs_q.get_column('intubation_episode_id').n_unique():,}")
+    print(f"  spread over blocks       : {pairs_q.get_column('encounter_block').n_unique():,}")
+    print(f"index pairs (1 per episode): {first_pairs_q.height:,}")
+    return ep_q, first_pairs_q, pairs_q
 
 
 @app.cell
-def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, enc_q, pl):
+def _(
+    COHORT_RUN_ID,
+    COLLAPSE_GAP_MINUTES,
+    SHARE_DIR,
+    apply_min_cell,
+    ep_q,
+    first_pairs_q,
+    pl,
+):
+    # D43. The fold's size is carried into the published table rather than left in a
+    # notebook print: a pair is now between two agent EVENTS, and a reader who cannot see
+    # how many administration rows an event absorbed cannot tell a single push from an
+    # infusion charted every few minutes. A left join, so the n_pairs=0 bucket keeps its
+    # row with null fold columns instead of vanishing from the distribution.
+    _fold = first_pairs_q.select("intubation_episode_id", "n_sed_admin", "n_para_admin")
     e1 = (
-        enc_q.with_columns(
+        ep_q.join(_fold, on="intubation_episode_id", how="left")
+        .with_columns(
             pairs_bucket=pl.when(pl.col("n_pairs") >= 3)
             .then(pl.lit("3+"))
             .otherwise(pl.col("n_pairs").cast(pl.String))
         )
         .group_by("pairs_bucket")
-        .agg(n=pl.len())
+        .agg(
+            n=pl.len(),
+            # Over the episode's INDEX pair only -- one number per episode, so a stay that
+            # pairs seven times does not outvote six single-pair stays.
+            median_n_sed_admin=pl.col("n_sed_admin").median(),
+            median_n_para_admin=pl.col("n_para_admin").median(),
+            pct_index_pair_folded=(
+                100.0 * ((pl.col("n_sed_admin") > 1) | (pl.col("n_para_admin") > 1)).mean()
+            ).round(1),
+        )
         .sort("pairs_bucket")
         .with_columns(
             cohort_run_id=pl.lit(COHORT_RUN_ID),
-            pct=(100.0 * pl.col("n") / enc_q.height).round(2),
+            pct=(100.0 * pl.col("n") / ep_q.height).round(2),
         )
-        .select(["cohort_run_id", "pairs_bucket", "n", "pct"])
+        .select(["cohort_run_id", "pairs_bucket", "n", "pct",
+                 "median_n_sed_admin", "median_n_para_admin", "pct_index_pair_folded"])
     )
     e1_pub = apply_min_cell(e1, ["n"], "E.1")
     e1_pub.write_csv(SHARE_DIR / "pair_count_distribution.csv")
-    print("E.1 pairs per encounter")
+    print("E.1 pairs per EPISODE, with how much charting the agent-event fold merged")
     print(e1_pub)
     print(
         "\n  The 3+ row bounds how much of the free_running / in_window gap in A.1 is\n"
         "  reintubation activity rather than a mis-placed t0. Episode labelling is out of\n"
-        "  scope, so this reports that the activity exists without claiming what it was."
+        "  scope, so this reports that the activity exists without claiming what it was.\n"
+        f"  The three fold columns are D43's audit trail at collapse_gap_minutes = "
+        f"{COLLAPSE_GAP_MINUTES:.0f}:\n"
+        "  administrations of the same agent within that gap of each other are one clinical\n"
+        "  event, and these say how many rows a typical index pair absorbed. They are null\n"
+        "  on the n_pairs = 0 row, which by definition has no index pair."
     )
     return
 
@@ -1243,6 +1300,7 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, enc_q, pl):
 @app.cell
 def _(
     COHORT_RUN_ID,
+    COLLAPSE_GAP_MINUTES,
     PAIR_GAP_HOURS,
     SHARE_DIR,
     apply_min_cell,
@@ -1265,7 +1323,7 @@ def _(
         }
 
     e2 = pl.DataFrame([_summarise(pairs_q, "all pairs"),
-                       _summarise(first_pairs_q, "index pairs (first)")])
+                       _summarise(first_pairs_q, "index pairs (first, per episode)")])
     e2_pub = apply_min_cell(e2, ["n_pairs"], "E.2")
     e2_pub.write_csv(SHARE_DIR / "pair_gap_distribution.csv")
     print("E.2 gap between the two members of a pair")
@@ -1276,7 +1334,15 @@ def _(
         f"  THIS IS THE EMPIRICAL TEST OF pair_gap_hours = {PAIR_GAP_HOURS}: if the mass sits\n"
         "  under 30 minutes, a 3-hour threshold is admitting a long tail of coincidental\n"
         "  co-occurrence, and the size of that tail is what this table exposes. Acting on it\n"
-        "  means a re-run, not a filter (D29) — but the table tells you whether it is worth it."
+        "  means a re-run, not a filter (D29) — but the table tells you whether it is worth it.\n"
+        f"  Under D43 the gap is measured between agent EVENTS, not between administration\n"
+        f"  rows: 05 first collapses same-agent administrations lying within\n"
+        f"  collapse_gap_minutes = {COLLAPSE_GAP_MINUTES:.0f} of each other into one anchored "
+        f"event and dates that\n"
+        "  event by its FIRST administration. So a gap here is the distance between the two\n"
+        "  agents' first charted doses, and repeated charting of one infusion no longer\n"
+        "  contributes a cloud of near-zero gaps that made the distribution look tighter\n"
+        "  than the clinical behaviour it describes."
     )
     return
 
@@ -1298,20 +1364,31 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, first_pairs_q, pl):
     )
     e3_pub = apply_min_cell(e3, ["n"], "E.3")
     e3_pub.write_csv(SHARE_DIR / "pair_agent_combinations.csv")
-    print("E.3 which agents pair with which, over index pairs")
+    print("E.3 which agents pair with which, over index pairs (one per episode)")
+    print(f"  grid before suppression : {e3.height} cells "
+          f"({e3.get_column('sed_med_category').n_unique()} sedative labels x "
+          f"{e3.get_column('para_med_category').n_unique()} paralytic)")
+    print(f"  published               : {e3_pub.height} cells")
     print(e3_pub)
     print(
         "\n  This is the clinical output the method exists to produce, and it is NOT derivable\n"
         "  from SED and PARA run separately — those report their marginals, never the joint.\n"
         "  Rows with long median gaps are the ones most likely to be co-occurrence rather than\n"
-        "  a deliberate induction pair, and their share is a direct read on SED's list breadth."
+        "  a deliberate induction pair, and their share is a direct read on SED's list breadth.\n"
+        "  D43.5: a category may now be a COMBINATION — `fentanyl+propofol` is one agent event\n"
+        "  whose fold window caught both agents, and it is a distinct row from either alone,\n"
+        "  because giving both together is a different induction from giving either. That is\n"
+        "  why the grid is wider than the agent lists are long.\n"
+        "  D43.6: median_sed_dose is the dose of the label's LEAD agent (the alphabetically\n"
+        "  first one named), not a total across a combination, and sed_units is that agent's\n"
+        "  unit. On a combined row it therefore describes one component, not the event."
     )
     return (e3_pub,)
 
 
 @app.cell
-def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, enc_q, pl):
-    _det = enc_q.filter(pl.col("n_pairs") > 0)
+def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, ep_q, pl):
+    _det = ep_q.filter(pl.col("n_pairs") > 0)
     _rows = []
     for _which in ("first", "near"):
         _v = _det.get_column(f"{_which}_pair_to_t0_min")
@@ -1329,7 +1406,7 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, enc_q, pl):
     e4 = pl.DataFrame(_rows)
     e4_pub = apply_min_cell(e4, ["n"], "E.4")
     e4_pub.write_csv(SHARE_DIR / "pair_index_offsets.csv")
-    print("E.4 index pair offsets, signed minutes from t0")
+    print("E.4 index pair offsets, signed minutes from t0   (unit: episodes)")
     print(e4_pub)
     print(
         f"\n  first_is_nearest : {_det.get_column('first_is_nearest').mean():.4f}  "
@@ -1339,8 +1416,8 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, enc_q, pl):
 
 
 @app.cell
-def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, enc_q, pl):
-    _det = enc_q.filter(pl.col("n_pairs") > 0)
+def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, ep_q, pl):
+    _det = ep_q.filter(pl.col("n_pairs") > 0)
     # Computed on first_pair_to_t0_min — the pair chosen WITHOUT reference to t0, so the
     # comparison is not circular. near_pair_to_t0_min is small by construction (D31), and
     # scoring on it would report the selection rule rather than the data.
@@ -1364,11 +1441,12 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, enc_q, pl):
     )
     e5_pub = apply_min_cell(e5, ["n_within"], "E.5")
     e5_pub.write_csv(SHARE_DIR / "pair_t0_concordance.csv")
-    print(f"E.5 device-vs-medication timing concordance   (n detected = {_det.height:,})")
+    print(f"E.5 device-vs-medication timing concordance   "
+          f"(n detected = {_det.height:,} episodes)")
     print(e5_pub)
     print(
         "\n  Read the `beyond +/-180 min` row against A.1's free_running/in_window gap — they\n"
-        "  are two views of the same encounters. Every one is a case where the earliest\n"
+        "  are two views of the same episodes. Every one is a case where the earliest\n"
         "  sedative-paralytic co-administration of the stay is not near the index IMV. Three\n"
         "  explanations compete and this design cannot separate them: the patient was\n"
         "  intubated where device charting did not follow, t0 landed on a later ventilation\n"
@@ -2036,11 +2114,11 @@ def _(COLORS, SITE, finish, gap, plt):
 
 
 @app.cell
-def _(COLORS, MIN_CELL, SITE, enc_q, finish, pl, plt):
+def _(COLORS, MIN_CELL, SITE, ep_q, finish, pl, plt):
     # F7 -- E.6. Out-of-range mass is STATED, never clipped into the edge bins: those
-    # encounters are the `beyond +/-180` row of E.5, and a clipped bin reads as "just outside
+    # episodes are the `beyond +/-180` row of E.5, and a clipped bin reads as "just outside
     # the window" when they are the study's most interesting cases.
-    _det = enc_q.filter(pl.col("n_pairs") > 0)
+    _det = ep_q.filter(pl.col("n_pairs") > 0)
     _lim, _bin = 180, 10
     _v = _det.get_column("first_pair_to_t0_min").to_list()
     _out = sum(1 for _x in _v if abs(_x) > _lim)
@@ -2058,8 +2136,8 @@ def _(COLORS, MIN_CELL, SITE, enc_q, finish, pl, plt):
             width=_bin * 0.92, color=COLORS["PAIR"])
     _ax.axvline(0, color="#111111", linewidth=1.2)
     _ax.text(0, _ax.get_ylim()[1] * 0.97, "  t0", va="top", fontsize=9, fontweight="bold")
-    _ax.set_xlabel("first_pair_to_t0_min — minutes from t0 to the FIRST pair of the stay")
-    _ax.set_ylabel("encounters")
+    _ax.set_xlabel("first_pair_to_t0_min — minutes from t0 to the FIRST pair of the episode")
+    _ax.set_ylabel("episodes")
     _ax.set_xlim(-_lim, _lim)
     _ax.set_xticks(range(-_lim, _lim + 1, 30))
     _ax.set_title(
@@ -2070,8 +2148,8 @@ def _(COLORS, MIN_CELL, SITE, enc_q, finish, pl, plt):
     finish(
         _fig,
         "pair_offset_distribution.png",
-        f"{_bin}-minute bins; bins holding 1..{MIN_CELL - 1} encounters are dropped ({_sup}). "
-        f"{_out:,} encounters fall beyond ±{_lim} min and are NOT shown — they are the E.5 "
+        f"{_bin}-minute bins; bins holding 1..{MIN_CELL - 1} episodes are dropped ({_sup}). "
+        f"{_out:,} episodes fall beyond ±{_lim} min and are NOT shown — they are the E.5 "
         "`beyond ±180` row, and clipping them into the edge bins would disguise them as near "
         "misses. The first pair is chosen without reference to t0, so this is a genuine test "
         "of the device anchor.",
@@ -2087,7 +2165,14 @@ def _(SITE, e3_pub, finish, plt):
     _lookup = {(r["sed_med_category"], r["para_med_category"]): r for r in e3_pub.to_dicts()}
     _grid = [[_lookup.get((_s, _p), {}).get("n", 0) for _p in _paras] for _s in _seds]
 
-    _fig, _ax = plt.subplots(figsize=(1.9 * max(len(_paras), 2) + 3, 0.8 * len(_seds) + 2.8))
+    # D43.5 widened this from a 3x2 grid of single agents to a dozen-plus rows of possibly
+    # COMBINED sedative labels (`fentanyl+propofol`), which are both more numerous and much
+    # longer than the old ones. Height scales with the row count so the cells stay square-ish
+    # instead of turning into slivers, and the extra width is for the y labels, which are now
+    # long enough to be clipped by bbox_inches="tight" at the old size.
+    _fig, _ax = plt.subplots(
+        figsize=(2.6 * max(len(_paras), 2) + 4.5, 0.62 * max(len(_seds), 3) + 3.0)
+    )
     _im = _ax.imshow(_grid, cmap="Greens", aspect="auto")
     _peak = max(max(_r) for _r in _grid) if _grid else 1
     for _i, _s in enumerate(_seds):
@@ -2099,8 +2184,8 @@ def _(SITE, e3_pub, finish, plt):
                 ha="center", va="center", fontsize=9,
                 color="white" if _r and _r["n"] > _peak * 0.55 else "#111111",
             )
-    _ax.set_xticks(range(len(_paras)), _paras)
-    _ax.set_yticks(range(len(_seds)), _seds)
+    _ax.set_xticks(range(len(_paras)), _paras, fontsize=9)
+    _ax.set_yticks(range(len(_seds)), _seds, fontsize=8.5)
     _ax.grid(False)
     _ax.set_xlabel("paralytic")
     _ax.set_ylabel("sedative")
@@ -2110,9 +2195,11 @@ def _(SITE, e3_pub, finish, plt):
     finish(
         _fig,
         "pair_agent_combinations.png",
-        "Cell shows the number of index pairs and the median gap between the two members. "
-        "Combinations with fewer than 10 pairs are absent, not zero. This joint distribution "
-        "is not derivable from SED and PARA run separately.",
+        "Cell shows the number of index pairs (one per episode) and the median gap between "
+        "the two members. Combinations with fewer than 10 pairs are absent, not zero. This "
+        "joint distribution is not derivable from SED and PARA run separately. A row label "
+        "joined by `+` is a single agent event whose 15-minute fold caught more than one "
+        "agent (D43.5) — it is a distinct induction, not a double-count of its components.",
     )
     return
 

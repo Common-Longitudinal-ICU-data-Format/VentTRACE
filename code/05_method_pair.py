@@ -72,7 +72,7 @@ def _(Path, json):
     PAIR_GAP_HOURS = config["pair_gap_hours"]
     PAIR_GAP_MINUTES = PAIR_GAP_HOURS * 60.0
 
-    # D40. The scan is handed clinical agent EVENTS, not raw administration rows: repeat
+    # D43. The scan is handed clinical agent EVENTS, not raw administration rows: repeat
     # and co-administered doses inside this window are one push of drug, and charting them
     # as several rows is a documentation artefact, not several airways. Same argument as
     # above -- 01 precomputes nothing for it, so it is read here and echoed here.
@@ -88,7 +88,7 @@ def _(Path, json):
     print(f"site           : {SITE}")
     print(f"method         : {METHOD_ID}")
     print(f"pair_gap_hours : {PAIR_GAP_HOURS}   ({PAIR_GAP_MINUTES:.0f} min)")
-    print(f"collapse_gap   : {COLLAPSE_GAP_MINUTES:.0f} min   (agent-event fold, D40)")
+    print(f"collapse_gap   : {COLLAPSE_GAP_MINUTES:.0f} min   (agent-event fold, D43)")
     print(f"class SED      : {' | '.join(SED_CATEGORIES)}")
     print(f"class PARA     : {' | '.join(PARA_CATEGORIES)}")
     return (
@@ -296,7 +296,7 @@ def _(mo):
 
         So before the scan runs, administrations within `collapse_gap_minutes` of each other
         are folded into one **agent event**, separately within each drug class of each
-        encounter (D40).
+        encounter (D43).
 
         ```
         for each (encounter_block, drug_class), rows already in time order:
@@ -316,7 +316,7 @@ def _(mo):
         which agents are involved: a repeat of one agent and a co-administration of two are
         the same clinical fact, one push of that class of drug, and merge identically. The
         surviving event is labelled with every agent it contains (`fentanyl+propofol`,
-        D40.5) so nothing is thrown away, and it carries `n_admin` and `span_min` so the
+        D43.5) so nothing is thrown away, and it carries `n_admin` and `span_min` so the
         collapse is auditable from the pair table.
         """
     )
@@ -343,7 +343,7 @@ def _(COLLAPSE_GAP_MINUTES):
         point rather than an oversight: a repeat of one agent and a co-administration of
         two are the same clinical fact — one push of this class of drug — and must fold the
         same way. Which agents were involved is recorded on the event afterwards, by the
-        caller, in the D40.5 label.
+        caller, in the D43.5 label.
         """
         n = len(times)
         assert len(categories) == n, "times and categories are not the same length"
@@ -367,7 +367,7 @@ def _(COLLAPSE_GAP_MINUTES):
 @app.cell
 def _(collapse_agent_events):
     def _self_test():
-        """The D40 worked examples, run as assertions before any real data is touched."""
+        """The D43 worked examples, run as assertions before any real data is touched."""
         _X = "x"  # the grouping is blind to the agent; one filler category is enough
         cases = [
             # (a) same-instant co-administration merges
@@ -389,7 +389,7 @@ def _(collapse_agent_events):
                 [float(x) for x in _t], [_X] * len(_t), 15.0
             )
             assert _got == _want, f"worked example {'abcdef'[_k]}: expected {_want}, got {_got}"
-        print("D40 collapse worked examples (a)-(f) pass")
+        print("D43 collapse worked examples (a)-(f) pass")
 
     _self_test()
     return
@@ -422,7 +422,7 @@ def _(COLLAPSE_GAP_MINUTES, collapse_agent_events, epoch_minutes, pl, scan_rows)
 
         for _idx in collapse_agent_events(_tmin, _cat, COLLAPSE_GAP_MINUTES):
             _agents = sorted(set(_cat[_k] for _k in _idx))
-            # D40.6. Dose and unit come from the earliest administration of the FIRST agent
+            # D43.6. Dose and unit come from the earliest administration of the FIRST agent
             # named in the label -- alphabetically first, matching the label itself, so the
             # dose always belongs to a named agent and stays numeric (E.3 takes a median of
             # it). `_idx` is ascending, so the first match IS the earliest.
@@ -431,7 +431,7 @@ def _(COLLAPSE_GAP_MINUTES, collapse_agent_events, epoch_minutes, pl, scan_rows)
                 {
                     "encounter_block": _eb,
                     "admin_dttm": _t[_idx[0]],  # the earliest administration in the event
-                    "med_category": "+".join(_agents),  # D40.5
+                    "med_category": "+".join(_agents),  # D43.5
                     "med_dose": _dose[_lead],
                     "med_dose_unit": _unit[_lead],
                     "drug_class": _cls,
@@ -583,7 +583,7 @@ def _(PAIR_GAP_MINUTES):
 
 @app.cell
 def _(PAIR_GAP_MINUTES, agent_events, epoch_minutes, pl, scan_encounter):
-    # AGENT EVENTS, not administration rows (D40). The scan below is unchanged -- what
+    # AGENT EVENTS, not administration rows (D43). The scan below is unchanged -- what
     # changed is what it is handed.
     _cols = ["encounter_block", "admin_dttm", "med_category", "med_dose", "med_dose_unit",
              "drug_class", "n_admin", "span_min"]
@@ -777,10 +777,16 @@ def _(mo):
 
 @app.cell
 def _(pairs, pl):
+    # D43. n_*_admin and *_span_min are the fold's audit trail (how much charting the
+    # collapse folded into this member) and travel with the rest of that member's columns
+    # rather than being appended at the end. Column ORDER here is a contract: 07's schema
+    # gate asserts exact column-list equality against method_PAIR_episode.parquet, so this
+    # list must be mirrored there, not just matched by name.
     INDEX_PAIR_FIELDS = [
-        "pair_id", "first_class", "sed_med_category", "sed_med_dose", "sed_med_dose_unit",
-        "para_med_category", "para_med_dose", "para_med_dose_unit", "gap_minutes",
-        "pair_to_t0_min",
+        "pair_id", "first_class",
+        "sed_med_category", "sed_med_dose", "sed_med_dose_unit", "n_sed_admin", "sed_span_min",
+        "para_med_category", "para_med_dose", "para_med_dose_unit", "n_para_admin", "para_span_min",
+        "gap_minutes", "pair_to_t0_min",
     ]
 
     def _index_pair(prefix, sort_by, descending):
@@ -917,7 +923,7 @@ def _(mo):
 
 @app.cell
 def _(PARA_CATEGORIES, SED_CATEGORIES, pairs, pl):
-    # Under D40.5 a member's med_category is the event's LABEL, so it may name several
+    # Under D43.5 a member's med_category is the event's LABEL, so it may name several
     # agents ("fentanyl+propofol"). Split it back apart before checking against the declared
     # lists -- the check is about which agents reached the output, not which labels did.
     def _agents_in(col):
@@ -947,6 +953,11 @@ def _(PARA_CATEGORIES, SED_CATEGORIES, pairs, pl):
           f"{', '.join(sorted(_para_seen))}")
     print(f"  never paired: {', '.join(sorted(set(PARA_CATEGORIES) - _para_seen)) or '—'}")
 
+    # Under D43.6 a member's dose/unit come from the lead agent (alphabetically first in a
+    # combined label), not from every agent folded into the event, so this compares the two
+    # members' LEAD-AGENT units -- still a legitimate "do the two sides of this pair carry
+    # comparable units" signal, it just no longer promises to have inspected every agent
+    # named on either side.
     _mixed = (
         pairs.filter(pl.col("sed_med_dose_unit") != pl.col("para_med_dose_unit")).height
     )
