@@ -48,7 +48,11 @@ def _(mo):
         2. **Stitch** — merge hospitalizations less than `stitch_hours` apart into one encounter
         3. **Include** — adult, date window, at least one ED or ICU location, at least one IMV row
         4. **Exclude** — tracheostomy or trach collar within `trach_window_hours` of block admission
-        5. **Waterfall** the respiratory table and resolve t0 = first charted IMV per block
+        5. **Waterfall** the respiratory table and publish the raw charted IMV rows
+
+        `01` does **not** resolve t0. Under D34 t0 is the first *waterfalled* IMV row of an
+        episode, and under D35 a block holds as many episodes as it has sustained
+        intubations — `02` resolves both.
 
         Design: `docs/superpowers/specs/2026-08-04-intubation-method-comparison-design.md` §5.1–§5.8
         """
@@ -67,7 +71,6 @@ def _(Path, json):
     FILETYPE = config["filetype"]
     TIMEZONE = config["timezone"]
 
-    WINDOW_HOURS = config["window_hours"]
     STITCH_HOURS = config["stitch_hours"]
     TRACH_WINDOW_HOURS = config["trach_window_hours"]
     MIN_AGE = config["min_age"]
@@ -112,7 +115,6 @@ def _(Path, json):
         STITCH_HOURS,
         TIMEZONE,
         TRACH_WINDOW_HOURS,
-        WINDOW_HOURS,
     )
 
 
@@ -126,9 +128,11 @@ def _(
     SITE,
     STITCH_HOURS,
     TRACH_WINDOW_HOURS,
-    WINDOW_HOURS,
 ):
     # Every parameter that affects a result is echoed before anything runs (spec §4).
+    # window_hours and episode_gap_hours are NOT echoed here: 01 no longer consumes
+    # either. Both moved to 02 with t0 (D34, D36), and echoing a parameter this notebook
+    # cannot act on is the "silent default" confusion §4 exists to prevent.
     import datetime as _dt
 
     COHORT_RUN_ID = _dt.datetime.now().replace(microsecond=0).isoformat()
@@ -140,7 +144,6 @@ def _(
     print(f"min_age             : {MIN_AGE}")
     print(f"stitch_hours        : {STITCH_HOURS}")
     print(f"trach_window_hours  : {TRACH_WINDOW_HOURS}")
-    print(f"window_hours        : {WINDOW_HOURS}")
     print(
         f"date filter         : "
         + (f"{DATE_START} .. {DATE_END}" if APPLY_DATE_FILTER else "SKIPPED (site is MIMIC)")
@@ -698,7 +701,12 @@ def _(
     _waterfalled = process_resp_support_waterfall(
         _resp_in,
         id_col="hospitalization_id",
-        bfill=False,
+        # D6. This flag CANNOT change device_category: waterfall.py:274 ffills it
+        # unconditionally, and bfill reaches only num_cols_fill (fio2_set, peep_set,
+        # tidal_volume_set, ...) at :320-336 -- after the device heuristics at :199-226
+        # have already run. We read device_category and nothing else out of this frame,
+        # so the flag is inert here. Set as specified rather than silently dropped.
+        bfill=True,
         verbose=True,
     )
 
@@ -763,47 +771,55 @@ def _(
 
 
 @app.cell
-def _(WINDOW_HOURS, cohort, pl, resp_raw):
-    # t0 = earliest RAW charted IMV row per encounter_block (D23).
-    #
-    # Not the waterfalled one. Measured on MIMIC, the waterfall moved t0 earlier on 24.1%
-    # of encounters -- always earlier, never later -- by relabelling a row that had
-    # ventilator settings but a null device_category. That inference may be clinically
-    # right, but this study treats t0 as observed fact and centres every +/-3h medication
-    # window on it. Anchoring here also means t0 uses the same rows and the same
-    # comparison as the raw-IMV inclusion criterion above.
-    t0 = (
-        resp_raw.filter(pl.col("device_category") == "imv")
-        .group_by("encounter_block")
-        .agg(t0_dttm=pl.col("recorded_dttm").min())
-    )
+def _(mo):
+    mo.md(
+        """
+        ## Raw charted IMV rows
 
-    cohort_index = (
-        cohort.join(t0, on="encounter_block", how="left")
-        .with_columns(
-            window_start=pl.col("t0_dttm") - pl.duration(hours=WINDOW_HOURS),
-            window_end=pl.col("t0_dttm") + pl.duration(hours=WINDOW_HOURS),
-        )
-        .sort("encounter_block")
-    )
+        **`01` does not resolve t0.** Under D34 t0 is the first *waterfalled* IMV row of an
+        **episode**, and under D35 a block holds as many episodes as it has sustained
+        intubations — neither is a fact `01` is in a position to know. `02` resolves both.
 
-    n_missing_t0 = cohort_index.get_column("t0_dttm").null_count()
-    print(f"encounters with a resolved t0 : {cohort_index.height - n_missing_t0:,}")
-    print(f"encounters with NULL t0       : {n_missing_t0:,}")
-    return cohort_index, n_missing_t0, t0
+        What `01` publishes instead is the raw charted IMV rows, block-keyed. No rule reads
+        this frame. Its only consumer is `charting_delay_min` in `02`, which measures how
+        far behind the settings-based inference the device field was filled in — the
+        quantity D34 was decided on, and now a published result rather than a QC check.
+        """
+    )
+    return
 
 
 @app.cell
-def _(n_missing_t0):
-    # Every cohort encounter has >=1 raw IMV row by construction (that is the inclusion
-    # criterion), and t0 now reads the same table -- so a null t0 is impossible unless the
-    # cohort filter and this aggregation disagree about what an IMV row is.
-    assert n_missing_t0 == 0, (
-        f"{n_missing_t0} cohort encounters have no raw IMV row despite passing the "
-        "raw-IMV inclusion. The two comparisons have diverged."
+def _(PHI_DIR, cohort, pl, resp_raw):
+    # The semi-join to `cohort` is load-bearing, not defensive. `resp_raw` is built from
+    # `encounter_mapping`, which covers every stitched block -- including the ones later
+    # removed by the trach exclusion (§5.5). Without this filter the frame carries 1,125
+    # blocks the study excluded, and 02 would compute a charting delay for episodes that
+    # are not in the cohort at all. The waterfall is already scoped this way; this matches it.
+    cohort_resp_imv_raw = (
+        resp_raw.filter(pl.col("device_category") == "imv")
+        .join(cohort.select("encounter_block"), on="encounter_block", how="semi")
+        .select(["encounter_block", "recorded_dttm"])
+        .unique()
+        .sort(["encounter_block", "recorded_dttm"])
     )
-    print("OK — every cohort encounter has a resolved t0.")
-    return
+
+    assert cohort_resp_imv_raw.height > 0, (
+        "no raw charted imv rows survived the block join -- every block entered the "
+        "cohort on one (D23 still governs admission), so this cannot legitimately be empty"
+    )
+    _blocks = cohort_resp_imv_raw.get_column("encounter_block").n_unique()
+    assert _blocks == cohort.height, (
+        f"{cohort.height - _blocks:,} cohort blocks have no raw charted imv row. That is "
+        "the inclusion criterion (§5.5), so the two comparisons have diverged."
+    )
+
+    cohort_resp_imv_raw.write_parquet(PHI_DIR / "cohort_resp_imv_raw.parquet")
+    print(f"cohort_resp_imv_raw.parquet  {cohort_resp_imv_raw.height:,} rows -> {PHI_DIR}")
+    print(f"  blocks represented         {_blocks:,}")
+
+    cohort_index = cohort.sort("encounter_block")
+    return cohort_index, cohort_resp_imv_raw
 
 
 @app.cell
@@ -812,99 +828,64 @@ def _(mo):
         """
         ## QC statistics
 
-        Three checks that must be read before any downstream result is trusted.
+        Two checks that must be read before any downstream result is trusted. The third,
+        the waterfall-minus-raw t0 delta, moved to `02` and became `charting_delay_min`.
         """
     )
     return
 
 
 @app.cell
-def _(cohort_index, pl, resp_raw, resp_waterfall):
-    # QC 1 — how far the waterfall's device heuristics disagree with charting.
+def _(cohort_index, pl, resp_waterfall):
+    # QC 1 -- how much stitching actually did.
     #
-    # No longer a hazard check: t0 is the raw charted row (D23), so this delta cannot move
-    # a window. It is the measurement D23 was decided on, kept so a site can see whether
-    # its own heuristic disagreement resembles MIMIC's before inheriting the decision.
-    # A POSITIVE delta is impossible by construction -- forward-fill only carries a device
-    # later in time and nothing deletes the charted row -- so all disagreement is the
-    # heuristic labelling some earlier null-device row as imv.
-    _t0_wf = (
-        resp_waterfall.filter(pl.col("device_category") == "imv")
-        .group_by("encounter_block")
-        .agg(t0_wf_dttm=pl.col("recorded_dttm").min())
-    )
-
-    qc_t0 = cohort_index.select(["encounter_block", "t0_dttm"]).join(
-        _t0_wf, on="encounter_block", how="left"
-    ).with_columns(
-        delta_minutes=(pl.col("t0_wf_dttm") - pl.col("t0_dttm")).dt.total_minutes()
-    )
-
-    qc_delta_median = qc_t0.get_column("delta_minutes").median()
-    qc_delta_q1 = qc_t0.get_column("delta_minutes").quantile(0.25)
-    qc_delta_q3 = qc_t0.get_column("delta_minutes").quantile(0.75)
-    qc_pct_nonzero = 100.0 * qc_t0.filter(pl.col("delta_minutes") != 0).height / qc_t0.height
-    qc_pct_negative = 100.0 * qc_t0.filter(pl.col("delta_minutes") < 0).height / qc_t0.height
-
-    print("QC 1 — waterfall t0 minus raw t0, minutes (informational; t0 is raw per D23)")
-    print(f"  median      : {qc_delta_median}")
-    print(f"  IQR         : {qc_delta_q1} .. {qc_delta_q3}")
-    print(f"  % nonzero   : {qc_pct_nonzero:.1f}")
-    print(f"  % NEGATIVE  : {qc_pct_negative:.1f}   <- heuristic says ventilated before charting")
-    assert qc_pct_nonzero - qc_pct_negative < 0.01, (
-        "a POSITIVE waterfall-minus-raw delta appeared, which should be impossible: "
-        "forward-fill cannot move a device earlier and nothing deletes the charted row."
-    )
-
-    # QC 2 — how much stitching actually did.
+    # The waterfall-minus-raw delta that used to head this cell has MOVED to 02, where it
+    # became charting_delay_min (§5.10). It is per EPISODE now rather than per block --
+    # under D35 a block has several -- and it is a published result rather than a QC
+    # check, because under D34 it is the quantity the anchor was chosen on.
     qc_blocks_per_encounter = (
-        cohort_index.get_column("n_hospitalizations").value_counts(sort=True).sort("n_hospitalizations")
+        cohort_index.get_column("n_hospitalizations")
+        .value_counts(sort=True)
+        .sort("n_hospitalizations")
     )
-    print("\nQC 2 — hospitalizations per encounter block")
+    print("QC 1 -- hospitalizations per encounter block")
     print(qc_blocks_per_encounter)
 
-    # QC 3 — the direct measure of the artifact stitching exists to remove: t0 landing in
-    # a hospitalization other than the block's first.
+    # QC 2 -- the direct measure of the artifact stitching exists to remove: the block's
+    # first IMV row landing in a hospitalization other than the block's first.
+    #
+    # Phrased on the first IMV row rather than on t0, which 01 no longer computes. Matched
+    # against the WATERFALLED rows: an IMV row can be a scaffold row (HH:59:59) with no raw
+    # counterpart, and matching against raw would drop exactly those blocks from the
+    # denominator -- silently, and not at random.
     _first_hosp = cohort_index.select(
         "encounter_block",
         first_hospitalization_id=pl.col("list_hospitalization_id").list.first(),
     )
-    # Matched against the WATERFALLED rows, not the raw ones. t0 can land on a scaffold
-    # row (HH:59:59) that has no raw counterpart, and matching against raw would drop
-    # exactly those encounters from the denominator — silently, and not at random.
-    _t0_hosp = (
-        cohort_index.select(["encounter_block", "t0_dttm"])
-        .join(
-            resp_waterfall.select(["encounter_block", "hospitalization_id", "recorded_dttm"]),
-            on="encounter_block",
-            how="inner",
-        )
-        .filter(pl.col("recorded_dttm") == pl.col("t0_dttm"))
-        .select(["encounter_block", "hospitalization_id"])
-        .unique(subset=["encounter_block"])
+    _imv_hosp = (
+        resp_waterfall.filter(pl.col("device_category") == "imv")
+        .sort(["encounter_block", "recorded_dttm", "hospitalization_id"])
+        .group_by("encounter_block", maintain_order=True)
+        .agg(hospitalization_id=pl.col("hospitalization_id").first())
     )
-    _joined = _first_hosp.join(_t0_hosp, on="encounter_block", how="inner")
+    _joined = _first_hosp.join(_imv_hosp, on="encounter_block", how="inner")
     assert _joined.height == cohort_index.height, (
-        f"QC 3 resolved a t0 row for only {_joined.height:,} of {cohort_index.height:,} "
-        "encounters — the percentage below would be computed on a biased subset."
+        f"QC 2 resolved a first-IMV row for only {_joined.height:,} of "
+        f"{cohort_index.height:,} blocks -- the percentage below would be computed on a "
+        "biased subset."
     )
-    qc_pct_t0_elsewhere = (
+    qc_pct_imv_elsewhere = (
         100.0
-        * _joined.filter(pl.col("hospitalization_id") != pl.col("first_hospitalization_id")).height
+        * _joined.filter(
+            pl.col("hospitalization_id") != pl.col("first_hospitalization_id")
+        ).height
         / max(_joined.height, 1)
     )
     print(
-        f"\nQC 3 — % of blocks whose t0 falls outside the block's first hospitalization: "
-        f"{qc_pct_t0_elsewhere:.1f}"
+        f"\nQC 2 -- % of blocks whose first IMV row falls outside the block's first "
+        f"hospitalization: {qc_pct_imv_elsewhere:.1f}"
     )
-    return (
-        qc_delta_median,
-        qc_delta_q1,
-        qc_delta_q3,
-        qc_pct_negative,
-        qc_pct_nonzero,
-        qc_pct_t0_elsewhere,
-    )
+    return qc_blocks_per_encounter, qc_pct_imv_elsewhere
 
 
 @app.cell
@@ -921,42 +902,36 @@ def _(
     SHARE_DIR,
     STITCH_HOURS,
     TRACH_WINDOW_HOURS,
-    WINDOW_HOURS,
     cohort,
     cohort_index,
     consort_rows,
     pl,
-    qc_delta_median,
-    qc_delta_q1,
-    qc_delta_q3,
-    qc_pct_negative,
-    qc_pct_nonzero,
-    qc_pct_t0_elsewhere,
+    qc_blocks_per_encounter,
+    qc_pct_imv_elsewhere,
     resp_waterfall,
 ):
-    # intubation_episode_id is formed once here and read verbatim downstream. No notebook
-    # reconstructs it: encounter_block is a row position and renumbers on re-extract.
+    # The JOIN SPINE and nothing more.
+    #
+    # t0_dttm, window_start, window_end and intubation_episode_id are NOT written here.
+    # Under D34 t0 is a property of an episode and 02 resolves it; under D35 a block has
+    # several. A block-level t0 written here would be a stale duplicate of the first
+    # episode's -- exactly the drift D14 warns about -- and 02 asserts it is absent.
     cohort_index_out = cohort_index.with_columns(
-        intubation_episode_id=pl.col("encounter_block").cast(pl.Utf8) + "_E1",
         cohort_run_id=pl.lit(COHORT_RUN_ID),
     ).select(
         [
             "encounter_block",
             "patient_id",
-            "intubation_episode_id",
             "cohort_run_id",
             "list_hospitalization_id",
             "n_hospitalizations",
             "admission_dttm",
             "age_at_admission",
-            "t0_dttm",
-            "window_start",
-            "window_end",
         ]
     )
 
-    assert cohort_index_out.get_column("intubation_episode_id").n_unique() == cohort_index_out.height, (
-        "intubation_episode_id is not unique — encounter_block collided."
+    assert cohort_index_out.get_column("encounter_block").is_unique().all(), (
+        "encounter_block is not unique in cohort_index."
     )
 
     cohort.write_parquet(PHI_DIR / "cohort.parquet")
@@ -972,13 +947,8 @@ def _(
             {"stat": "min_age", "value": str(MIN_AGE)},
             {"stat": "stitch_hours", "value": str(STITCH_HOURS)},
             {"stat": "trach_window_hours", "value": str(TRACH_WINDOW_HOURS)},
-            {"stat": "window_hours", "value": str(WINDOW_HOURS)},
-            {"stat": "t0_delta_median_min", "value": str(qc_delta_median)},
-            {"stat": "t0_delta_q1_min", "value": str(qc_delta_q1)},
-            {"stat": "t0_delta_q3_min", "value": str(qc_delta_q3)},
-            {"stat": "t0_delta_pct_nonzero", "value": f"{qc_pct_nonzero:.2f}"},
-            {"stat": "t0_delta_pct_negative", "value": f"{qc_pct_negative:.2f}"},
-            {"stat": "pct_t0_outside_first_hosp", "value": f"{qc_pct_t0_elsewhere:.2f}"},
+            {"stat": "max_hosp_per_block", "value": str(qc_blocks_per_encounter.get_column("n_hospitalizations").max())},
+            {"stat": "pct_first_imv_outside_first_hosp", "value": f"{qc_pct_imv_elsewhere:.2f}"},
         ]
     )
     cohort_qc.write_csv(SHARE_DIR / "cohort_qc.csv")
