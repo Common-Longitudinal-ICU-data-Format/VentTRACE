@@ -33,7 +33,7 @@ The deliverable answers two questions: **do these signals identify the same pati
 - **The analytic unit is the intubation episode** (D35), keyed `{encounter_block}_E{n}`. Encounters are still stitched first and every artifact still carries `encounter_block` — see §5.1 for why stitching is a correctness requirement rather than a convenience — but a block may contribute several episodes and the denominator of every rate in §8 is the episode.
 - **All sustained IMV episodes, not just the first.** A block with a reintubation contributes `_E1` and `_E2`, and both are scored. What remains out of scope is *outcome* classification — whether an episode ended in extubation, trach or death — and any linkage between episodes of the same block beyond `ep_num`. (Encounter stitching is in scope and happens first; the two senses of "stitching" are unrelated.)
 - **`PAIR` emits many pairs per block, but still one analytic row per episode.** The free-running scan finds every sedative–paralytic co-administration in the stay, so its pair-level artifact is not one row per episode. Each pair is assigned to the nearest episode (D39) and collapses to the analytic unit at §7.3 by designating two index pairs (D31).
-- **Intermittent medications only.** Both medication methods read `medication_admin_intermittent`. The continuous-infusion signal (whiteboard item 3) is out of scope — see §11.
+- **Every detection comes from intermittent medications.** Both medication methods detect on `medication_admin_intermittent` alone. `medication_admin_continuous` is read under D40, but only to reclassify administrations already found there — it can remove a detection and never create one. The continuous-infusion *method* (whiteboard item 3) remains out of scope — see D1a and §11.
 - **CPT is the sole reference.** ICD procedure codes are out of scope — see §11.
 - **Testing target is MIMIC**, with the pipeline written to run at any consortium site via config.
 
@@ -56,7 +56,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | D7 | **No CPT code and no `billing_provider_id` in the cohort definition.** | Explicit study requirement. Distinguishes this cohort from `Induction_Variability_RSI`, which requires both. The CPT code enters only as the reference in notebook `06`. |
 | D8 | **Every method notebook is fully self-contained. No shared helper module.** | A bug in a shared helper corrupts every method *identically*, and correlated errors are indistinguishable from genuine agreement — the one failure mode an agreement study cannot tolerate. Isolation makes mistakes surface as disagreement (visible) rather than as inflated concordance (invisible). |
 | D9 | **The detection window is data, not code.** `02_index_imv.py` writes `window_start` / `window_end` into `index_imv.parquet`, one pair per episode. | Removes the usual cost of D8. There is no window logic to duplicate across notebooks, so there is nothing to drift, while detection logic stays fully independent. *(The producer moved from `01` to `02` under D34: t₀ is now decided by episode detection, so the window that hangs off it must be written where t₀ is resolved. The principle is unchanged.)* |
-| D10 | **`SED` is the induction-agent list — the drugs used to intubate — and reads `medication_admin_intermittent` only.** | Induction agents are intermittently dosed. Propofol and fentanyl are also charted as continuous maintenance infusions, but those rows live in `medication_admin_continuous` and are never read: reading them would conflate intubating a patient with sedating one already ventilated. `SED` is still expected to fire often, since midazolam and fentanyl are given for many non-airway reasons — that low specificity is a reportable property of the method, not a defect to tune away before measurement. |
+| D10 | **`SED` is the induction-agent list — the drugs used to intubate — and reads `medication_admin_intermittent` only.** | Induction agents are intermittently dosed. Propofol and fentanyl are also charted as continuous maintenance infusions, but those rows live in `medication_admin_continuous` and contribute no detections: detecting on them would conflate intubating a patient with sedating one already ventilated. **Amended by D40** — this row originally read "*and are never read*", which is no longer true: the continuous table is opened, as a disqualifier only. The property D10 was protecting survives in the sharper form "no detection originates there". `SED` is still expected to fire often, since midazolam and fentanyl are given for many non-airway reasons — that low specificity is a reportable property of the method, not a defect to tune away before measurement. |
 | D11 | **Each method is a profiler, not just a detector.** It emits the ranked medication sequence around t₀ with dose, unit and lag; the binary `detected` is *derived* from that structure. | A binary answers "did the signal appear"; the ranked sequence answers "what was actually given, in what order, how far from the intubation". Deriving the binary from the ranks rather than computing it separately makes the two incapable of disagreeing. |
 | D12 | **Ranks deduplicate by `med_category`: last administration before t₀, first after, ranked nearest-first.** | Nearest-first makes rank 1 the most clinically proximate entry, so rank 1 is comparable across patients. Dedup removes a real statistical artifact — under the previous all-signals contract a patient given six fentanyl doses contributed six observations to the timing distribution and dominated it. |
 | D13 | **Ranking is over each method's own medication list only**, not over all charted medications. | Keeps every method strictly about its own signal, so the ranked output elaborates what the method detects rather than describing the ward. Consequence: rank counts are bounded by list size, so no rank cap is specified. |
@@ -86,6 +86,9 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | D37 | **Absence is not evidence of ventilation.** A null device, and an empty window, pass both the pre-period test and the sustained test. This retires `arrived_intubated` and `insufficient_lookback` as exclusions. | Set by the study lead. `B_strict` treated a missing row as a failed term, which made the two largest exclusions in the study — 18,533 and 3,282 encounters, 64% of the cohort between them — statements about charting rather than about patients. A patient wheeled in from the ED on a ventilator has an empty pre-period because they were on room air and nobody charted it, not because they were already ventilated here; with the block stitched across the ED and the inpatient stay (D15), their induction is *in the extract*. At MIMIC 52.8% of the final episode set has an empty pre-period. `arrived_intubated` survives as the non-excluding label `no_lookback`, because catalog §9.4 benchmarks that rate at ~31% across sites and it remains the first number to read. |
 | D38 | **An episode qualifies only if at least one of the eight method medication categories is charted `given` in `medication_admin_intermittent` within t₀ ± `window_hours`.** | Set by the study lead over an objection recorded here in full, because it changes what §8 can claim. **The filter uses the same drugs, the same window and the same table the methods read, so `SED_detected ∨ PARA_detected` is true for every qualifying episode by construction.** A.2's `SED−/PARA−` cell and A.3's concordance-0 row are therefore empty by definition rather than by finding, and κ and Jaccard must be read as conditional on an induction agent having been charted. Two alternatives were measured and declined: filtering on `med_group ∈ {sedation, analgesia, anxiolytic, paralytics}` keeps 17,395 episodes with a union rate of 0.776 and preserves the cell; the eight categories keep 13,500 with a union rate of 1.000. The residual `SED−/PARA−` count is not quite zero — D25 puts an administration landing exactly on t₀ in neither half-open direction — but it then measures on-the-minute charting, not disagreement, and §8 labels it that way. Tiers B and E are unaffected: they measure where administrations sit in time, which a positivity filter does not touch. |
 | D39 | **A `PAIR` pair is assigned to the episode whose t₀ is nearest; ties go to the earlier episode.** | D27 makes the scan free-running over the whole block, and under D35 a block may hold several episodes, so the scan's output must be partitioned before it can be counted per episode. Nearest-t₀ is the only assignment that needs no new concept — every pair already carries its distance to a t₀ — and it partitions rather than overlaps, so `n_pairs` summed over a block's episodes equals the block's pair count and no pair is scored twice. The alternative, re-running the scan per episode over a bounded stretch, would require an episode *end* the design does not define and would break D28's consumption across the boundary. |
+| D40 | **An intermittent administration after t₀ that is followed within `infusion_prep_minutes` by a `start` row in `medication_admin_continuous` for the same `med_category` is maintenance-infusion prep, not an induction agent.** Applies to `SED` and `PARA`. `[window_start, t₀)` is exempt. Default 60 min. | Set by the study lead on a clinical argument: an infusion does not reach steady state on its own, so it is loaded with a bolus, and that bolus is charted in the intermittent table where it is indistinguishable from induction by drug and dose alone. The sequence *bolus → same-drug drip* after the airway is already secured is maintenance sedation being started, not the patient being intubated. **The before-window exemption is the load-bearing part and the data forced it.** 20.7% of pre-t₀ administrations are followed by a same-drug infusion start within 15 minutes against 7.6% after — pre-t₀ boluses are *nearly three times* more likely to precede a drip, because induction → intubation → maintenance is the canonical sequence. A symmetric rule would have deleted 2,669 genuine induction boluses to remove 1,909 prep doses. The continuous table is read as a **disqualifier only and never as a detector**, which is what leaves D1a intact: no detection originates there, so `INF` stays removed and the study still does not claim an infusion means a ventilator. |
+| D41 | **`during_infusion` — an administration given while a same-drug infusion is already running — is measured and published on both sides of t₀, and never acts.** | Proposed as a second disqualifier and declined on the measurement. It is charted at **58.5% of before-t₀ ranked entries and 58.7% of after-t₀ entries** — statistically indistinguishable across the event the study is trying to detect. A flag that fires equally on both sides carries no information about whether a dose is induction; it reports that the patient is on sedation, which is a property of the admission and not of the airway. Disqualifying on it after t₀ only would be an asymmetric rule with no discriminating basis, and symmetrically would delete 58% of the pre-t₀ evidence the study rests on. It is retained as a published band on the decomposed timing figure because *that* is a genuine result — it shows that most post-intubation sedative charting is maintenance, and therefore that `SED`'s apparent sensitivity rests almost entirely on its pre-t₀ half. Computed by backward as-of join — the most recent same-drug continuous event is not a `stop` — which needs no start/stop interval pairing and so is unaffected by MIMIC's 257-row imbalance between the two. |
+| D42 | **The refinement is reported as a paired sub-analysis, not propagated through Tier A.** `SED` and `PARA` publish `detected` and `detected_induction_only`; every Tier A/B/C/D table continues to run on `detected` unchanged. D38's eligibility filter is **not** refined. | Two separate reasons, and the second is the one that matters. **Mechanically:** `07`'s basis machinery is `PAIR`-specific by construction — the column is named `pair_basis` and non-`PAIR` methods are skipped on the second basis — so generalising it makes A.3 an eight-way lattice to answer a question one paired comparison answers. **Substantively:** pushing the refinement into D38 would destroy the measurement it creates. If an episode qualifies only when a *non-prep* induction agent is charted, then every surviving episode has one by definition and `SED`'s refined rate snaps back to 1.000 — the same circularity D38 already records, reintroduced one layer down. Keeping the filter unrefined is precisely what makes the refined rate readable, and it holds N at 13,500 so both numbers share a denominator. |
 
 ------------------------------------------------------------------------
 
@@ -481,26 +484,39 @@ One JSON object per intubation episode, emitted by `SED` and `PARA`. **`PAIR` em
   "before": [
     {"rank": 1, "med_category": "etomidate", "med_dose": 20.0,
      "med_dose_unit": "mg", "admin_dttm": "2130-04-12T03:10:00",
-     "delta_minutes": -4.0},
+     "delta_minutes": -4.0,
+     "infusion_prep": false, "during_infusion": false, "lag_to_infusion_min": null},
     {"rank": 2, "med_category": "midazolam", "med_dose": 2.0,
      "med_dose_unit": "mg", "admin_dttm": "2130-04-12T03:02:00",
-     "delta_minutes": -12.0},
+     "delta_minutes": -12.0,
+     "infusion_prep": false, "during_infusion": false, "lag_to_infusion_min": 41.0},
     {"rank": 3, "med_category": "fentanyl", "med_dose": 100.0,
      "med_dose_unit": "mcg", "admin_dttm": "2130-04-12T02:55:00",
-     "delta_minutes": -19.0}
+     "delta_minutes": -19.0,
+     "infusion_prep": false, "during_infusion": true, "lag_to_infusion_min": null}
   ],
   "after": [
     {"rank": 1, "med_category": "midazolam", "med_dose": 2.0,
      "med_dose_unit": "mg", "admin_dttm": "2130-04-12T03:52:00",
-     "delta_minutes": 38.0},
+     "delta_minutes": 38.0,
+     "infusion_prep": true, "during_infusion": false, "lag_to_infusion_min": 8.0},
     {"rank": 2, "med_category": "fentanyl", "med_dose": 100.0,
      "med_dose_unit": "mcg", "admin_dttm": "2130-04-12T04:30:00",
-     "delta_minutes": 76.0}
+     "delta_minutes": 76.0,
+     "infusion_prep": false, "during_infusion": true, "lag_to_infusion_min": null}
   ]
 }
 ```
 
 `delta_minutes` is signed: negative before t₀, positive after. Both arrays are empty when nothing was found; the object is still written, so the file has one record per candidate episode.
+
+**The three D40/D41 fields are per-administration properties, carried on every entry in both arrays.**
+
+- `lag_to_infusion_min` — minutes from this administration to the next `start` row in `medication_admin_continuous` for the same `med_category`, or null if the drug is never subsequently infused. Signed positive by construction; the as-of join is forward-only.
+- `infusion_prep` — `direction == "after" AND lag_to_infusion_min <= infusion_prep_minutes`. **Always false on a `before` entry**, because D40 exempts that half. The field is still written there rather than omitted, so a consumer can filter on one predicate across both arrays without special-casing direction.
+- `during_infusion` — the most recent same-drug row in `medication_admin_continuous` before this administration is not a `stop`. Computed on **both** halves (D41), where it is the whole point: the field exists to be compared across t₀, and suppressing it before t₀ would manufacture the asymmetry D41 went looking for and did not find.
+
+Note in the example that entry `before`/rank 2 carries a non-null `lag_to_infusion_min` of 41 minutes and is still not prep. That is the ordinary induction → maintenance sequence and D40 leaves it alone; the lag is published so the exemption can be audited rather than trusted.
 
 ### 6.4 `method_<ID>_episode.parquet` — joinable
 
@@ -533,7 +549,15 @@ The table below has two parts. The **core columns** (`encounter_block` through `
 | `nearest_before_min` | float | `delta_minutes` at before-rank 1; null if none |
 | `nearest_after_med` | str | `med_category` at after-rank 1; null if none |
 | `nearest_after_min` | float | `delta_minutes` at after-rank 1; null if none |
-**`detected` is derived, not independently computed:** `detected = (n_before > 0) OR (n_after > 0)`.
+| `detected_induction_only` | bool | D40. `detected` with prep administrations removed |
+| `n_after_induction` | int | distinct `med_category` with ≥1 **non-prep** administration after t₀ |
+| `n_before_during` | int | D41, descriptive. Distinct `med_category` with ≥1 administration before t₀ given during a running same-drug infusion |
+| `n_after_during` | int | D41, descriptive. The same after t₀ |
+**`detected` is derived, not independently computed:** `detected = (n_before > 0) OR (n_after > 0)`, and `detected_induction_only = (n_before > 0) OR (n_after_induction > 0)`. The before-half is common to both because D40 exempts it.
+
+> **The counts are taken on the unranked window set, and filtering the published ladder does not reproduce them.** This is a real discrepancy, stated here rather than left to be discovered. `n_after` and `n_after_induction` both count *distinct `med_category` values holding at least one qualifying administration*, computed before §6.2's deduplication runs. The ladder keeps only the administration **nearest t₀** per category, so a category whose nearest after-dose is prep but whose second dose is not contributes to `n_after_induction` while its single ladder entry is flagged `infusion_prep`. Counting off the ladder would score that episode as having no induction evidence for the drug when it has some.
+>
+> The ordering is therefore fixed and is not an implementation detail: **filter, then rank — never rank, then filter.** `detected_induction_only` is computed from the window set directly; the ladder carries `infusion_prep` for profiling only. `07` must not recompute a rate by filtering `method_<ID>_ranked.json`.
 
 There is no `non_detection_reason` column. For a medication method the reason is always the same — no qualifying `med_category` was charted in the window — so a column carrying one constant string would add a field without adding a fact. The informative non-detection reasons all concern whether the intubation was observable, and those live in `index_class` (§5.10), one stage upstream where they are decided.
 
@@ -630,7 +654,11 @@ midazolam | etomidate | ketamine | propofol | fentanyl
 
 Ranked per §6.2. At most 5 before-ranks and 5 after-ranks.
 
-> **`SED` reads the intermittent table only — never the continuous table.** Propofol and fentanyl are also charted as continuous maintenance infusions, but those rows live in `medication_admin_continuous` and are out of scope for this build (§11). An induction bolus and a maintenance infusion are the same drug performing two different clinical acts, distinguished by which table they are charted in. Pulling propofol from both would conflate intubating a patient with sedating one already ventilated.
+> **Every `SED` detection originates in the intermittent table. The continuous table is read, but only to take detections away.** Propofol and fentanyl are also charted as continuous maintenance infusions. An induction bolus and a maintenance infusion are the same drug performing two different clinical acts, distinguished by which table they are charted in, so pulling propofol from both would conflate intubating a patient with sedating one already ventilated. `medication_admin_continuous` is loaded, filtered to this method's `med_category` list and nothing else, solely to classify intermittent rows that have already been found. **No row of it can create a detection.** The two flags consume it differently and both subsets are needed: D40 reads only `mar_action_category = 'start'`, since prep is defined against an infusion *beginning*; D41 reads the **full event stream** — `start`, `stop`, `dose_change`, `going` — because "is a drip running right now" is answered by the most recent event of any kind, not by starts alone. That asymmetry is what keeps D1a's removal of `INF` intact, and it is why the earlier form of this note ("never the continuous table") was revised rather than deleted: the sentence it was protecting is still true.
+
+**D40 — infusion prep.** An administration in `(t₀, window_end]` followed within `infusion_prep_minutes` by a same-`med_category` infusion `start` is flagged `infusion_prep` and excluded from `detected_induction_only`. `[window_start, t₀)` is exempt. **D41 — during infusion.** Every administration in both halves is flagged `during_infusion` when the most recent same-drug continuous row before it is not a `stop`. This flag is descriptive and changes no rate.
+
+Alongside the two ordinary artifacts, `SED` writes `method_SED_prep_sweep.parquet` — the D40 rule recomputed over the threshold grid `5, 10, 15, 30, 45, 60, 90, 120, 150, 180` minutes, per `med_category` and pooled. The configured `infusion_prep_minutes` is one point on that grid and carries no special status in the file; §8.2 publishes the curve so the threshold can be chosen against evidence rather than defended from first principles.
 
 `med_dose` and `med_dose_unit` are taken verbatim from the administration row. **No unit conversion or dose normalisation is performed** — the raw charted value is what a reviewer needs to see, and normalising would hide unit heterogeneity that is itself worth measuring across sites.
 
@@ -643,6 +671,8 @@ rocuronium | succinylcholine | vecuronium
 ```
 
 Ranked per §6.2. At most 3 before-ranks and 3 after-ranks. Dose handling as for `SED`.
+
+**D40 and D41 apply here identically**, including `method_PARA_prep_sweep.parquet` over the same grid. The effect at MIMIC is small — 606 detected episodes fall to 582 at the 60-minute threshold, and `during_infusion` reaches 37 of 618 ranked entries — but the rule is not carried here for its effect. It is carried because `SED` and `PARA` must mean the same thing by "an administration in the window", and a site that runs cisatracurium or vecuronium infusions for ventilator dyssynchrony will see a materially larger one. Applying it to only one method would make the two methods' `detected` columns non-comparable in Tier A while looking as though they were.
 
 ### 7.3 `PAIR` — `05_method_pair.py`
 
@@ -912,9 +942,15 @@ Doses are the raw charted values with no unit conversion (§7), so `unit` must a
                              ▲ t₀
 ```
 
-The clinical read: both ranked methods should cluster tightly just *before* t₀ — induction agents and paralytics are given to accomplish the intubation. Mass appearing *after* t₀ is expected to be small and is meaningful when it appears: a post-intubation sedative bolus, or a paralytic redose. A method whose bulk falls on the wrong side of t₀ is detecting something other than the intubation.
+The clinical read: both ranked methods should cluster tightly just *before* t₀ — induction agents and paralytics are given to accomplish the intubation. A method whose bulk falls on the wrong side of t₀ is detecting something other than the intubation.
 
-> **Both remaining methods are pre-t₀ signals**, so the forward half of the ±3h window now carries much less traffic than the backward half. The window stays symmetric — an asymmetric window would bias the comparison and would need its own justification — but expect `after` arrays to be sparse, and read a large post-t₀ mass as a signal that t₀ itself is landing late.
+> **The prediction that the post-t₀ half would be sparse was wrong for `SED`, and B.5 is what corrects it.** An earlier form of this passage expected `after` arrays to be thin and read a large post-t₀ mass as evidence that t₀ was landing late. At MIMIC `SED` has **14,636 after-entries against 8,192 before** — the forward half carries nearly twice the traffic. B.5 decomposes it and the explanation is not a t₀ error: **58.7% of those after-entries are given during a running same-drug infusion** (D41), which is maintenance sedation being titrated in a patient who is by then unambiguously ventilated. The window stays symmetric — an asymmetric window would bias the comparison and would need its own justification — but the forward half should be read as *mostly maintenance*, not as a second induction peak.
+>
+> `PARA` behaves as the original passage predicted: 618 entries, overwhelmingly pre-t₀, and almost none of them on an infusion. The contrast between the two methods is itself the result.
+
+**B.5 Offset distribution, decomposed (D40, D41).** The same axis as B.4, one panel per ranked method, with each method's entries stacked into three mutually exclusive bands — `during_infusion` first, then `infusion_prep`, then the residual induction band. Published as `timing_offset_decomposed.png`, a **new figure alongside** `timing_offset_distribution.png` rather than a replacement for it, so B.4 stays comparable against runs that predate D40.
+
+Precedence matters and is fixed: an administration that is both is counted `during_infusion`, because "a drip was already running" is the stronger and less inferential statement. Reading the figure, the induction band is the one to follow across t₀ — it should peak in the last half-hour before zero and fall away immediately after, and at MIMIC it does.
 
 #### Tier C — reference check
 
@@ -1066,6 +1102,31 @@ This is the clinical output the method exists to produce, and it is not derivabl
 
 Clipping the out-of-range mass into the edge bins would put the study's most interesting encounters — the ones in the `beyond ±180` row of E.5 — into a bin that reads as "just outside the window". Stating the count in the caption keeps them visible as what they are.
 
+#### Tier F — how much of the medication signal is maintenance sedation?
+
+The D40/D42 sub-analysis. It runs on the same analytic set as Tiers A–C (`index_class = 'qualified'`, N = 13,500) and reports `detected_induction_only` beside `detected`. **Tier F is the only place `detected_induction_only` appears** — Tiers A–E are unchanged and continue to read `detected` (D42), so every number in them stays comparable across the change.
+
+**F.1 Paired comparison at the configured threshold.** One row per ranked method.
+
+| method | n | detected | rate | detected, induction only | rate | gap | episodes flipped |
+|---|---|---|---|---|---|---|---|
+| `SED` | 13 500 | 13 189 | 0.977 | … | … | … | … |
+| `PARA` | 13 500 | 584 | 0.043 | … | … | … | … |
+
+`n` is identical across the two columns by construction — D42 holds the denominator fixed — so the gap is a pure reclassification effect and not a cohort effect. `episodes flipped` is the count losing their last piece of evidence, which is far smaller than the count of reclassified administrations because most episodes also hold pre-t₀ evidence that D40 exempts.
+
+**F.2 Threshold sweep.** The rule recomputed over `5, 10, 15, 30, 45, 60, 90, 120, 150, 180` minutes. Published as `infusion_prep_sweep.csv` and plotted as `infusion_prep_sweep.png` — rate against threshold, one line per method, with the configured value marked.
+
+The sweep exists because **`infusion_prep_minutes` cannot be defended from first principles at a single value.** A loading bolus precedes its drip by minutes, but charting granularity, order-entry lag and infusion-pump documentation all widen the observed lag, and the widening is site-specific. The curve lets a site read where its own rate stops moving. A flat curve past some point means the rule has stopped finding prep and started finding coincidence.
+
+**F.3 Sweep by medication.** The same grid broken out by `med_category`, published as `infusion_prep_by_drug.csv`. Expected to separate sharply and that separation is the point: **fentanyl infusions are analgesia and propofol infusions are sedation**, so the two drugs have no reason to share a bolus-to-drip lag, and pooling them would report an average of two different clinical behaviours. `PARA`'s per-drug cells will mostly suppress under the n ≥ 10 rule at this site — vecuronium has 92 continuous orders site-wide — and are published as suppressed rather than dropped, so the breakdown's shape is visible even where its values are not.
+
+**F.4 Prep rate by charting-delay stratum.** Published as `prep_by_charting_delay.csv`, stratified on `charting_delay_min` from `02` (D34): `0`, `1–30`, `31–60`, `61–180`, `>180`, `not_charted`.
+
+> **This table exists to expose a confound in D40, not to confirm it.** The only thing separating "induction bolus, then maintenance drip" from "maintenance loading dose, then drip" is which side of t₀ the bolus falls on — and under D34 t₀ is the waterfalled IMV row, which arrives *late* under exactly the high-stress conditions that produce an intubation. The delay is 0 for 77.3% of episodes but p95 is 55 minutes, and D40's reclassifications concentrate in the +10 to +40 minute bins. Those two facts overlap.
+>
+> So some administrations D40 calls prep are induction boluses that were charted before a delayed vent row. If the prep rate rises with `charting_delay_min`, that is the mechanism showing itself and the rule is partly deleting the signal it was built to protect. If the rate is flat across strata, the two are independent and D40 is measuring what it claims. **The table is reported whichever way it comes out**, and a rising rate is a limitation on the sub-analysis rather than a reason to withhold it — the primary rates in Tiers A–E do not depend on D40 at all (D42), which is what makes it safe to publish an unflattering answer here.
+
 #### Outputs written by `07`
 
 | File | Contents |
@@ -1078,6 +1139,7 @@ Clipping the out-of-range mass into the edge bins would put the study's most int
 | `timing_offset_by_rank.csv` | B.2 |
 | `timing_by_medication.csv` | B.3 |
 | `timing_offset_distribution.png` | B.4 |
+| `timing_offset_decomposed.png` | B.5 |
 | `reference_capture_rate.csv` | C.1 |
 | `reference_scoring.csv` | C.2 |
 | `specificity_by_lookback.csv` | D.1 |
@@ -1099,6 +1161,11 @@ Clipping the out-of-range mass into the edge bins would put the study's most int
 | `specificity_gap.png` | D summary, all three methods across every stratum, gaps in the title; the `known answer?` column is reproduced in the caption |
 | `episode_funnel.png` | §5.11 CONSORT B as a funnel, episodes / blocks / patients on each step |
 | `charting_delay.png` | §5.10 `charting_delay_min`, drawn from `charting_delay.csv`, log x-axis, p99 marked |
+| `induction_only_comparison.csv` | F.1 |
+| `infusion_prep_sweep.csv` | F.2 |
+| `infusion_prep_by_drug.csv` | F.3 |
+| `prep_by_charting_delay.csv` | F.4 |
+| `infusion_prep_sweep.png` | F.2, rate against threshold, configured value marked |
 
 All go to `output/final_no_phi/` and are subject to the n ≥ 10 minimum cell size in §9 — any row of any table with a cell below 10 is suppressed rather than published. Figures inherit that suppression by construction (D26): each is drawn from the published table rather than recomputed.
 
@@ -1137,6 +1204,7 @@ Extends the existing `config/config.json` schema read by `utils/config.py`.
   "window_hours": 3,
   "episode_gap_hours": 3,
   "pair_gap_hours": 3,
+  "infusion_prep_minutes": 60,
   "stitch_hours": 6,
   "trach_window_hours": 24,
   "min_age": 18,
@@ -1151,6 +1219,7 @@ Everything below `output_directory` is new. `date_start` and `date_end` are igno
 |---|---|---|
 | `window_hours` | `02` | half-width of the t₀ detection window (D4). Written into `index_imv.parquet` as `window_start` / `window_end` and consumed by `03` and `04` as data, never recomputed (D9). Changes a *detection* result for `SED` and `PARA`, and applies identically to both (§6.2). For `PAIR` it does not affect detection at all — only the descriptive `in_window` flag (§6.5). **It is also a cohort parameter now**: D38's eligibility filter runs over the same window, so moving it changes who is in the denominator as well as who is detected |
 | `episode_gap_hours` | `02` | the device-continuity interval (D36). One interval serves both the pre-period test and the sustained test. Changes **how many episodes exist** and where each begins, so it moves every count in the study — widening it merges reintubations into their index episode, narrowing it splits a single ventilation across a charting gap. Separate from `window_hours` for the reason D29 gives about `pair_gap_hours`: two parameters that happen to share a default are not one parameter |
+| `infusion_prep_minutes` | `03`, `04` | how long after an intermittent administration a same-drug infusion `start` may fall for that administration to be maintenance prep (D40). **The only detection parameter measured in minutes, deliberately** — the others are ward-scale intervals in hours, and this one is procedural: a loading bolus precedes its drip by minutes, and naming it in hours would invite a value an order of magnitude too large. Moves `detected_induction_only` only; `detected`, the cohort and every Tier A/B/C/D table are unaffected (D42). Read directly from config by `03` and `04` for the reason D9 gives about `pair_gap_hours` — `01` has no administration set in hand and nothing to precompute — and echoed by both |
 | `pair_gap_hours` | `05` | maximum gap between the two members of a `PAIR` (D29). Read directly by `05` rather than written into an upstream artifact, because unlike `window_hours` there are no bounds to precompute — the scan needs the scalar. The only detection parameter not resolved upstream |
 | `stitch_hours` | `01` | `time_interval` passed to `stitch_encounters` (D15). Changes the analytic unit itself, so every count in the study moves with it |
 | `trach_window_hours` | `01` | the exclusion clock in §5.5 (D18) |
@@ -1168,7 +1237,8 @@ Recorded so these are visible omissions rather than oversights.
 
 **Removed from an earlier draft of this spec:**
 
-- **The continuous-infusion method `INF`** (whiteboard item 3) — propofol / dexmedetomidine / fentanyl infusion starts. Removed per D1a. Consequently `medication_admin_continuous` is not read anywhere in the pipeline, and `infusion_gap_hours` is not a config key.
+- **The continuous-infusion method `INF`** (whiteboard item 3) — propofol / dexmedetomidine / fentanyl infusion starts. Removed per D1a and still removed. **`medication_admin_continuous` is read as of D40**, by `03` and `04`, but only to disqualify intermittent administrations that have already been found — no detection originates in it, and dexmedetomidine is not read at all. `infusion_gap_hours` is still not a config key; the D40 parameter is `infusion_prep_minutes`, which bounds a bolus-to-drip lag rather than an infusion's own extent.
+- **`during_infusion` as a disqualifier.** Measured, published, and declined per D41 on a 58.5% / 58.7% before-versus-after split that leaves it with nothing to discriminate. Retained as a descriptive band only.
 - **The ICD reference** — ICD-10-PCS `0BH17EZ`, `0BH18EZ`, `5A1935Z`, `5A1945Z`, `5A1955Z` and ICD-9 `9604`, `9670`–`9672`. Removed per D1b. CPT 31500 is the sole reference.
 - **`DEV` as a compared method**, with its own notebook and its rows in the agreement matrix. Not deleted — *relocated* per D19 to `02_index_imv.py`, where the device rule qualifies the index event instead of competing to detect it.
 - **The M2 symmetric 2/2 row rule**, with its `B_strict` boundary policy and its `arrived_intubated` / `insufficient_lookback` / `prior_row_imv` / `imv_not_sustained` taxonomy. Replaced by D36 and D37 with a duration test. `arrived_intubated` survives as the non-excluding label `no_lookback` (§5.10); the other three are gone.
