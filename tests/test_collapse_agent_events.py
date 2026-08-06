@@ -22,33 +22,37 @@ Run:  uv run pytest tests/test_collapse_agent_events.py -v
 """
 
 import ast
+import datetime
+import os
+import time
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 NOTEBOOK = Path(__file__).parent.parent / "code" / "05_method_pair.py"
-FUNC_NAME = "collapse_agent_events"
+NOTEBOOK_TREE = ast.parse(NOTEBOOK.read_text())
 
 
-def _load_from_notebook():
-    """Compile just `collapse_agent_events` out of the marimo notebook."""
-    tree = ast.parse(NOTEBOOK.read_text())
+def _load_from_notebook(name, namespace=None):
+    """Compile a single named function out of the marimo notebook."""
     found = [
         node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == FUNC_NAME
+        for node in ast.walk(NOTEBOOK_TREE)
+        if isinstance(node, ast.FunctionDef) and node.name == name
     ]
     assert len(found) == 1, (
-        f"expected exactly one def {FUNC_NAME} in {NOTEBOOK.name}, found {len(found)}"
+        f"expected exactly one def {name} in {NOTEBOOK.name}, found {len(found)}"
     )
     module = ast.Module(body=[found[0]], type_ignores=[])
     ast.fix_missing_locations(module)
-    namespace = {}
+    namespace = dict(namespace or {})
     exec(compile(module, str(NOTEBOOK), "exec"), namespace)
-    return namespace[FUNC_NAME]
+    return namespace[name]
 
 
-collapse_agent_events = _load_from_notebook()
+collapse_agent_events = _load_from_notebook("collapse_agent_events")
+epoch_minutes = _load_from_notebook("epoch_minutes", {"pl": pl})
 
 GAP = 15.0
 
@@ -122,7 +126,9 @@ def test_partition_property(times):
     assert all(event for event in events), "an empty event was emitted"
 
 
-@pytest.mark.parametrize("times", [[], [0], [0, 10, 20], list(range(0, 200, 7))])
+@pytest.mark.parametrize(
+    "times", [[0], [0, 10, 20], [0, 15, 16, 31], list(range(0, 200, 7))]
+)
 def test_every_event_is_within_the_gap(times):
     """The invariant the function's docstring names, checked end to end per event."""
     for event in _call(times):
@@ -145,3 +151,102 @@ def test_grouping_ignores_categories():
 def test_length_mismatch_is_caught():
     with pytest.raises(AssertionError):
         collapse_agent_events([0.0, 1.0], ["x"], GAP)
+
+
+# --------------------------------------------------------------------------------------
+# The timezone trap: `datetime.timestamp()` on a NAIVE datetime reads the OS zone
+# --------------------------------------------------------------------------------------
+#
+# `admin_dttm` is site-naive — US/Eastern wall clock with the tzinfo stripped, produced by
+# `to_site_naive`. Calling `.timestamp()` on such a value does not treat it as the wall
+# clock it is: Python interprets it in the *operating system's* zone and converts. Run on a
+# US/Central machine against US/Eastern data, the fall-back hour is applied a second time
+# and a ten-minute gap measures seventy.
+#
+# Seventy against a fifteen-minute collapse window is not a rounding error, it is a
+# different answer: two doses that are one push of drug split into two agent events, one of
+# which can then pair with a paralytic on its own. And because it depends on the machine's
+# TZ, the same code on two laptops produces two different parquets — the exact failure the
+# §6.2 sort is so careful to prevent.
+
+FALL_BACK = [
+    datetime.datetime(2023, 11, 5, 1, 55),  # US/Eastern wall clock, 5 min before the repeat
+    datetime.datetime(2023, 11, 5, 2, 5),  # ten minutes later on the wall
+]
+
+
+@pytest.fixture
+def central_os_timezone():
+    """Force the OS zone to US/Central — a zone the data is NOT in."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("no time.tzset on this platform")
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Chicago"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if before is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
+
+
+def test_the_trap_is_real(central_os_timezone):
+    """Guards the guard: if this ever stops failing, the tests below prove nothing."""
+    naive = (FALL_BACK[1].timestamp() - FALL_BACK[0].timestamp()) / 60.0
+    assert naive == pytest.approx(70.0), (
+        "naive .timestamp() no longer re-applies the OS fall-back hour, so the regression "
+        "tests below no longer discriminate — re-derive them before trusting them."
+    )
+
+
+def test_epoch_minutes_ignores_the_os_timezone(central_os_timezone):
+    """Ten minutes of wall clock must measure ten minutes, on any machine."""
+    minutes = (
+        pl.DataFrame({"admin_dttm": FALL_BACK})
+        .with_columns(m=epoch_minutes())
+        .get_column("m")
+        .to_list()
+    )
+    assert minutes[1] - minutes[0] == pytest.approx(10.0)
+
+
+def test_collapse_merges_across_a_dst_fall_back(central_os_timezone):
+    """The end-to-end consequence: these two doses are one agent event, not two.
+
+    Fails if `epoch_minutes` is "simplified" back to `x.timestamp() / 60.0` — 70 minutes is
+    past the 15-minute window and the fold splits them.
+    """
+    minutes = (
+        pl.DataFrame({"admin_dttm": FALL_BACK})
+        .with_columns(m=epoch_minutes())
+        .get_column("m")
+        .to_list()
+    )
+    assert collapse_agent_events(minutes, ["fentanyl", "rocuronium"], GAP) == [[0, 1]]
+
+    # ... and the discarded idiom would have split them, which is the whole point.
+    naive = [t.timestamp() / 60.0 for t in FALL_BACK]
+    assert collapse_agent_events(naive, ["fentanyl", "rocuronium"], GAP) == [[0], [1]]
+
+
+def test_notebook_calls_no_naive_timestamp():
+    """No stage of `05` may convert a timestamp by asking the OS what zone it is in.
+
+    Walks the notebook's AST rather than grepping, so the trap named in `epoch_minutes`'
+    docstring does not itself trip the check. Both the collapse and the scan driver used
+    this idiom once; neither may again.
+    """
+    offenders = [
+        node.lineno
+        for node in ast.walk(NOTEBOOK_TREE)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "timestamp"
+    ]
+    assert not offenders, (
+        f"{NOTEBOOK.name} calls .timestamp() at line(s) {offenders}. On a site-naive "
+        "column that reads the OS timezone, not config['timezone'] — use epoch_minutes()."
+    )
