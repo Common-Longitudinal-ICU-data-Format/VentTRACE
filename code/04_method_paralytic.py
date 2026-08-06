@@ -338,21 +338,34 @@ def _(med_window, pl, rank_direction):
     before_ranked = rank_direction(med_window.filter(pl.col("delta_minutes") < 0), "before")
     after_ranked = rank_direction(med_window.filter(pl.col("delta_minutes") > 0), "after")
 
-    # The ladder must widen: rank 1 is nearest by construction, so median |delta| has to be
-    # non-decreasing in rank. A ladder that does not is a ranking bug, and it would show up
-    # in Tier B as a nonsense result rather than as an error.
+    # Rank 1 is defined as nearest to t0, so WITHIN an encounter |delta| must be
+    # non-decreasing in rank. That is the invariant the ranking actually guarantees, and it
+    # is the one asserted.
+    #
+    # The median-by-rank ladder printed below usually widens too, but it is NOT guaranteed
+    # to and must not be asserted on: each rank is a median over a DIFFERENT set of
+    # encounters, so a deep rank reached by only a handful of them can sit anywhere. An
+    # earlier version of this check asserted ladder monotonicity and failed on a correct
+    # ranking the moment rank 4 got down to a single encounter.
     for _name, _df in (("before", before_ranked), ("after", after_ranked)):
-        _ladder = (
+        _viol = (
+            _df.sort(["encounter_block", "rank"])
+            .with_columns(_prev=pl.col("delta_minutes").abs().shift(1).over("encounter_block"))
+            .filter(
+                pl.col("_prev").is_not_null()
+                & (pl.col("delta_minutes").abs() < pl.col("_prev"))
+            )
+        )
+        assert _viol.height == 0, (
+            f"{_name}: {_viol.height:,} rows where rank n sits CLOSER to t0 than rank n-1 "
+            "inside the same encounter. Rank 1 is defined as nearest, so this is a bug in "
+            "the ranking itself."
+        )
+        print(f"{_name} ladder   (per-encounter monotonicity verified)")
+        print(
             _df.group_by("rank")
             .agg(n=pl.len(), median_abs=pl.col("delta_minutes").abs().median())
             .sort("rank")
-        )
-        print(f"{_name} ladder")
-        print(_ladder)
-        _m = _ladder.get_column("median_abs").to_list()
-        assert all(a <= b for a, b in zip(_m, _m[1:])), (
-            f"{_name} ranks do not widen monotonically: {_m}. Rank 1 is defined as nearest "
-            "to t0, so this can only be a bug in the ranking."
         )
     return after_ranked, before_ranked
 
