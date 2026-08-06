@@ -777,10 +777,16 @@ def _(mo):
 
 @app.cell
 def _(pairs, pl):
+    # D43. n_*_admin and *_span_min are the fold's audit trail (how much charting the
+    # collapse folded into this member) and travel with the rest of that member's columns
+    # rather than being appended at the end. Column ORDER here is a contract: 07's schema
+    # gate asserts exact column-list equality against method_PAIR_episode.parquet, so this
+    # list must be mirrored there, not just matched by name.
     INDEX_PAIR_FIELDS = [
-        "pair_id", "first_class", "sed_med_category", "sed_med_dose", "sed_med_dose_unit",
-        "para_med_category", "para_med_dose", "para_med_dose_unit", "gap_minutes",
-        "pair_to_t0_min",
+        "pair_id", "first_class",
+        "sed_med_category", "sed_med_dose", "sed_med_dose_unit", "n_sed_admin", "sed_span_min",
+        "para_med_category", "para_med_dose", "para_med_dose_unit", "n_para_admin", "para_span_min",
+        "gap_minutes", "pair_to_t0_min",
     ]
 
     def _index_pair(prefix, sort_by, descending):
@@ -947,6 +953,11 @@ def _(PARA_CATEGORIES, SED_CATEGORIES, pairs, pl):
           f"{', '.join(sorted(_para_seen))}")
     print(f"  never paired: {', '.join(sorted(set(PARA_CATEGORIES) - _para_seen)) or '—'}")
 
+    # Under D43.6 a member's dose/unit come from the lead agent (alphabetically first in a
+    # combined label), not from every agent folded into the event, so this compares the two
+    # members' LEAD-AGENT units -- still a legitimate "do the two sides of this pair carry
+    # comparable units" signal, it just no longer promises to have inspected every agent
+    # named on either side.
     _mixed = (
         pairs.filter(pl.col("sed_med_dose_unit") != pl.col("para_med_dose_unit")).height
     )
