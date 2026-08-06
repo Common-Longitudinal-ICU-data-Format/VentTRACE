@@ -129,13 +129,19 @@ drift between `02`'s `INDUCTION_CATEGORIES` and a method's `MED_CATEGORIES`).
 ratio of **3.25×**. That is ambient sedative–paralytic pairing measured on the largest
 stratum in the study, and it is the one interpretable specificity number the tier produces.
 
-## 8. Correction
+## 8. Superseded by later work on `05`
 
-The `PAIR` counts in §7 were transcribed one too high — 778 / 496 against the artifact's
-actual 777 / 495, and A.3's 1-method and 2-method cells likewise. Caught while verifying
-that D40 left Tiers A-E untouched, by re-running `05` unchanged and reproducing 495. The
-error was in this record, not in the pipeline: `method_PAIR_episode.parquet` has always
-held 777 / 495. Corrected above.
+The `PAIR` counts in §7 read 778 / 496 and the artifact now holds 777 / 495; A.3's
+1-method and 2-method cells move by one to match. **This record is not wrong — it is
+out of date.** It documents run `2026-08-06T14:03:41`, and `05` changed afterwards:
+`81e09df` collapsed administrations into agent events before the scan, and `634c18f`
+fixed a timezone conversion in the same notebook. Either is sufficient to move a
+pairing by one.
+
+Corrected above so the numbers match the current artifacts, with the cause named. An
+earlier draft of this note attributed the gap to a transcription error and asserted the
+pipeline had always produced 777 — that was wrong, and it was wrong in the dangerous
+direction, because it would have explained away a real behavioural change as a typo.
 
 ## 8. Open
 
