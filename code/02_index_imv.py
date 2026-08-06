@@ -108,6 +108,11 @@ def _(pl, resp_waterfall):
         )
         .with_columns(
             next_is_imv=pl.col("is_imv").shift(-1).over("encounter_block"),
+            # Lookback terms. These are live tests again under D23: t0 is the earliest
+            # RAW charted IMV row, so a waterfalled row before it CAN be imv -- that is
+            # precisely the prior_row_imv class.
+            prev1_is_imv=pl.col("is_imv").shift(1).over("encounter_block"),
+            prev2_is_imv=pl.col("is_imv").shift(2).over("encounter_block"),
         )
     )
 
@@ -117,21 +122,39 @@ def _(pl, resp_waterfall):
 
 
 @app.cell
-def _(pl, resp_seq):
-    # The index row is the FIRST IMV row in the block — the same row whose recorded_dttm
-    # 01 published as t0_dttm. Assert that rather than assume it.
+def _(cohort_index, pl, resp_seq):
+    # t0 is a RAW charted timestamp (D23), so the index row is located by MATCHING that
+    # timestamp in the waterfalled sequence -- not by taking the first waterfalled IMV row,
+    # which may be earlier when the device heuristics fired on a null-device row.
     index_row = (
-        resp_seq.filter(pl.col("is_imv"))
-        .sort(["encounter_block", "row_idx"])
-        .group_by("encounter_block")
-        .agg(
-            index_row_idx=pl.col("row_idx").first(),
-            index_dttm=pl.col("recorded_dttm").first(),
-            index_next_is_imv=pl.col("next_is_imv").first(),
+        cohort_index.select(["encounter_block", "t0_dttm"])
+        .join(
+            resp_seq.select(
+                ["encounter_block", "recorded_dttm", "row_idx", "is_imv",
+                 "next_is_imv", "prev1_is_imv", "prev2_is_imv"]
+            ),
+            left_on=["encounter_block", "t0_dttm"],
+            right_on=["encounter_block", "recorded_dttm"],
+            how="left",
+        )
+        .unique(subset=["encounter_block"])
+        .rename(
+            {
+                "row_idx": "index_row_idx",
+                "is_imv": "index_is_imv",
+                "next_is_imv": "index_next_is_imv",
+                "prev1_is_imv": "index_prev1_is_imv",
+                "prev2_is_imv": "index_prev2_is_imv",
+            }
         )
     )
 
-    print(f"blocks with an IMV row : {index_row.height:,}")
+    _unlocated = index_row.get_column("index_row_idx").null_count()
+    assert _unlocated == 0, (
+        f"{_unlocated:,} encounters have a t0 timestamp with no waterfalled row. The "
+        "waterfall drops all-NA rows, so a charted IMV row should always survive."
+    )
+    print(f"index rows located in the waterfall sequence : {index_row.height:,}")
     return (index_row,)
 
 
@@ -140,15 +163,18 @@ def _(cohort_index, index_row, pl):
     idx = cohort_index.join(index_row, on="encounter_block", how="left")
 
     _n_missing = idx.get_column("index_row_idx").null_count()
-    assert _n_missing == 0, f"{_n_missing} cohort encounters have no IMV row in the waterfall"
+    assert _n_missing == 0, f"{_n_missing} cohort encounters have no row at t0 in the waterfall"
 
-    _n_mismatch = idx.filter(pl.col("index_dttm") != pl.col("t0_dttm")).height
-    assert _n_mismatch == 0, (
-        f"{_n_mismatch} encounters where the first IMV row found here disagrees with "
-        "t0_dttm from 01. The two must be the same row."
+    # The row we located is the charted IMV row, so the waterfall must agree it is imv.
+    # (The converse is not required: the waterfall may call EARLIER rows imv too, and that
+    # is the prior_row_imv class.)
+    _n_not_imv = idx.filter(~pl.col("index_is_imv")).height
+    assert _n_not_imv == 0, (
+        f"{_n_not_imv} encounters where the waterfall does not call the charted IMV row "
+        "imv. The two frames disagree about the row t0 came from."
     )
 
-    print("OK — the index row matches t0_dttm from 01 for every encounter.")
+    print("OK — the t0 row is located in the sequence and the waterfall agrees it is imv.")
     return (idx,)
 
 
@@ -156,16 +182,17 @@ def _(cohort_index, index_row, pl):
 def _(mo):
     mo.md(
         """
-        ### Why the lookback terms are automatic
+        ### The lookback terms are live tests (D23)
 
-        t0 is defined as the **earliest** row with `device_category == 'imv'`, so no row
-        preceding it can be IMV. `not IMV(i-1) and not IMV(i-2)` is therefore satisfied for
-        free whenever those rows exist, and the M2 rule reduces to a **lookback-depth test
-        plus a sustain test**.
+        While t0 was the earliest *waterfalled* IMV row, `not IMV(i-1) and not IMV(i-2)`
+        was satisfied for free — nothing before the earliest IMV row can be IMV — and the
+        `prior_row_imv` class was unreachable.
 
-        This is why an earlier draft's `prior_row_imv` failure class was unreachable and
-        was removed. The assertion below proves the reduction on the actual data rather
-        than leaving it as an argument on paper.
+        Anchoring t0 on the earliest *raw charted* IMV row makes it live again. A
+        waterfalled row before t0 **can** be `imv`, and when it is, it means the device
+        heuristics inferred ventilation from settings before any clinician charted a
+        ventilator. Those encounters are exactly the ones whose t0 would have been dragged
+        earlier under the old anchor; now they are labelled instead of silently shifted.
         """
     )
     return
@@ -173,21 +200,23 @@ def _(mo):
 
 @app.cell
 def _(idx, pl, resp_seq):
-    # Prove it: no row before the index row is IMV, in any block.
-    _violations = (
+    # Measure it rather than assert it away: how many encounters have ANY waterfalled imv
+    # row before the charted t0? Under the old post-waterfall anchor this was 0 by
+    # construction. It is now the population D23 exists to stop mis-anchoring.
+    _blocks_with_prior_imv = (
         resp_seq.join(
             idx.select(["encounter_block", "index_row_idx"]), on="encounter_block", how="inner"
         )
         .filter(pl.col("row_idx") < pl.col("index_row_idx"))
         .filter(pl.col("is_imv"))
-        .height
+        .get_column("encounter_block")
+        .n_unique()
     )
-
-    assert _violations == 0, (
-        f"{_violations} rows before t0 are IMV — t0 is not the earliest IMV row and the "
-        "taxonomy in §5.10 does not hold."
+    print(
+        f"encounters with a waterfalled imv row BEFORE the charted t0 : "
+        f"{_blocks_with_prior_imv:,} ({100 * _blocks_with_prior_imv / idx.height:.1f}%)"
     )
-    print("OK — no IMV row precedes t0 in any block. `prior_row_imv` is unreachable, as designed.")
+    print("  under the old anchor every one of these had its t0 pulled earlier (D23)")
     return
 
 
@@ -208,11 +237,18 @@ def _(mo):
 
 @app.cell
 def _(idx, pl):
+    # B_strict: a term whose row does not exist is false, so the class is assigned by the
+    # first condition that holds, in this order.
     index_imv = idx.with_columns(
         index_class=pl.when(pl.col("index_row_idx") == 0)
         .then(pl.lit("arrived_intubated"))
         .when(pl.col("index_row_idx") == 1)
         .then(pl.lit("insufficient_lookback"))
+        .when(
+            pl.col("index_prev1_is_imv").fill_null(False)
+            | pl.col("index_prev2_is_imv").fill_null(False)
+        )
+        .then(pl.lit("prior_row_imv"))
         .when(pl.col("index_next_is_imv").is_null() | ~pl.col("index_next_is_imv"))
         .then(pl.lit("imv_not_sustained"))
         .otherwise(pl.lit("qualified"))
@@ -274,10 +310,13 @@ def _(index_imv, pl):
     _step2 = _step1.filter(pl.col("index_class") != "insufficient_lookback")
     _n = _add("exclude: insufficient_lookback", _step2, _n, "fewer than two rows precede t0")
 
-    _step3 = _step2.filter(pl.col("index_class") != "imv_not_sustained")
-    _n = _add("exclude: imv_not_sustained", _step3, _n, "row i+1 absent or non-IMV")
+    _step3 = _step2.filter(pl.col("index_class") != "prior_row_imv")
+    _n = _add("exclude: prior_row_imv", _step3, _n, "waterfall says imv before the charted row")
 
-    _add("INDEX IMV SET", _step3, None, "N**")
+    _step4 = _step3.filter(pl.col("index_class") != "imv_not_sustained")
+    _n = _add("exclude: imv_not_sustained", _step4, _n, "row i+1 absent or non-IMV")
+
+    _add("INDEX IMV SET", _step4, None, "N**")
 
     consort_index_df = pl.DataFrame(consort_rows)
     return (consort_index_df,)

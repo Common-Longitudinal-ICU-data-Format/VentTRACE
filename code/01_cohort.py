@@ -736,19 +736,25 @@ def _(
     # non-scaffold waterfall timestamp must exist in the raw table. If the two frames were
     # converted by different paths — see to_site_naive — this subset relation breaks
     # immediately, which is exactly how the one-hour pytz/LMT bug was caught.
-    _wf_real = set(
+    # Compared per (hospitalization_id, recorded_dttm), not on a pooled set of timestamps:
+    # a pooled comparison passes as long as SOME hospitalization happens to have that
+    # instant, which would let a row orphaned within one encounter slip through.
+    _wf_real = (
         resp_waterfall.filter(pl.col("recorded_dttm").dt.second() != 59)
-        .get_column("recorded_dttm")
-        .to_list()
+        .select(["hospitalization_id", "recorded_dttm"])
+        .unique()
     )
-    _raw_ts = set(resp_raw.get_column("recorded_dttm").to_list())
-    _orphans = _wf_real - _raw_ts
-    assert not _orphans, (
-        f"{len(_orphans):,} waterfalled timestamps have no raw counterpart "
-        f"(e.g. {sorted(_orphans)[:3]}). The raw and waterfall frames are on different "
-        "time bases — check that both went through to_site_naive."
+    _orphans = _wf_real.join(
+        resp_raw.select(["hospitalization_id", "recorded_dttm"]).unique(),
+        on=["hospitalization_id", "recorded_dttm"],
+        how="anti",
     )
-    print(f"timestamp alignment OK: {len(_wf_real):,} non-scaffold rows all match raw")
+    assert _orphans.height == 0, (
+        f"{_orphans.height:,} waterfalled rows have no raw counterpart in their own "
+        f"hospitalization (e.g. {_orphans.head(3).to_dicts()}). The raw and waterfall "
+        "frames are on different time bases — check that both went through to_site_naive."
+    )
+    print(f"timestamp alignment OK: {_wf_real.height:,} non-scaffold rows all match raw")
 
     print(f"\nwaterfalled rows : {resp_waterfall.height:,}")
     print("\ndevice_category after the waterfall (lower case throughout):")
@@ -757,10 +763,17 @@ def _(
 
 
 @app.cell
-def _(WINDOW_HOURS, cohort, pl, resp_waterfall):
-    # t0 = earliest waterfalled IMV row per encounter_block.
+def _(WINDOW_HOURS, cohort, pl, resp_raw):
+    # t0 = earliest RAW charted IMV row per encounter_block (D23).
+    #
+    # Not the waterfalled one. Measured on MIMIC, the waterfall moved t0 earlier on 24.1%
+    # of encounters -- always earlier, never later -- by relabelling a row that had
+    # ventilator settings but a null device_category. That inference may be clinically
+    # right, but this study treats t0 as observed fact and centres every +/-3h medication
+    # window on it. Anchoring here also means t0 uses the same rows and the same
+    # comparison as the raw-IMV inclusion criterion above.
     t0 = (
-        resp_waterfall.filter(pl.col("device_category") == "imv")
+        resp_raw.filter(pl.col("device_category") == "imv")
         .group_by("encounter_block")
         .agg(t0_dttm=pl.col("recorded_dttm").min())
     )
@@ -782,11 +795,12 @@ def _(WINDOW_HOURS, cohort, pl, resp_waterfall):
 
 @app.cell
 def _(n_missing_t0):
-    # Every cohort encounter has >=1 raw IMV row by construction, so a null t0 means the
-    # waterfall dropped or re-labelled that row. That is a real defect, not a data quirk.
+    # Every cohort encounter has >=1 raw IMV row by construction (that is the inclusion
+    # criterion), and t0 now reads the same table -- so a null t0 is impossible unless the
+    # cohort filter and this aggregation disagree about what an IMV row is.
     assert n_missing_t0 == 0, (
-        f"{n_missing_t0} cohort encounters have no waterfalled IMV row despite passing "
-        "the raw-IMV inclusion. Investigate before trusting any downstream result."
+        f"{n_missing_t0} cohort encounters have no raw IMV row despite passing the "
+        "raw-IMV inclusion. The two comparisons have diverged."
     )
     print("OK — every cohort encounter has a resolved t0.")
     return
@@ -806,18 +820,24 @@ def _(mo):
 
 @app.cell
 def _(cohort_index, pl, resp_raw, resp_waterfall):
-    # QC 1 — waterfall t0 vs raw t0. bfill=False makes a negative delta very unlikely, but
-    # the device heuristics and the hourly HH:59:59 scaffold run regardless of bfill.
-    _t0_raw = (
-        resp_raw.filter(pl.col("device_category") == "imv")
+    # QC 1 — how far the waterfall's device heuristics disagree with charting.
+    #
+    # No longer a hazard check: t0 is the raw charted row (D23), so this delta cannot move
+    # a window. It is the measurement D23 was decided on, kept so a site can see whether
+    # its own heuristic disagreement resembles MIMIC's before inheriting the decision.
+    # A POSITIVE delta is impossible by construction -- forward-fill only carries a device
+    # later in time and nothing deletes the charted row -- so all disagreement is the
+    # heuristic labelling some earlier null-device row as imv.
+    _t0_wf = (
+        resp_waterfall.filter(pl.col("device_category") == "imv")
         .group_by("encounter_block")
-        .agg(t0_raw_dttm=pl.col("recorded_dttm").min())
+        .agg(t0_wf_dttm=pl.col("recorded_dttm").min())
     )
 
     qc_t0 = cohort_index.select(["encounter_block", "t0_dttm"]).join(
-        _t0_raw, on="encounter_block", how="left"
+        _t0_wf, on="encounter_block", how="left"
     ).with_columns(
-        delta_minutes=(pl.col("t0_dttm") - pl.col("t0_raw_dttm")).dt.total_minutes()
+        delta_minutes=(pl.col("t0_wf_dttm") - pl.col("t0_dttm")).dt.total_minutes()
     )
 
     qc_delta_median = qc_t0.get_column("delta_minutes").median()
@@ -826,11 +846,15 @@ def _(cohort_index, pl, resp_raw, resp_waterfall):
     qc_pct_nonzero = 100.0 * qc_t0.filter(pl.col("delta_minutes") != 0).height / qc_t0.height
     qc_pct_negative = 100.0 * qc_t0.filter(pl.col("delta_minutes") < 0).height / qc_t0.height
 
-    print("QC 1 — waterfall t0 minus raw t0, minutes")
+    print("QC 1 — waterfall t0 minus raw t0, minutes (informational; t0 is raw per D23)")
     print(f"  median      : {qc_delta_median}")
     print(f"  IQR         : {qc_delta_q1} .. {qc_delta_q3}")
     print(f"  % nonzero   : {qc_pct_nonzero:.1f}")
-    print(f"  % NEGATIVE  : {qc_pct_negative:.1f}   <- must be ~0; negative means t0 moved earlier")
+    print(f"  % NEGATIVE  : {qc_pct_negative:.1f}   <- heuristic says ventilated before charting")
+    assert qc_pct_nonzero - qc_pct_negative < 0.01, (
+        "a POSITIVE waterfall-minus-raw delta appeared, which should be impossible: "
+        "forward-fill cannot move a device earlier and nothing deletes the charted row."
+    )
 
     # QC 2 — how much stitching actually did.
     qc_blocks_per_encounter = (

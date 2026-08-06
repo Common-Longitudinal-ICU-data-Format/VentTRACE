@@ -65,6 +65,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | D20 | **The excluded encounters are retained and analysed, not discarded.** `02` writes a classification for every cohort encounter; §8 runs the method rates over the excluded strata as a specificity probe. | The arrived-intubated group is the sharpest available test of whether `SED` is detecting intubation or ICU sedation: these patients were intubated before arrival, so any `SED` firing in the ±3 h window around their first charted IMV row is by construction *not* an induction. Throwing the group away would discard the one stratum with a known answer. |
 | D21 | **Every category column is lower-cased on load, and every literal compared against one is written in lower case.** Applies to `device_category`, `location_category`, `med_category`, `mar_action_category`, `mode_category`, `admission_type_category`, `discharge_category` — every `*_category` column the pipeline touches. | Case is the one vocabulary difference that fails *silently*. A mismatched category value does not raise; it matches zero rows, and a filter matching zero rows looks exactly like a site where the thing never happens. The waterfall already lower-cases four columns (`waterfall.py:147-149`), so the pipeline has two casings in it whether or not we plan for them. Normalising **down** rather than up means the library's own transformation is a no-op instead of something to undo, and there is exactly one rule to remember: lower-case, always. |
 | D22 | **Load-time category filters pass every casing variant**, not just the mCIDE spelling. `filters={'device_category': ['IMV', 'imv', 'Imv']}`. | D21 normalises *after* load, but a `from_file` filter runs *before* anything we control — it is applied to raw site data as charted. A site that writes `imv` would be filtered to nothing and silently produce an empty cohort. Passing the variants closes the gap at the only point in the pipeline where our own lower-casing cannot reach, and §5.2 adds a cross-check that proves the filter missed nothing. |
+| D23 | **t₀ anchors on the earliest *raw charted* IMV row, not the earliest waterfalled one.** The waterfall is still produced and still supplies the transition sequence §5.9 evaluates — it just no longer decides *when* the intubation was. | Measured on MIMIC: **24.1% of cohort encounters** had a waterfalled t₀ *earlier* than the first charted IMV row (median −17 min, tail to −7.6 h), and 0% had it later. All 8,192 sat on a pre-existing row with `device_category` null and ventilator settings present, which `waterfall.py:199-215` relabels to `imv`. That inference may well be clinically right, but the study treats t₀ as observed fact and centres every ±3 h medication window on it. Anchoring on the charted row also makes t₀ consistent with the inclusion criterion that admitted the encounter (§5.5, raw IMV), so one definition of "IMV row" now serves both. Supersedes the post-waterfall anchor implied by D5; D5 otherwise stands — pre-processing is still fixed and single-policy. |
 
 ------------------------------------------------------------------------
 
@@ -213,10 +214,14 @@ The `trach_window_hours` clock runs from the **stitched block's** `admission_dtt
 ### 5.6 Waterfall and t₀
 
 1.  Subset `respiratory_support` to all hospitalizations listed in the cohort's `list_hospitalization_id`.
-2.  Run `process_resp_support_waterfall(..., bfill=False)`.
-3.  Map rows to `encounter_block` via `list_hospitalization_id`, then order by `recorded_dttm` **within the block**.
-4.  **t₀ = earliest `recorded_dttm` where `device_category == 'imv'`**, per `encounter_block`.
+2.  **t₀ = earliest `recorded_dttm` where `device_category == 'imv'` on the RAW table**, per `encounter_block` (D23).
+3.  Run `process_resp_support_waterfall(..., bfill=False)` on the same rows.
+4.  Map waterfalled rows to `encounter_block` via `list_hospitalization_id`, then order by `recorded_dttm` **within the block**.
 5.  `window_start = t₀ − window_hours`, `window_end = t₀ + window_hours`.
+
+**t₀ and the transition sequence come from different frames, deliberately.** t₀ is a charted fact and comes from the raw table — the same rows and the same comparison that admitted the encounter in §5.5, so one definition of "IMV row" serves both. The waterfall still runs and still supplies the ordered device sequence §5.9 evaluates, which is what it is genuinely good at: it makes the record continuous so a transition can be read off it. What it no longer does is decide *when* the intubation was.
+
+> **What this cost.** Under the earlier post-waterfall anchor, 24.1% of MIMIC encounters had t₀ set by `waterfall.py:199-215` relabelling a null-device row to `imv`, always earlier than the charted row, median −17 min with a tail past −7 h. Every one of those 8,192 encounters would have had its ±3 h medication window centred on an inference. See D23.
 
 Step 3 is what makes stitching effective: the waterfall runs per `hospitalization_id`, but the transition sequence §5.9 evaluates is assembled across the whole block in time order.
 
@@ -232,7 +237,8 @@ Step 3 is what makes stitching effective: the waterfall runs per `hospitalizatio
 
 | Stat | Purpose |
 |---|---|
-| `Δ = waterfall_t₀ − raw_t₀` — median, IQR, % nonzero | D6 makes a negative Δ very unlikely, but the device/mode heuristics and the hourly `HH:59:59` scaffold run regardless of `bfill`. A negative Δ in any meaningful fraction invalidates the offset distributions and must be resolved before results are read. |
+| `Δ = waterfall_t₀ − raw_t₀` — median, IQR, % negative | No longer a hazard check — D23 anchors on `raw_t₀`, so Δ cannot move a window. It is retained as the **direct measurement of how far the device heuristics disagree with charting**, and it is the quantity D23 was decided on. Δ > 0 is impossible by construction: forward-fill can only carry a device later in time and nothing deletes the charted row, so any nonzero Δ is the heuristic relabelling a null-device row earlier. A site with a Δ profile very different from MIMIC's 24.1% should revisit D23 rather than inherit it. |
+| Timestamp alignment — every non-scaffold waterfalled row exists in the raw table, per hospitalization | The waterfall adds rows only at `HH:59:59`; it never invents a timestamp elsewhere. If the raw and waterfalled frames are converted from clifpy by different paths this subset relation breaks immediately, which is how the pytz/LMT one-hour bug was caught (§5.13). |
 | Blocks per encounter — distribution of `len(list_hospitalization_id)` | Shows how much stitching actually did. If nearly every block is a single hospitalization, stitching is not the mechanism it was added for and that should be known before interpreting §8. |
 | % of blocks whose t₀ falls in a *different* `hospitalization_id` than the block's first | The direct measure of the artifact §5.1 exists to remove. |
 
@@ -275,13 +281,18 @@ Every cohort encounter gets exactly one `index_class`, assigned in this order:
 | `qualified` | the rule above fires | t₀ is a documented, sustained non-IMV → IMV transition |
 | `arrived_intubated` | t₀ is the block's **first** respiratory row | no pre-period exists; ventilation predates the record |
 | `insufficient_lookback` | exactly one respiratory row precedes t₀ | a pre-period exists but is too thin for a 2-row rule |
+| `prior_row_imv` | row `i-1` or `i-2` is IMV **in the waterfall** | the settings say ventilated before the device was ever charted — t₀ is not the transition |
 | `imv_not_sustained` | row `i+1` is absent or non-IMV | the IMV is a single isolated row — a charting blip, or the encounter ends at t₀ |
 
-The first two are **observability** failures: the data needed to see a transition is not there. The third is a **judgment** failure under M2: the data is there and the rule declines it.
+The first two are **observability** failures: the data needed to see a transition is not there. The last two are **judgment** failures under M2: the data is there and the rule declines it.
 
-> **`prior_row_imv` is not in this taxonomy, and cannot be.** An earlier draft listed it as a fourth failure — row `i-1` or `i-2` exists but is IMV. That condition is unreachable by construction: t₀ is defined as the *earliest* row with `device_category == 'imv'` (§5.6), so no row preceding it can be IMV. With t₀ pinned this way, `¬IMV(i-1) ∧ ¬IMV(i-2)` is satisfied automatically whenever those rows exist, and the M2 rule reduces to a lookback-depth test plus a sustain test. The taxonomy above is therefore exhaustive: `qualified` plus three failures is a complete partition of the cohort.
+> **`prior_row_imv` exists only because of D23, and it is the interesting class.** While t₀ was the earliest *waterfalled* IMV row, this condition was unreachable by construction — nothing before the earliest IMV row can be IMV — and an earlier draft removed it as dead. Anchoring on the earliest *raw charted* row makes it live again, and what it now detects is precise: **the encounters where the waterfall's device heuristics say "ventilated" before any clinician charted a ventilator.**
+>
+> That is the same population D23 was decided on, seen from the other side. Under the old anchor those 24.1% silently became t₀ and dragged their medication window with them. Under D23 they keep an honest t₀ and are *labelled* — the disagreement between inference and charting becomes a reportable stratum instead of an invisible shift.
+>
+> The taxonomy is a complete partition: `qualified` plus four failure classes, assigned in the order listed.
 
-This reduction is also why `DEV` cannot be a peer method (D19). Once t₀ is fixed, the rule has no freedom left to disagree about *when* the intubation was — only to report whether the surrounding rows exist.
+None of this makes `DEV` a peer method (D19). Once t₀ is fixed by charting, the rule still has no freedom to disagree about *when* the intubation was — only to report what the surrounding rows look like.
 
 ### 5.11 CONSORT B — index
 
@@ -296,7 +307,10 @@ The second CONSORT, and a headline result rather than a preprocessing note.
     ├─ EXCLUDE insufficient_lookback                  −m₂
     │    fewer than two rows precede t₀
     │
-    ├─ EXCLUDE imv_not_sustained                      −m₃
+    ├─ EXCLUDE prior_row_imv                          −m₃
+    │    waterfall says IMV before the charted row
+    │
+    ├─ EXCLUDE imv_not_sustained                      −m₄
     │    row i+1 absent or non-IMV
     │
     └─ INDEX IMV SET                                  N**
@@ -741,7 +755,8 @@ Recorded so these are visible omissions rather than oversights.
 
 - **The continuous-infusion method `INF`** (whiteboard item 3) — propofol / dexmedetomidine / fentanyl infusion starts. Removed per D1a. Consequently `medication_admin_continuous` is not read anywhere in the pipeline, and `infusion_gap_hours` is not a config key.
 - **The ICD reference** — ICD-10-PCS `0BH17EZ`, `0BH18EZ`, `5A1935Z`, `5A1945Z`, `5A1955Z` and ICD-9 `9604`, `9670`–`9672`. Removed per D1b. CPT 31500 is the sole reference.
-- **`DEV` as a compared method**, with its own notebook and its rows in the agreement matrix. Not deleted — *relocated* per D19 to `02_index_imv.py`, where the same M2 rule now qualifies the index event instead of competing to detect it. The `prior_row_imv` non-detection reason from that draft was removed outright as unreachable (§5.10).
+- **`DEV` as a compared method**, with its own notebook and its rows in the agreement matrix. Not deleted — *relocated* per D19 to `02_index_imv.py`, where the same M2 rule now qualifies the index event instead of competing to detect it.
+- **The post-waterfall t₀ anchor.** Replaced by D23 after measurement showed it moved t₀ on 24.1% of encounters. The `prior_row_imv` class, removed from an intermediate draft as unreachable under that anchor, is **reinstated** by D23 and is now the stratum that labels exactly those encounters (§5.10).
 
 **Out of scope from the start:**
 
