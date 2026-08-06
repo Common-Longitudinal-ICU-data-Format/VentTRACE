@@ -54,15 +54,22 @@ Copied from the existing spec. Every task's requirements implicitly include this
 
 Verified by simulation before the plan was written. An implementer whose run disagrees has a bug.
 
+> **Corrected after Task 2.** The simulation read the medication parquet directly with polars
+> `convert_time_zone`; the pipeline loads through clifpy and `to_site_naive`, which is the only
+> correct conversion here (§5.13, pinned by `tests/test_clifpy_tz_boundary.py`). The two differ by
+> one hour, so rows straddling a DST transition shift relative to each other. Every pair-level
+> number was unaffected (a uniform shift cannot change a delta) and matched exactly; only the event
+> census moved, by 4 in 276,450. The numbers below are the notebook's, which are authoritative.
+
 | Quantity | Before | After |
 |---|---|---|
 | bridge rows | 43,006 | **34,419** |
 | scan input rows (administrations) | 716,382 | 370,687 |
-| **agent events** entering the scan | — | **276,446** (SED 274,329 / PARA 2,117) |
+| **agent events** entering the scan | — | **276,450** (SED 274,333 / PARA 2,117) |
 | max event span | — | **exactly 15.0 min** |
 | max `n_admin` per event | — | 11 (SED), 3 (PARA) |
 | merged events (`n_admin > 1`) | — | 74,449 |
-| multi-agent events (label contains `+`) | — | 58,491 |
+| multi-agent events (label contains `+`) | — | 58,493 |
 | **pairs emitted** | 4,110 | **1,535** |
 | blocks with ≥1 pair | 1,216 | 1,215 |
 | episodes with ≥1 pair | 1,273 | 1,271 |
@@ -72,7 +79,7 @@ Verified by simulation before the plan was written. An implementer whose run dis
 | `para_med_category` distinct values | 2 | 2 (`rocuronium` 1,127, `vecuronium` 408) |
 | E.3 combination cells | 6 | **19** (14 at n ≥ 10) |
 
-Most common merged labels: `fentanyl+propofol` (29,029 events), `fentanyl+midazolam` (26,900), `midazolam+propofol` (1,262), `fentanyl+midazolam+propofol` (1,103). No paralytic combination reaches a pair at MIMIC.
+Most common merged labels: `fentanyl+propofol` (29,030 events), `fentanyl+midazolam` (26,901), `midazolam+propofol` (1,262), `fentanyl+midazolam+propofol` (1,103). No paralytic combination reaches a pair at MIMIC.
 
 ---
 
