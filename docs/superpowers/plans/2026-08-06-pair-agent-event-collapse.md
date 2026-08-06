@@ -22,6 +22,12 @@ Two separate causes were measured (diagnostics in the session scratchpad, `dx1`�
 
 ### Decisions taken (record these as **D43** in the spec)
 
+> **Numbering.** A concurrent branch (`infusion-prep-reclassification`, commit `007da19`)
+> claimed D40, D41 and D42 in the same spec's §2 table, for the infusion-prep
+> reclassification of post-t₀ sedatives. That work is already committed to the spec;
+> this plan's decisions were only ever in this document, so they renumber to **D43**
+> (the collapse, six sub-decisions) and **D44** (timezone always from config).
+
 | # | Decision | Rationale |
 |---|---|---|
 | D43.1 | Bridge in `05` is de-duplicated with `.unique()` | Each hospitalization belongs to exactly one block (verified: 0 hospitalizations appear in >1 block), so the map is 1:1 and duplicate rows are meaningless. |
@@ -74,7 +80,7 @@ Verified by simulation before the plan was written. An implementer whose run dis
 | multi-agent events (label contains `+`) | — | 58,493 |
 | **pairs emitted** | 4,110 | **1,535** |
 | blocks with ≥1 pair | 1,216 | 1,215 |
-| episodes with ≥1 pair | 1,273 | 1,271 |
+| episodes with ≥1 pair | 1,273 | 1,272 |
 | episodes with exactly 1 pair | 780 (61%) | **1,075 (84.5%)** |
 | max pairs per block | 52 | 9 |
 | `sed_med_category` distinct values | 4 | **12** |
