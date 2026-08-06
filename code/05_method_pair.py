@@ -133,20 +133,37 @@ def _(index_imv, pl):
     # notebook may name a hospitalization. It carries t0 and the window bounds, but note
     # that neither filters anything here: they are joined so the pair table can report
     # `pair_to_t0_min` and `in_window` after the scan has already run (D27).
-    bridge = (
+    _bridge_exploded = (
         index_imv.select(
             ["encounter_block", "list_hospitalization_id"]
         )
         .explode("list_hospitalization_id")
         .rename({"list_hospitalization_id": "hospitalization_id"})
     )
-    bridge_hosp_ids = bridge.get_column("hospitalization_id").unique().to_list()
+    _bridge_rows_before = _bridge_exploded.height
 
     # Block-level, deliberately -- and this is the ONE bridge in the pipeline that must
     # not carry intubation_episode_id. The scan is free-running over the whole block (D27),
     # so fanning the administrations out to episodes here would run the forward pass once
     # per episode and break D28's consumption across the boundary. Episodes rejoin below,
     # after the pairs exist (D39).
+    #
+    # Dropping the episode key is exactly why this must be de-duplicated: index_imv is at
+    # episode grain (D35), so exploding `list_hospitalization_id` yields one row per
+    # (episode, hospitalization), not one per (block, hospitalization). Only the block
+    # mapping is wanted here, so collapse back to it with `.unique()`. Skipping this step
+    # would carry every hospitalization once per episode in its block into the inner join
+    # below, replicating each medication administration that many times and pairing clones
+    # with clones in the scan.
+    bridge = _bridge_exploded.unique()
+    bridge_hosp_ids = bridge.get_column("hospitalization_id").unique().to_list()
+
+    assert bridge.get_column("hospitalization_id").is_duplicated().sum() == 0, (
+        "a hospitalization maps to more than one encounter_block; the inner join below "
+        "would replicate every administration and the scan would pair clones with clones."
+    )
+
+    print(f"bridge rows        : {_bridge_rows_before:,} -> {bridge.height:,}   (exploded -> deduped)")
     print(f"encounter blocks   : {bridge.get_column('encounter_block').n_unique():,}")
     print(f"hospitalization ids: {len(bridge_hosp_ids):,}")
     return bridge, bridge_hosp_ids
