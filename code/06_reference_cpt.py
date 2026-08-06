@@ -114,9 +114,13 @@ def _(PHI_DIR, pl):
 @app.cell
 def _(index_imv, pl):
     # The same explode-and-drop bridge the methods use (§7): a code billed under ANY
-    # hospitalization in the block counts for the encounter, because the block is the unit.
+    # hospitalization in the block counts, because the block is what CPT can be resolved to.
+    #
+    # Block-level, and it stays that way. CPT carries no usable timing (D1), so a code
+    # cannot be attributed to one episode of a block rather than another. The fan-out to
+    # episodes below is bookkeeping, not a claim.
     bridge = (
-        index_imv.select(["encounter_block", "list_hospitalization_id", "t0_dttm"])
+        index_imv.select(["encounter_block", "list_hospitalization_id"])
         .explode("list_hospitalization_id")
         .rename({"list_hospitalization_id": "hospitalization_id"})
     )
@@ -173,7 +177,7 @@ def _(REFERENCE_CODE, REFERENCE_FORMAT, bridge, pl, proc):
     )
 
     print(f"{REFERENCE_CODE} rows inside the cohort : {hits.height:,}")
-    print(f"distinct encounters carrying it        : {hits.get_column('encounter_block').n_unique():,}")
+    print(f"distinct blocks carrying it            : {hits.get_column('encounter_block').n_unique():,}")
     return (hits,)
 
 
@@ -187,27 +191,39 @@ def _(mo):
         from t0 tells you plainly that the billing timestamp is an administrative date
         rather than a clinical one. It is not used for anything: no window, no
         containment test, no tie-break. Presence is the whole signal.
+
+        **Anchored on the block's earliest t0**, because CPT resolves to the block and not
+        to an episode (D1 — the code carries no usable timing). A block with two
+        intubations has two t0s and the code cannot say which it was billed for; picking
+        the earliest is a stated convention rather than an inference, and it is safe here
+        precisely because nothing downstream consumes this number.
         """
     )
     return
 
 
 @app.cell
-def _(hits, pl):
-    if hits.height > 0:
-        _lag = hits.with_columns(
+def _(hits, index_imv, pl):
+    _block_t0 = (
+        index_imv.filter(pl.col("index_qualified"))
+        .group_by("encounter_block")
+        .agg(block_first_t0=pl.col("t0_dttm").min())
+    )
+    _h = hits.join(_block_t0, on="encounter_block", how="inner")
+    if _h.height > 0:
+        _lag = _h.with_columns(
             lag_days=(
-                (pl.col("procedure_billed_dttm") - pl.col("t0_dttm")).dt.total_seconds()
+                (pl.col("procedure_billed_dttm") - pl.col("block_first_t0")).dt.total_seconds()
                 / 86400.0
             ).round(2)
         ).get_column("lag_days")
         print(
-            f"billed_dttm - t0, days   median {_lag.median():+.2f}   "
+            f"billed_dttm - block's first t0, days   median {_lag.median():+.2f}   "
             f"IQR {_lag.quantile(0.25):+.2f} .. {_lag.quantile(0.75):+.2f}   "
             f"min {_lag.min():+.2f}   max {_lag.max():+.2f}"
         )
     else:
-        print("no coded rows in the cohort — nothing to describe")
+        print("no coded rows in a qualified block — nothing to describe")
     return
 
 
@@ -215,20 +231,25 @@ def _(hits, pl):
 def _(COHORT_RUN_ID, PHI_DIR, REFERENCE_ID, hits, index_imv, pl):
     _coded = hits.select("encounter_block").unique().with_columns(cpt_present=True)
 
+    # A code billed anywhere in the block marks EVERY episode of that block. CPT has no
+    # usable timing (D1), so it cannot distinguish a block's first intubation from its
+    # reintubation, and Tier C therefore reports at block level. Fanning out here keeps the
+    # artifact joinable on the study key without implying the code named an episode.
     reference_cpt = (
         index_imv.select(
-            ["encounter_block", "intubation_episode_id", "cohort_run_id", "index_class",
-             "index_qualified"]
+            ["intubation_episode_id", "encounter_block", "patient_id", "ep_num",
+             "cohort_run_id", "index_class", "index_qualified"]
         )
         .join(_coded, on="encounter_block", how="left")
         .with_columns(
             reference_id=pl.lit(REFERENCE_ID),
             cpt_present=pl.col("cpt_present").fill_null(False),
         )
-        .sort("encounter_block")
+        .sort(["encounter_block", "ep_num"])
     )
 
-    assert reference_cpt.height == index_imv.height, "one row per cohort encounter required"
+    assert reference_cpt.height == index_imv.height, "one row per candidate episode required"
+    assert reference_cpt.get_column("intubation_episode_id").is_unique().all()
     assert reference_cpt.get_column("cohort_run_id").unique().to_list() == [COHORT_RUN_ID]
 
     reference_cpt.write_parquet(PHI_DIR / "reference_cpt.parquet")
@@ -279,12 +300,13 @@ def _(COHORT_RUN_ID, REFERENCE_CODE, REFERENCE_ID, SHARE_DIR, pl, reference_cpt)
     )
     reference_capture.write_csv(SHARE_DIR / "reference_capture_rate.csv")
 
-    print(f"index set (N**)          : {_n_qual:,}")
+    print(f"index set (N**), episodes: {_n_qual:,}")
     print(f"carrying {REFERENCE_CODE}            : {_n_coded:,}")
+    print(f"  distinct blocks        : {_qual.filter(pl.col('cpt_present')).get_column('encounter_block').n_unique():,}")
     print(f"capture rate             : {_rate:.4f}")
     if 0 < _n_coded < MIN_CELL:
         print(
-            f"\nSUPPRESSED — fewer than {MIN_CELL} encounters carry the code, so the count is "
+            f"\nSUPPRESSED — fewer than {MIN_CELL} episodes carry the code, so the count is "
             "withheld from the published table under the minimum cell size rule."
         )
     if _rate < CAPTURE_FLOOR:
