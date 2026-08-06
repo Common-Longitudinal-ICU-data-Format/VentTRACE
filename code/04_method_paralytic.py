@@ -130,6 +130,7 @@ def _(index_imv, pl):
     bridge = (
         index_imv.select(
             [
+                "intubation_episode_id",
                 "encounter_block",
                 "list_hospitalization_id",
                 "t0_dttm",
@@ -143,6 +144,12 @@ def _(index_imv, pl):
 
     bridge_hosp_ids = bridge.get_column("hospitalization_id").unique().to_list()
 
+    # A block with several episodes (D35) appears on several bridge rows, so one
+    # administration fans out to every episode of its block and the window filter then
+    # decides which episodes it actually belongs to. The fan-out is intended: an
+    # administration in the overlap of two windows genuinely belongs to both. 02 asserts
+    # that overlap stays rare -- one pair in 7,777 at MIMIC.
+    print(f"episodes           : {bridge.get_column('intubation_episode_id').n_unique():,}")
     print(f"encounter blocks   : {bridge.get_column('encounter_block').n_unique():,}")
     print(f"hospitalization ids: {len(bridge_hosp_ids):,}")
     return bridge, bridge_hosp_ids
@@ -298,7 +305,7 @@ def _(mo):
 @app.cell
 def _(pl):
     def rank_direction(df, direction):
-        """Dedup to one row per (encounter_block, med_category), then rank by proximity.
+        """Dedup to one row per (episode, med_category), then rank by proximity.
 
         "LAST before" and "FIRST after" are two statements of one rule: keep the
         administration nearest t0. Before t0 every delta is negative, so nearest is the
@@ -311,8 +318,8 @@ def _(pl):
             df.with_columns(abs_delta=pl.col("delta_minutes").abs())
             # sort first so `arg_min` resolves an exact |delta| tie -- the same agent
             # charted twice at one instant -- deterministically rather than by join order
-            .sort(["encounter_block", "med_category", "abs_delta", "med_dose"])
-            .group_by(["encounter_block", "med_category"], maintain_order=True)
+            .sort(["intubation_episode_id", "med_category", "abs_delta", "med_dose"])
+            .group_by(["intubation_episode_id", "med_category"], maintain_order=True)
             .agg(
                 med_dose=pl.col("med_dose").get(_nearest),
                 med_dose_unit=pl.col("med_dose_unit").get(_nearest),
@@ -322,9 +329,9 @@ def _(pl):
             )
             # med_category breaks a tie between two DIFFERENT agents sharing an admin_dttm,
             # alphabetically, so the rank ladder is byte-identical across runs
-            .sort(["encounter_block", "abs_delta", "med_category"])
+            .sort(["intubation_episode_id", "abs_delta", "med_category"])
             .with_columns(
-                rank=pl.int_range(1, pl.len() + 1).over("encounter_block"),
+                rank=pl.int_range(1, pl.len() + 1).over("intubation_episode_id"),
                 direction=pl.lit(direction),
             )
             .drop("abs_delta")
@@ -338,19 +345,21 @@ def _(med_window, pl, rank_direction):
     before_ranked = rank_direction(med_window.filter(pl.col("delta_minutes") < 0), "before")
     after_ranked = rank_direction(med_window.filter(pl.col("delta_minutes") > 0), "after")
 
-    # Rank 1 is defined as nearest to t0, so WITHIN an encounter |delta| must be
+    # Rank 1 is defined as nearest to t0, so WITHIN an episode |delta| must be
     # non-decreasing in rank. That is the invariant the ranking actually guarantees, and it
     # is the one asserted.
     #
     # The median-by-rank ladder printed below usually widens too, but it is NOT guaranteed
     # to and must not be asserted on: each rank is a median over a DIFFERENT set of
-    # encounters, so a deep rank reached by only a handful of them can sit anywhere. An
+    # episodes, so a deep rank reached by only a handful of them can sit anywhere. An
     # earlier version of this check asserted ladder monotonicity and failed on a correct
-    # ranking the moment rank 4 got down to a single encounter.
+    # ranking the moment rank 4 got down to a single episode.
     for _name, _df in (("before", before_ranked), ("after", after_ranked)):
         _viol = (
-            _df.sort(["encounter_block", "rank"])
-            .with_columns(_prev=pl.col("delta_minutes").abs().shift(1).over("encounter_block"))
+            _df.sort(["intubation_episode_id", "rank"])
+            .with_columns(
+                _prev=pl.col("delta_minutes").abs().shift(1).over("intubation_episode_id")
+            )
             .filter(
                 pl.col("_prev").is_not_null()
                 & (pl.col("delta_minutes").abs() < pl.col("_prev"))
@@ -358,10 +367,10 @@ def _(med_window, pl, rank_direction):
         )
         assert _viol.height == 0, (
             f"{_name}: {_viol.height:,} rows where rank n sits CLOSER to t0 than rank n-1 "
-            "inside the same encounter. Rank 1 is defined as nearest, so this is a bug in "
+            "inside the same episode. Rank 1 is defined as nearest, so this is a bug in "
             "the ranking itself."
         )
-        print(f"{_name} ladder   (per-encounter monotonicity verified)")
+        print(f"{_name} ladder   (per-episode monotonicity verified)")
         print(
             _df.group_by("rank")
             .agg(n=pl.len(), median_abs=pl.col("delta_minutes").abs().median())
@@ -391,30 +400,31 @@ def _(mo):
 def _(after_ranked, before_ranked, index_imv, METHOD_ID, pl):
     def _rank1(df, prefix):
         return df.filter(pl.col("rank") == 1).select(
-            "encounter_block",
+            "intubation_episode_id",
             pl.col("med_category").alias(f"nearest_{prefix}_med"),
             pl.col("delta_minutes").alias(f"nearest_{prefix}_min"),
         )
 
-    _counts_before = before_ranked.group_by("encounter_block").agg(n_before=pl.len())
-    _counts_after = after_ranked.group_by("encounter_block").agg(n_after=pl.len())
+    _counts_before = before_ranked.group_by("intubation_episode_id").agg(n_before=pl.len())
+    _counts_after = after_ranked.group_by("intubation_episode_id").agg(n_after=pl.len())
 
-    method_encounter = (
+    method_episode = (
         index_imv.select(
             [
+                "intubation_episode_id",
                 "encounter_block",
                 "patient_id",
-                "intubation_episode_id",
+                "ep_num",
                 "cohort_run_id",
                 "index_class",
                 "index_qualified",
                 pl.col("t0_dttm").alias("imv_dttm"),
             ]
         )
-        .join(_counts_before, on="encounter_block", how="left")
-        .join(_counts_after, on="encounter_block", how="left")
-        .join(_rank1(before_ranked, "before"), on="encounter_block", how="left")
-        .join(_rank1(after_ranked, "after"), on="encounter_block", how="left")
+        .join(_counts_before, on="intubation_episode_id", how="left")
+        .join(_counts_after, on="intubation_episode_id", how="left")
+        .join(_rank1(before_ranked, "before"), on="intubation_episode_id", how="left")
+        .join(_rank1(after_ranked, "after"), on="intubation_episode_id", how="left")
         .with_columns(
             method_id=pl.lit(METHOD_ID),
             n_before=pl.col("n_before").fill_null(0).cast(pl.Int32),
@@ -425,9 +435,10 @@ def _(after_ranked, before_ranked, index_imv, METHOD_ID, pl):
         .with_columns(detected=(pl.col("n_before") > 0) | (pl.col("n_after") > 0))
         .select(
             [
+                "intubation_episode_id",
                 "encounter_block",
                 "patient_id",
-                "intubation_episode_id",
+                "ep_num",
                 "cohort_run_id",
                 "index_class",
                 "index_qualified",
@@ -442,14 +453,14 @@ def _(after_ranked, before_ranked, index_imv, METHOD_ID, pl):
                 "nearest_after_min",
             ]
         )
-        .sort("encounter_block")
+        .sort(["encounter_block", "ep_num"])
     )
 
-    assert method_encounter.height == index_imv.height, (
-        "the encounter table must have exactly one row per cohort encounter"
+    assert method_episode.height == index_imv.height, (
+        "the episode table must have exactly one row per candidate episode"
     )
-    assert method_encounter.get_column("intubation_episode_id").n_unique() == index_imv.height
-    return (method_encounter,)
+    assert method_episode.get_column("intubation_episode_id").is_unique().all()
+    return (method_episode,)
 
 
 @app.cell
@@ -457,7 +468,7 @@ def _(after_ranked, before_ranked, index_imv, METHOD_ID, pl):
     def _nest(df, name):
         return (
             df.select(
-                "encounter_block",
+                "intubation_episode_id",
                 pl.struct(
                     rank="rank",
                     med_category="med_category",
@@ -467,7 +478,7 @@ def _(after_ranked, before_ranked, index_imv, METHOD_ID, pl):
                     delta_minutes="delta_minutes",
                 ).alias(name),
             )
-            .group_by("encounter_block", maintain_order=True)
+            .group_by("intubation_episode_id", maintain_order=True)
             .agg(pl.col(name))
         )
 
@@ -477,19 +488,20 @@ def _(after_ranked, before_ranked, index_imv, METHOD_ID, pl):
     method_ranked = (
         index_imv.select(
             [
+                "intubation_episode_id",
                 "encounter_block",
                 "patient_id",
+                "ep_num",
                 "index_class",
-                "intubation_episode_id",
                 pl.lit(METHOD_ID).alias("method_id"),
                 pl.col("t0_dttm").dt.to_string("%Y-%m-%dT%H:%M:%S").alias("imv_dttm"),
             ]
         )
-        .join(_before_nested, on="encounter_block", how="left")
-        .join(_after_nested, on="encounter_block", how="left")
-        # An empty array, not a null: the object is written for every cohort encounter so
-        # the file has one record per encounter and non-detections are counted, not absent.
-        # A null would make "nothing was given" and "this encounter was not processed"
+        .join(_before_nested, on="intubation_episode_id", how="left")
+        .join(_after_nested, on="intubation_episode_id", how="left")
+        # An empty array, not a null: the object is written for every candidate episode so
+        # the file has one record per episode and non-detections are counted, not absent.
+        # A null would make "nothing was given" and "this episode was not processed"
         # indistinguishable in the file that is meant to be canonical.
         .with_columns(
             before=pl.col("before").fill_null(
@@ -499,7 +511,7 @@ def _(after_ranked, before_ranked, index_imv, METHOD_ID, pl):
                 pl.lit([], dtype=_after_nested.schema["after"])
             ),
         )
-        .sort("encounter_block")
+        .sort(["encounter_block", "ep_num"])
     )
 
     assert method_ranked.height == index_imv.height
@@ -507,23 +519,31 @@ def _(after_ranked, before_ranked, index_imv, METHOD_ID, pl):
 
 
 @app.cell
-def _(METHOD_ID, PHI_DIR, method_encounter, method_ranked, pl):
-    _enc_path = PHI_DIR / f"method_{METHOD_ID}_encounter.parquet"
+def _(METHOD_ID, PHI_DIR, method_episode, method_ranked, pl):
+    _ep_path = PHI_DIR / f"method_{METHOD_ID}_episode.parquet"
     _json_path = PHI_DIR / f"method_{METHOD_ID}_ranked.json"
 
-    method_encounter.write_parquet(_enc_path)
+    # A stale _encounter.parquet from before D35 would still load in 07 and would silently
+    # supply the wrong denominator, so its absence is asserted rather than assumed.
+    _stale = PHI_DIR / f"method_{METHOD_ID}_encounter.parquet"
+    assert not _stale.exists(), (
+        f"{_stale.name} is present from the pre-D35 design. Delete it -- it holds one row "
+        "per encounter and 07 must not find it."
+    )
+
+    method_episode.write_parquet(_ep_path)
     method_ranked.write_ndjson(_json_path)
 
-    _detected = method_encounter.filter(pl.col("detected"))
-    _qual = method_encounter.filter(pl.col("index_qualified"))
+    _detected = method_episode.filter(pl.col("detected"))
+    _qual = method_episode.filter(pl.col("index_qualified"))
     _qual_detected = _qual.filter(pl.col("detected"))
 
-    print(f"method_{METHOD_ID}_encounter.parquet   {method_encounter.height:,} rows -> {PHI_DIR}")
+    print(f"method_{METHOD_ID}_episode.parquet     {method_episode.height:,} rows -> {PHI_DIR}")
     print(f"method_{METHOD_ID}_ranked.json         {method_ranked.height:,} records")
     print()
     print(
-        f"detection over ALL cohort encounters : {_detected.height:,} / "
-        f"{method_encounter.height:,}  ({100 * _detected.height / method_encounter.height:.1f}%)"
+        f"detection over ALL candidate episodes : {_detected.height:,} / "
+        f"{method_episode.height:,}  ({100 * _detected.height / method_episode.height:.1f}%)"
     )
     print(
         f"detection over the INDEX set (N**)   : {_qual_detected.height:,} / "
@@ -531,13 +551,13 @@ def _(METHOD_ID, PHI_DIR, method_encounter, method_ranked, pl):
     )
     print("\ndetection rate by index_class (the Tier D input):")
     print(
-        method_encounter.group_by("index_class")
+        method_episode.group_by("index_class")
         .agg(n=pl.len(), rate=pl.col("detected").mean().round(3))
         .sort("n", descending=True)
     )
     print("\nnearest before-rank-1 agent, where one exists:")
     print(
-        method_encounter.filter(pl.col("nearest_before_med").is_not_null())
+        method_episode.filter(pl.col("nearest_before_med").is_not_null())
         .group_by("nearest_before_med")
         .agg(n=pl.len(), median_min=pl.col("nearest_before_min").median())
         .sort("n", descending=True)
