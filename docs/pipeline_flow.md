@@ -316,14 +316,31 @@ failure mode an agreement study cannot survive.
    ┌────────────────────────────────────────────────────────┐
    │ 05 PAIR — one of each, close together                  │
    │                                                        │
-   │   scans the WHOLE stay, not the window:                │
-   │      propofol ─── 4 min ─── rocuronium   ✓ a pair      │
+   │   TWO STAGES, and they are one algorithm.              │
    │                                                        │
-   │   walk forward; the first opposite-class drug within   │
-   │   3h wins; then BOTH are consumed and neither can      │
-   │   pair again. Same-class rows in between are stepped   │
-   │   over, not consumed — a fentanyl charted ahead of     │
-   │   the induction agent still reaches the rocuronium.    │
+   │   1. COLLAPSE — one push of drug is one event:         │
+   │                                                        │
+   │        fentanyl 12:00 ┐                                │
+   │                       ├─ same class, within 15 min     │
+   │        propofol 12:00 ┘        │                       │
+   │                                ▼                       │
+   │            ONE SED event, labelled fentanyl+propofol,  │
+   │            anchored on the FIRST row — so no event can │
+   │            ever span more than 15 min end to end.      │
+   │        (paralytics fold the same way, separately)      │
+   │                                                        │
+   │   2. SCAN — the WHOLE stay, not the window:            │
+   │        SED event ─── 4 min ─── PARA event   ✓ a pair   │
+   │                                                        │
+   │   walk forward over EVENTS; the first opposite-class   │
+   │   event within 3h wins; then BOTH are consumed and     │
+   │   neither can pair again. Same-class events in between │
+   │   are stepped over, not consumed — a fentanyl charted  │
+   │   ahead of the induction agent still reaches the roc.  │
+   │                                                        │
+   │   without the collapse the same chart gives            │
+   │   fentanyl→roc AND propofol→roc — two pairs, one       │
+   │   intubation. With it: one SED event → one pair.       │
    └────────────────────────────────────────────────────────┘
 ```
 
@@ -500,7 +517,8 @@ because of it.
 | 3 | reject unless one of the 8 induction drugs is given in t₀ ± 3 h | `02` | −26,770 |
 | — | `SED` = 5 sedatives in t₀ ± 3 h, ranked nearest-first | `03` | |
 | — | `PARA` = 3 paralytics in t₀ ± 3 h, ranked nearest-first | `04` | |
-| — | `PAIR` = opposite-class drugs < 3 h apart, forward pass with consumption | `05` | whole stay |
+| — | same-class administrations within 15 min fold into one **agent event** | `05` | 370,687 rows -> 276,450 events |
+| — | `PAIR` = opposite-class **events** < 3 h apart, forward pass with consumption | `05` | whole stay, 1,535 pairs |
 | 4 | a dose **after** t₀ followed by a same-drug drip within 60 min is infusion prep, not induction | `03`, `04` | Tier F only |
 | — | `during_infusion` measured on both sides of t₀ and never acted on | `03`, `04` | figure B.5 |
 | — | pairs assigned to the nearest episode t₀ | `05` | no double counting |
@@ -526,6 +544,24 @@ def to_site_naive(series):
 Pinned by `tests/test_clifpy_tz_boundary.py`. `01` also cross-checks that every
 non-scaffold waterfall timestamp exists in the raw table, which is how the bug was
 caught in the first place.
+
+**The same trap on the way out: `datetime.timestamp()`.** The timezone always comes
+from `config["timezone"]`, and no code path may ask the operating system. Calling
+`.timestamp()` on a site-*naive* value does exactly that — it interprets the wall
+clock in the machine's zone. On a host set to US/Central holding US/Eastern data, 10
+minutes across the November fall-back measures as **70**, which is enough to split
+one push of drug into two agent events, and the answer changes with the machine.
+Convert inside polars instead, which consults no zone at all:
+
+```python
+def epoch_minutes(column="admin_dttm"):
+    return pl.col(column).dt.epoch("s") / 60.0
+```
+
+Pinned by `tests/test_collapse_agent_events.py`. One known exception survives and is
+flagged rather than fixed: `COHORT_RUN_ID` in `01` stamps `datetime.now()` in
+OS-local time. Nothing computes on it, but two sites' run ids are not comparable as
+timestamps.
 
 **Case sensitivity.** Every `*_category` column is lower-cased on load and every
 literal in the codebase is written in lower case. A mismatched category value does

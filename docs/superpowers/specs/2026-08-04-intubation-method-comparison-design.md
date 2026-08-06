@@ -89,6 +89,13 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | D40 | **An intermittent administration after t₀ that is followed within `infusion_prep_minutes` by a `start` row in `medication_admin_continuous` for the same `med_category` is maintenance-infusion prep, not an induction agent.** Applies to `SED` and `PARA`. `[window_start, t₀)` is exempt. Default 60 min. | Set by the study lead on a clinical argument: an infusion does not reach steady state on its own, so it is loaded with a bolus, and that bolus is charted in the intermittent table where it is indistinguishable from induction by drug and dose alone. The sequence *bolus → same-drug drip* after the airway is already secured is maintenance sedation being started, not the patient being intubated. **The before-window exemption is the load-bearing part and the data forced it.** Measured on `SED`'s qualified ranked entries: **30.1% of pre-t₀ entries are followed by a same-drug infusion start within 60 minutes, against 19.8% of post-t₀ entries** (n = 3,088 and 17,207; at a 15-minute threshold, 21.6% against 15.3%). A pre-t₀ bolus is *more* likely to precede a drip, not less — because induction → intubation → maintenance is the canonical sequence, and the bolus that starts it is the induction agent itself. A symmetric rule would additionally have reclassified **930 pre-t₀ entries**, every one of them a drug given before the airway was secured. The continuous table is read as a **disqualifier only and never as a detector**, which is what leaves D1a intact: no detection originates there, so `INF` stays removed and the study still does not claim an infusion means a ventilator. |
 | D41 | **`during_infusion` — an administration given while a same-drug infusion is already running — is measured and published on both sides of t₀, and never acts.** | Proposed as a second disqualifier and declined on the measurement. On `SED`'s qualified ranked entries it is charted at **48.9% of before-t₀ entries and 57.5% of after-t₀ entries** (n = 3,088 and 17,207). The 8.6-point gap is real but useless: **the flag fires on nearly half of every dose given *before* the airway event** — doses that are induction agents almost by definition — so as a test for "this is not induction" it carries a false-positive rate near 49%. It reports that the patient is on sedation, which is a property of the admission and not of the airway. Disqualifying on it after t₀ only would be an asymmetric rule with no discriminating basis; symmetrically it would delete 1,510 of the study's 3,088 pre-t₀ entries. `PARA` shows the same flag at 0.6% and 4.1% (n = 178 and 410), which is what a genuinely rare event looks like by comparison. It is retained as a published band on the decomposed timing figure because *that* is a genuine result — it shows that most post-intubation sedative charting is maintenance, and therefore that `SED`'s apparent sensitivity rests almost entirely on its pre-t₀ half. Computed by backward as-of join — the most recent same-drug continuous event is not a `stop` — which needs no start/stop interval pairing and so is unaffected by MIMIC's 257-row imbalance between the two. |
 | D42 | **The refinement is reported as a paired sub-analysis, not propagated through Tier A.** `SED` and `PARA` publish `detected` and `detected_induction_only`; every Tier A/B/C/D table continues to run on `detected` unchanged. D38's eligibility filter is **not** refined. | Two separate reasons, and the second is the one that matters. **Mechanically:** `07`'s basis machinery is `PAIR`-specific by construction — the column is named `pair_basis` and non-`PAIR` methods are skipped on the second basis — so generalising it makes A.3 an eight-way lattice to answer a question one paired comparison answers. **Substantively:** pushing the refinement into D38 would destroy the measurement it creates. If an episode qualifies only when a *non-prep* induction agent is charted, then every surviving episode has one by definition and `SED`'s refined rate snaps back to 1.000 — the same circularity D38 already records, reintroduced one layer down. Keeping the filter unrefined is precisely what makes the refined rate readable, and it holds N at 13,500 so both numbers share a denominator. |
+| D43.1 | **`05`'s hospitalization → `encounter_block` bridge is de-duplicated with `.unique()`, and the de-duplication is asserted rather than assumed.** | This repairs a defect, not a preference, and the defect is worth recording because of how quietly it hid. D35 moved `index_imv` to episode grain, so exploding `list_hospitalization_id` yields one row per (episode, hospitalization) — and `05` is the one notebook that deliberately drops the episode key from its bridge (D27, D39), because its scan is free-running over the whole block. Un-deduplicated, the inner join therefore replicated **every medication administration once per episode in the block**, and the forward pass paired clones with clones. **Every assertion in the notebook passed throughout**: `pair_id` uniqueness, the D39 partition and both conservation checks are all true of a duplicated frame, because duplicated inputs yield self-consistent duplicated outputs. Verified before the fix that the map is genuinely 1:1 — 0 hospitalizations appear in more than one block — so the duplicate rows carried no information at all. Bridge rows 43,006 → 34,419; the verification note in §7.3 records what that moved. |
+| D43.2 | **The collapse window is 15 minutes, read from `config.json` as `collapse_gap_minutes`. It is a clinical definition of one induction sequence, and no empirical valley supports it.** | The data were asked and declined to answer, so the evidence is *published* (E.7, `pair_collapse_deltas.csv` / `.png`) rather than summarised away into a threshold. Co-administration of two different same-class agents is a Δ ≤ 1 min phenomenon: at Δ = 0 there are **4,615** different-agent intervals against **301** same-agent redoses (15.3×), at Δ = 1 **883** against **223** (4.0×), and from Δ = 2 onward the two series run at the *same* rate (6,127 vs 6,952, 0.88×). **95.3% of the positive excess sits at Δ ≤ 1**, and there is no trough at 15 minutes to fit to — there is no trough anywhere. What 15 minutes buys is the *paralytic* redosing that drives the residual multi-pair episodes (`108083_E3` charts five vecuronium doses across 50 minutes), and the span it names is a rapid-sequence induction as a clinician would bound one. That judgment is stated wherever the number appears — here, in E.7's caption and on the figure itself — so no reader mistakes a definition for a measurement. Changing it is a re-run, not a post-hoc filter, for the reason D29 gives about `pair_gap_hours`. |
+| D43.3 | **The fold groups by `drug_class` (SED vs PARA), not by CLIF `med_group`.** | `med_group` splits fentanyl (`analgesia`) from propofol (`sedation`), so grouping by it would fail to merge the single most common co-administration in the data — `fentanyl+propofol`, 29,030 events. The fold must equally never cross the class boundary in the other direction: a sedative and a paralytic merged into one event leave the scan nothing to pair. `drug_class` is the only key with both properties, and it is the two lists §7.1 and §7.2 already declare, so the fold defines no new vocabulary. D38 measured and declined `med_group` for episode eligibility; this is the same vocabulary failing for the same reason in a second place, and it is recorded twice rather than once because the two uses would otherwise look independently arguable. |
+| D43.4 | **Merging is anchored, never chained: a row joins the current event only while it is within the window of that event's *first* administration, and the moment it is strictly past it the row opens a new event and becomes the new anchor.** | Chaining has no bound. An agent charted every ten minutes would walk one event forward across the whole stay — measured at 115 min for the worst chained event at MIMIC — and would swallow the second intubation of a re-intubated patient entirely, which is the population D35 exists to recover. Anchoring makes `span_min ≤ collapse_gap_minutes` an *assertable invariant* rather than a hope, and `05` asserts it (max event span at MIMIC: exactly 15.0 min). The cost is 1.8% more events than chaining would produce, which buys a bounded and auditable definition. Strictly greater, not greater-or-equal, so a row landing exactly on the limit still merges and the parameter reads as "within 15 minutes" inclusively. |
+| D43.5 | **An agent event's `med_category` is a combined label: every agent the event contains, sorted alphabetically and joined with `+`.** | The fold itself is blind to which agents are involved (D43.4) — a redose of one and a co-administration of two are the same clinical fact — but the *output* must not be. `fentanyl+propofol` preserves the clinical picture the pair table exists to report, makes every merge auditable from the published row rather than from a notebook print, and keeps E.3 honest: its sedative domain widens from 4 values to **12** and the contingency from 6 published cells to **19** (14 at n ≥ 10) precisely because those combinations were always in the data and were previously reported as whichever single agent happened to win the scan. Alphabetical sorting makes the label canonical, so one combination is one row of E.3 rather than several orderings of itself. |
+| D43.6 | **`med_dose` and `med_dose_unit` on a merged event refer to the first agent named in the label, taken from that agent's earliest administration in the event.** | Doses of different drugs cannot be summed — propofol in mg beside fentanyl in mcg — and §7.3 forbids unit conversion outright, so an aggregate dose is not available at any price. Nulling the field instead would silently kill E.3's `median_sed_dose`, the one clinical number in that table. Naming one agent's dose keeps the column numeric and keeps the value *true of something*, and because the label is alphabetically sorted (D43.5) the rule is self-consistent: the same combination always reports the same agent's dose, at every site. Which agent that is, the reader gets by reading the label — which is why the label sits in the table beside the two columns rather than anywhere else. |
+| D44 | **The timezone always comes from `config["timezone"]`. No code path may consult the operating system's zone — not on the way in, and not on the way out.** | Set by the study lead as a standing rule after a second leak was found, one §5.13's existing guard does not cover. **On the way in**, `.dt.tz_localize(None)` on a clifpy column drops the *attached* LMT offset rather than the correct one, shifting every timestamp by about an hour without raising; that is §5.13, it is fixed by `to_site_naive`, and it is pinned by `tests/test_clifpy_tz_boundary.py`. **On the way out**, `datetime.timestamp()` on a site-naive value re-attaches the *machine's* zone: on a host set to US/Central holding US/Eastern data, 10 minutes of wall clock across the November fall-back measures as **70**. A 60-minute artefact decides a 15-minute window outright, splitting one push of drug into two agent events — and the answer then changes with the machine, which the byte-identical-across-runs property of §6.2 forbids outright. `05` converts inside polars with `epoch_minutes()`, `pl.col(c).dt.epoch("s") / 60`, which reads the stored wall-clock value and consults no zone at all; `tests/test_collapse_agent_events.py` pins it across a DST fall-back so the shortcut cannot come back. **One known exception remains, flagged here rather than fixed**: `COHORT_RUN_ID` in `code/01_cohort.py` stamps `datetime.now()` in OS-local time. Nothing computes on it — it is a provenance label, not analytic data — but it is ambiguous across machines, so two sites' run ids are not comparable as timestamps and must not be read as though they were. |
 
 ------------------------------------------------------------------------
 
@@ -574,27 +581,34 @@ For `PAIR` the same principle holds with a different source structure: `detected
 
 **Pairs are found per block and assigned per episode (D39).** The scan is free-running over the whole block (D27, D28), so it runs once and knows nothing about episodes. Each resulting pair is then assigned to the episode whose t₀ is nearest to `pair_dttm`, ties to the earlier episode. The assignment is a partition: summing `n_pairs` over a block's episodes recovers the block's pair count exactly, and no pair is scored twice. `05` asserts that conservation rather than assuming it.
 
+**The two members of a pair are *agent events*, not administrations (D43).** Before the scan runs, `05` folds same-class administrations within `collapse_gap_minutes` of each other into one agent event (§7.3). So `sed_med_category` may carry a combined label such as `fentanyl+propofol`, `sed_admin_dttm` is the **earliest** administration in that event, and `sed_med_dose` belongs to the first agent the label names (D43.6). `n_sed_admin` and `sed_span_min` — and the paralytic pair of them — are the fold's audit trail: how many rows were merged, and how far apart the first and last of them were. Every merge is therefore recoverable from the published pair row without re-reading the medication table.
+
 | Column | Type | Notes |
 |---|---|---|
 | `encounter_block` | int32 | the scan's unit |
 | `patient_id` | str | |
 | `intubation_episode_id` | str | the episode this pair was assigned to (D39) — the analytic key |
+| `ep_num` | int32 | copied unchanged from the assigned episode; §5.10 |
 | `cohort_run_id` | str | copied unchanged; §6.1 |
 | `index_class` | str | copied unchanged; §5.10 |
 | `index_qualified` | bool | copied unchanged |
 | `pair_id` | str | `{encounter_block}_P{pair_seq}` |
 | `pair_seq` | int | 1-based, in scan order within the encounter |
 | `first_class` | str | `SED`, `PARA`, or `SIMULTANEOUS` when the gap is exactly zero |
-| `sed_med_category` | str | the sedative member |
-| `sed_med_dose` | float | verbatim from the administration row |
-| `sed_med_dose_unit` | str | verbatim |
-| `sed_admin_dttm` | datetime | |
-| `para_med_category` | str | the paralytic member |
-| `para_med_dose` | float | verbatim |
-| `para_med_dose_unit` | str | verbatim |
-| `para_admin_dttm` | datetime | |
-| `pair_dttm` | datetime | the **earlier** of the two administrations — the pair's own intubation timestamp |
-| `gap_minutes` | float | `abs(sed_admin_dttm − para_admin_dttm)`, always ≥ 0 and always `< pair_gap_hours × 60` |
+| `sed_med_category` | str | the sedative member — the agent event's label: every agent it contains, sorted alphabetically and joined with `+` (D43.5) |
+| `sed_med_dose` | float | verbatim from the earliest administration of the **first agent the label names** (D43.6); never summed across agents |
+| `sed_med_dose_unit` | str | verbatim, same row as `sed_med_dose` |
+| `sed_admin_dttm` | datetime | the **earliest** administration in the event — its anchor (D43.4) |
+| `n_sed_admin` | int32 | administrations folded into the event; 1 when nothing merged |
+| `sed_span_min` | float64 | last minus first administration in the event, minutes; `≤ collapse_gap_minutes` by construction, asserted in `05` |
+| `para_med_category` | str | the paralytic member, same labelling rule (D43.5) |
+| `para_med_dose` | float | verbatim, first agent named (D43.6) |
+| `para_med_dose_unit` | str | verbatim, same row as `para_med_dose` |
+| `para_admin_dttm` | datetime | the **earliest** administration in the event |
+| `n_para_admin` | int32 | administrations folded into the event |
+| `para_span_min` | float64 | as `sed_span_min` |
+| `pair_dttm` | datetime | the **earlier** of the two event anchors — the pair's own intubation timestamp |
+| `gap_minutes` | float | `abs(sed_admin_dttm − para_admin_dttm)` — between the two *anchors*, always ≥ 0 and always `< pair_gap_hours × 60` |
 | `imv_dttm` | datetime | t₀, copied from `index_imv` |
 | `pair_to_t0_min` | float | signed: `pair_dttm − imv_dttm`, negative before t₀ |
 | `in_window` | bool | `pair_dttm` falls within `[window_start, window_end]` |
@@ -610,8 +624,10 @@ For `PAIR` the same principle holds with a different source structure: `detected
 | `n_unpaired_para` | int | paralytic administrations the scan never paired |
 | `detected_in_window` | bool | any pair with `in_window`; the matched-denominator reading (D33) |
 | `first_is_nearest` | bool | whether the two index pairs are the same pair; null when `n_pairs = 0` |
-| `first_pair_id` … | | the **first pair chronologically** — `pair_id`, `first_class`, `sed_med_category`, `sed_med_dose`, `sed_med_dose_unit`, `para_med_category`, `para_med_dose`, `para_med_dose_unit`, `gap_minutes`, `pair_to_t0_min`, each prefixed `first_` |
-| `near_pair_id` … | | the **pair nearest t₀** — same ten fields, each prefixed `near_` |
+| `first_pair_id` … | | the **first pair chronologically** — `pair_id`, `first_class`, `sed_med_category`, `sed_med_dose`, `sed_med_dose_unit`, `n_sed_admin`, `sed_span_min`, `para_med_category`, `para_med_dose`, `para_med_dose_unit`, `n_para_admin`, `para_span_min`, `gap_minutes`, `pair_to_t0_min`, each prefixed `first_` |
+| `near_pair_id` … | | the **pair nearest t₀** — same fourteen fields, each prefixed `near_` |
+
+The four fold columns travel *inside* each member's group rather than being appended after `pair_to_t0_min`, so a member's identity, dose and audit trail stay adjacent in both blocks. **That order is a contract, not a formatting choice**: `07`'s schema gate asserts exact column-list equality against this file, so a column inserted elsewhere fails the run rather than drifting. The episode table is 43 columns wide.
 
 Both index-pair blocks are null throughout when `n_pairs = 0`. Ties for the nearest pair — two pairs equidistant from t₀ — are broken by taking the earlier one, so output is deterministic (§6.2 convention).
 
@@ -690,9 +706,43 @@ The lists are re-declared literally in `05_method_pair.py` and not imported from
 
 **The scan is not restricted to the window.** It runs over every qualifying administration in the stitched encounter, ordered by `admin_dttm` with ties broken alphabetically by `med_category` (§6.2 convention). t₀ is joined afterwards to compute `pair_to_t0_min` and `in_window`, and plays no part in which pairs form (D27).
 
+`PAIR` runs in **two stages, and they are one algorithm**: the collapse below turns administrations into agent events, and the scan after it pairs those events. Reading either alone gives the wrong answer about what a pair is.
+
+#### The collapse — administrations become agent events (D43)
+
+The scan counts *pairings*, so what it is handed decides what a pair means. A raw administration row is not a clinical event: one rapid-sequence induction is charted as fentanyl 08:14, propofol 08:14, rocuronium 08:15, and a repeat push of the same agent two minutes later is still the same push of drug. Handed those rows the scan forms a pair for every sedative it can match and reports several intubations where the chart describes one.
+
+So before the scan runs, administrations of the same `drug_class` (D43.3) within `collapse_gap_minutes` of each other, in the same encounter, are folded into one **agent event**:
+
+```
+   for each (encounter_block, drug_class), rows already in §6.2 time order:
+       start a new event at the first row
+       each next row joins the event  if  t[row] - t[event's FIRST row] <= gap
+       otherwise it opens a new event and becomes the new anchor
+```
+
+The comparison is against the event's **first** row and never against the previous one (D43.4). Chained, a repeatedly-charted agent would walk one event forward without bound and swallow the second intubation of a re-intubated patient; anchored, `span_min ≤ collapse_gap_minutes` holds end to end and `05` asserts it. The fold is *within* a class and never across it — a sedative and a paralytic merged into one event would leave the scan nothing to pair — and it is blind to which agents are involved, because a redose of one agent and a co-administration of two are the same clinical fact. What survives carries the combined label (D43.5), the dose of the first agent named (D43.6), `n_admin` and `span_min`.
+
+**Worked examples for the fold**, at `collapse_gap_minutes = 15`. These are the implementation's test cases, asserted in `05`'s `_self_test` before any data is touched and again in `tests/test_collapse_agent_events.py`. Times are minutes from the first row; each is one drug class of one encounter.
+
+| # | administrations at | events | what it pins |
+|---|---|---|---|
+| a | `0, 0` | `[0, 1]` | same-instant co-administration merges — the common case |
+| b | `0, 15` | `[0, 1]` | exactly at the limit still merges (`>`, not `>=`) |
+| c | `0, 16` | `[0]`, `[1]` | one minute past the limit splits |
+| d | `0, 10, 20` | `[0, 1]`, `[2]` | **anchored, not chained** — 20 is 20 min past the event's start, so it splits even though it is only 10 min past its predecessor. This is the one example a chained implementation fails |
+| e | `0, 5, 10, 15` | `[0, 1, 2, 3]` | a run inside one window stays one event |
+| f | `0` | `[0]` | singleton — the fold is a no-op on an unmerged row |
+
+**Minutes are computed inside polars with `pl.col(...).dt.epoch("s")`, never with `datetime.timestamp()`** (D44). A naive `.timestamp()` re-applies the operating system's zone, and across a DST fall-back that turns 10 minutes of wall clock into 70 — enough to split one push of drug into two events, and to make the answer depend on the machine.
+
+> **Why the collapse cannot move a paralytic across a window boundary.** An agent event is anchored on its **earliest** administration — the same row `04_method_paralytic.py` already sees for that agent — so a pair's `para_admin_dttm` never moves *later* than the row `04` is evaluating. The cross-notebook `PARA` × `PAIR` integrity check in §8 was therefore expected to break and did not: it still decomposes exactly (`only_b` 62 = D25's on-t₀ rule 32 + §6.5's `in_window`-on-`pair_dttm` rule 30, zero unexplained). Recorded because both D43.4 and the integrity note in Tier A would otherwise lead a reader to expect a third boundary rule that does not exist.
+
+> **Verification note — two independent causes, one number.** `PAIR` emitted **4,110** pairs before this change and emits **1,535** after, a 62% drop, and anyone comparing runs needs to know that most of it is a *defect fix* rather than a definition change. The bridge fan-out (D43.1) was replicating every administration once per episode in its block; the collapse (D43.2–D43.6) then merged co-administered and redosed rows into agent events. Measured together, in-pipeline: bridge rows **43,006 → 34,419**; **370,687** administrations entering the fold; **276,450** agent events leaving it (SED 274,333 / PARA 2,117), max span exactly **15.0 min**; pairs **4,110 → 1,535** over 1,215 encounter_blocks; **1,272** episodes with at least one pair, of which **1,075 (84.5%)** now carry exactly one, against 61% before; max pairs in any block **52 → 9**. `sed_med_category` takes **12** distinct values including combined labels, `para_med_category` 2 (rocuronium 1,127, vecuronium 408). Published artifacts go **34 → 36** (25 CSV + 11 PNG), the two new ones being E.7. Earlier scratchpad figures for this work disagree with these and are wrong: they were computed through the timezone conversion D44 bans.
+
 #### The pairing rule
 
-A single forward pass with consumption (D28):
+A single forward pass with consumption (D28). It runs over **agent events** — one per element of the arrays below — and that is the only thing the collapse changed about it; the rule, its consumption semantics and `pair_gap_hours` are untouched:
 
 ```
    available[0..n-1] = True
@@ -720,6 +770,8 @@ Pairing is symmetric in class: a paralytic looks forward for a sedative exactly 
 #### Worked examples
 
 These are the test cases for the implementation. Each is stated as input rows and expected pairs.
+
+**The rows below are agent events, and the timestamps are event anchors** — the scan never sees anything else (D43). Read as raw administrations they would now be wrong, and instructively so: at `collapse_gap_minutes = 15` the collapse would fold (a)'s fentanyl and midazolam into one event labelled `fentanyl+midazolam`, and (b) into a single sedative event against a single paralytic event — one pair, not two. That is the behaviour this change exists to produce. Each stage's examples are stated in its own terms; the fold's are in the table above.
 
 ```
 (a)  the motivating case — analgesic ahead of the induction agent
@@ -767,7 +819,7 @@ Case (e) is the one that makes D29 concrete: because the rejected pair consumes 
 
 #### Dose handling
 
-`med_dose` and `med_dose_unit` are taken verbatim from both administration rows, with no unit conversion or normalisation, as in §7.1. Unit heterogeneity across the two members of a pair — a sedative in mg beside a paralytic in mg/kg — is a reportable property, not something to reconcile.
+`med_dose` and `med_dose_unit` are taken verbatim from an administration row, with no unit conversion or normalisation, as in §7.1. Unit heterogeneity across the two members of a pair — a sedative in mg beside a paralytic in mg/kg — is a reportable property, not something to reconcile. Where a member is a merged agent event, the row is the earliest administration of the **first agent its label names** (D43.6): doses of different drugs cannot be summed, and the alternative — nulling the field — would take E.3's `median_sed_dose` with it.
 
 ### 7.4 `DEV` — no method notebook
 
@@ -861,7 +913,7 @@ The off-diagonal cells are asymmetric and each reads differently:
 
 - **Only `SED`** is the expected majority in the first row: sedation without paralysis is a real and common technique.
 - **Only `PARA`** should be small — a paralytic given with no induction agent charted is closer to a documentation gap than a clinical choice, so this cell is where charting failure concentrates.
-- **`PARA` × `PAIR` should be the tightest of the three**, and if it is not, something is wrong. A `PAIR` detection requires a paralytic by definition, so on the `in_window` basis `PAIR` ✓ ∧ `PARA` ✗ ought to be near-empty; a non-trivial count there means the two notebooks disagree about the paralytic list or about window membership, which is a bug rather than a finding. This cell is the closest thing the design has to a cross-notebook integrity check, and D8's deliberate duplication is what makes it meaningful.
+- **`PARA` × `PAIR` should be the tightest of the three**, and if it is not, something is wrong. A `PAIR` detection requires a paralytic by definition, so on the `in_window` basis `PAIR` ✓ ∧ `PARA` ✗ ought to be near-empty; a non-trivial count there means the two notebooks disagree about the paralytic list or about window membership, which is a bug rather than a finding. This cell is the closest thing the design has to a cross-notebook integrity check, and D8's deliberate duplication is what makes it meaningful. **The agent-event collapse (D43) was expected to break it and did not** — the decomposition is still exact, `only_b` 62 = 32 + 30 with nothing unexplained — because an event is anchored on its earliest administration, which is the same row `04` sees; §7.3 gives the argument.
 
 **A.3 Concordance histogram.** How many of the three fired on the same encounter.
 
@@ -1043,6 +1095,8 @@ Computed from `method_PAIR_pairs.parquet`, filtered to `index_class = 'qualified
 | 2 | 158 | 13.1 |
 | 3+ | 73 | 6.1 |
 
+`pair_count_distribution.csv` carries three further columns beside these — `median_n_sed_admin`, `median_n_para_admin` and `pct_index_pair_folded` — so the amount of merging the collapse did is a *published* quantity rather than a notebook print (D43). A site whose index pairs are almost never folded and one whose index pairs are almost always folded are charting differently, and E.3's combined labels are only readable against that rate.
+
 The `3+` row bounds how much of the free-running/`in_window` gap in A.1 is reintubation activity rather than a mis-placed t₀. Episode labelling stays out of scope (§1) — this row reports that the activity exists without claiming what it was.
 
 **E.2 Gap distribution.** Minutes between the two members of a pair, always positive.
@@ -1102,6 +1156,16 @@ This is the clinical output the method exists to produce, and it is not derivabl
 ```
 
 Clipping the out-of-range mass into the edge bins would put the study's most interesting encounters — the ones in the `beyond ±180` row of E.5 — into a bin that reads as "just outside the window". Stating the count in the caption keeps them visible as what they are.
+
+**E.7 The evidence the collapse window is not fitted to.** `collapse_gap_minutes` is a clinical definition (D43.2), so the distribution it was *not* derived from is published rather than left in a scratchpad. For each Δ from 0 to 45 minutes, the number of consecutive same-`drug_class` administrations that far apart in the peri-intubation context, split by whether the two rows name the **same agent** (a redose) or **different agents** (a co-administration) — the two phenomena the fold merges, which are not the same thing. Columns: `delta_min`, `same_agent`, `n`, plus `max_delta_min` and `n_beyond_max_delta` as whole-table margins.
+
+| span | different agent | same agent | ratio |
+|---|---|---|---|
+| Δ = 0 | 4,615 | 301 | 15.3× |
+| Δ = 1 | 883 | 223 | 4.0× |
+| Δ = 2 … 45 | 6,127 | 6,952 | 0.88× |
+
+Co-administration is a Δ ≤ 1 min phenomenon and stops being one immediately: past Δ = 1 the two series run at the same rate, which is routine dosing and carries no co-administration signal at all. **There is no valley at 15 minutes, and the figure says so in its caption.** What the window past Δ = 1 buys is paralytic redosing, which is what the multi-pair episodes are actually made of. Computed in `05` — the only notebook holding the administrations — and emitted as counts only, with no identifier reaching the table; `07` applies the n ≥ 10 rule and plots it. `n_beyond_max_delta` is a margin rather than a cell, so it is withheld in the 1–9 range rather than handed to the row-level suppressor, which would drop the whole table on account of one number.
 
 #### Tier F — how much of the medication signal is maintenance sedation?
 
@@ -1208,6 +1272,7 @@ Extends the existing `config/config.json` schema read by `utils/config.py`.
   "episode_gap_hours": 3,
   "pair_gap_hours": 3,
   "infusion_prep_minutes": 60,
+  "collapse_gap_minutes": 15,
   "stitch_hours": 6,
   "trach_window_hours": 24,
   "min_age": 18,
@@ -1224,13 +1289,14 @@ Everything below `output_directory` is new. `date_start` and `date_end` are igno
 | `episode_gap_hours` | `02` | the device-continuity interval (D36). One interval serves both the pre-period test and the sustained test. Changes **how many episodes exist** and where each begins, so it moves every count in the study — widening it merges reintubations into their index episode, narrowing it splits a single ventilation across a charting gap. Separate from `window_hours` for the reason D29 gives about `pair_gap_hours`: two parameters that happen to share a default are not one parameter |
 | `infusion_prep_minutes` | `03`, `04` | how long after an intermittent administration a same-drug infusion `start` may fall for that administration to be maintenance prep (D40). **The only detection parameter measured in minutes, deliberately** — the others are ward-scale intervals in hours, and this one is procedural: a loading bolus precedes its drip by minutes, and naming it in hours would invite a value an order of magnitude too large. Moves `detected_induction_only` only; `detected`, the cohort and every Tier A/B/C/D table are unaffected (D42). Read directly from config by `03` and `04` for the reason D9 gives about `pair_gap_hours` — `01` has no administration set in hand and nothing to precompute — and echoed by both |
 | `pair_gap_hours` | `05` | maximum gap between the two members of a `PAIR` (D29). Read directly by `05` rather than written into an upstream artifact, because unlike `window_hours` there are no bounds to precompute — the scan needs the scalar. The only detection parameter not resolved upstream |
+| `collapse_gap_minutes` | `05` | the agent-event fold (D43.2). Administrations of the same `drug_class` within this many minutes of the event's first row are one clinical event before the scan sees them (§7.3). It is a **detection** parameter in the same sense `pair_gap_hours` is — it changes what a pair is, not how a pair is counted — and it is equally not post-hoc filterable: widening it merges events that a narrower setting left available to pair with something else. Read directly by `05` for the same reason `pair_gap_hours` is, and echoed there. **The value is a clinical definition, not a fitted one**, and E.7 publishes the distribution it is not fitted to |
 | `stitch_hours` | `01` | `time_interval` passed to `stitch_encounters` (D15). Changes the analytic unit itself, so every count in the study moves with it |
 | `trach_window_hours` | `01` | the exclusion clock in §5.5 (D18) |
 | `min_age` | `01` | the adult criterion, tested on `age_at_admission` |
 
-The last three are **cohort** parameters, not detection parameters: they change who is in the denominator rather than who is detected. `episode_gap_hours` and — under D38 — `window_hours` are now both, which is stated here because a reader looking for "the parameters that change the denominator" would otherwise stop at the last three. `01` echoes its three at the top of the notebook and writes them into `cohort_qc.csv`, `02` echoes its two, and `05` echoes `pair_gap_hours` and writes it into `method_PAIR_pairs.parquet`'s accompanying schema assertion output, so a published result carries the definitions that produced it. Everything else is a path or a site label.
+The last three are **cohort** parameters, not detection parameters: they change who is in the denominator rather than who is detected. `episode_gap_hours` and — under D38 — `window_hours` are now both, which is stated here because a reader looking for "the parameters that change the denominator" would otherwise stop at the last three. `01` echoes its three at the top of the notebook and writes them into `cohort_qc.csv`, `02` echoes its two, and `05` echoes `pair_gap_hours` and `collapse_gap_minutes` and writes the former into `method_PAIR_pairs.parquet`'s accompanying schema assertion output, so a published result carries the definitions that produced it. Everything else is a path or a site label.
 
-> **`pair_gap_hours` is the one parameter D9 does not cover.** Every other detection parameter is resolved once by `01` and consumed downstream as data, precisely so no notebook re-derives it. `pair_gap_hours` cannot follow that pattern: `01` has no pair scan to run and nothing to precompute. `05` therefore reads it from config directly and echoes it, which is the §4 "no silent defaults" requirement doing the work D9 does elsewhere.
+> **`pair_gap_hours` and `collapse_gap_minutes` are the two parameters D9 does not cover.** Every other detection parameter is resolved once upstream and consumed downstream as data, precisely so no notebook re-derives it. Neither of these can follow that pattern: `01` has no pair scan and no fold to run, and there are no bounds to precompute — both stages need the scalar itself. `05` therefore reads both from config directly and echoes both, which is the §4 "no silent defaults" requirement doing the work D9 does elsewhere.
 
 ------------------------------------------------------------------------
 
