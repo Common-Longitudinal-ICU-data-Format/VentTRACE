@@ -1363,7 +1363,7 @@ def _(
             "pct_le_30": round(100.0 * (_g <= 30).mean(), 1) if df.height else None,
         }
 
-    e2 = pl.DataFrame([_summarise(pairs_q, "all pairs"),
+    e2 = pl.DataFrame([_summarise(pairs_q, "all qualified pairs"),
                        _summarise(first_pairs_q, "index pairs (first, per episode)")])
     e2_pub = apply_min_cell(e2, ["n_pairs"], "E.2")
     e2_pub.write_csv(SHARE_DIR / "pair_gap_distribution.csv")
@@ -1420,9 +1420,14 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, first_pairs_q, pl):
         "  whose fold window caught both agents, and it is a distinct row from either alone,\n"
         "  because giving both together is a different induction from giving either. That is\n"
         "  why the grid is wider than the agent lists are long.\n"
-        "  D43.6: median_sed_dose is the dose of the label's LEAD agent (the alphabetically\n"
-        "  first one named), not a total across a combination, and sed_units is that agent's\n"
-        "  unit. On a combined row it therefore describes one component, not the event."
+        "  D43.6: median_sed_dose is the dose charted on the EARLIEST administration of the\n"
+        "  label's LEAD agent (the alphabetically first one named), never a total, and\n"
+        "  sed_units is that agent's unit. That caveat is NOT confined to the combined rows:\n"
+        "  an event is dated and dosed by its first administration whatever its label, so a\n"
+        "  single-agent row whose event absorbed a redose also reports the first push rather\n"
+        "  than the event. On any row where the fold merged more than one administration the\n"
+        "  dose therefore describes one administration of one agent, not the event; E.1's\n"
+        "  pct_index_pair_folded is the direct read on how often that is the case."
     )
     return (e3_pub,)
 
@@ -1488,8 +1493,8 @@ def _(COHORT_RUN_ID, SHARE_DIR, apply_min_cell, ep_q, pl):
     print(
         "\n  Read the `beyond +/-180 min` row against A.1's free_running/in_window gap — they\n"
         "  are two views of the same episodes. Every one is a case where the earliest\n"
-        "  sedative-paralytic co-administration of the stay is not near the index IMV. Three\n"
-        "  explanations compete and this design cannot separate them: the patient was\n"
+        "  sedative-paralytic co-administration of the episode is not near the index IMV.\n"
+        "  Three explanations compete and this design cannot separate them: the patient was\n"
         "  intubated where device charting did not follow, t0 landed on a later ventilation\n"
         "  episode, or the pair was coincidental. Sizing the disagreement without adjudicating\n"
         "  it is the correct move."
@@ -1571,7 +1576,7 @@ def _(COLLAPSE_GAP_MINUTES, MIN_CELL, SHARE_DIR, apply_min_cell, collapse_deltas
         f"  table is published so a reader can see exactly what it is and is not fitted to.\n"
         f"  The spikes at every multiple of 5 are the charting grid, present in both series."
     )
-    return (e7_pub,)
+    return e7, e7_pub
 
 
 @app.cell
@@ -2276,7 +2281,7 @@ def _(COLORS, MIN_CELL, SITE, ep_q, finish, pl, plt):
 
 
 @app.cell
-def _(SITE, e3_pub, finish, plt):
+def _(COLLAPSE_GAP_MINUTES, SITE, e3_pub, finish, plt):
     # F8 -- E.3 as a heatmap, from the published (already suppressed) table.
     _seds = sorted(set(e3_pub.get_column("sed_med_category").to_list()))
     _paras = sorted(set(e3_pub.get_column("para_med_category").to_list()))
@@ -2316,8 +2321,9 @@ def _(SITE, e3_pub, finish, plt):
         "Cell shows the number of index pairs (one per episode) and the median gap between "
         "the two members. Combinations with fewer than 10 pairs are absent, not zero. This "
         "joint distribution is not derivable from SED and PARA run separately. A row label "
-        "joined by `+` is a single agent event whose 15-minute fold caught more than one "
-        "agent (D43.5) — it is a distinct induction, not a double-count of its components.",
+        f"joined by `+` is a single agent event whose {COLLAPSE_GAP_MINUTES:.0f}-minute fold "
+        "caught more than one agent (D43.5) — it is a distinct induction, not a double-count "
+        "of its components.",
     )
     return
 
@@ -2392,27 +2398,38 @@ def _(
     MIN_CELL,
     SITE,
     WINDOW_HOURS,
+    e7,
     e7_pub,
     finish,
     plt,
 ):
-    # F11 -- E.7, the picture the 15-minute threshold has to survive. Drawn from the
-    # PUBLISHED table and nothing else (D26), so the figure cannot disagree with the CSV
-    # beside it. What that costs is that any of these cells may be ABSENT, and the three
-    # places that read one have to degrade differently rather than assume it is there:
-    # the curves skip it (`_pts` filters on membership), the annotations are not drawn at
-    # all (a point with no count has no y coordinate to hang off), and the title and caption
-    # say "withheld" through `_fmt`. At this site the smallest of the four numbers named
-    # below is 223, so none of that fires -- but a smaller federated site is exactly where
-    # the n >= 10 rule bites, and a KeyError halfway through the publishing run is the worst
-    # available way to find out.
+    # F11 -- E.7, the picture the collapse window has to survive. Drawn from the PUBLISHED
+    # table and nothing else (D26), so the figure cannot disagree with the CSV beside it.
+    # What that costs is that any of these cells may be ABSENT, and every place that reads
+    # one has to degrade rather than assume it is there: the curves skip it (`_pts` filters
+    # on membership), the annotations are not drawn at all (a point with no count has no y
+    # coordinate to hang off), single cells say "withheld" through `_fmt`, and every SPAN
+    # total carries the count of cells missing from it so the caption can star it and
+    # withdraw the rate claim rather than publish a short sum as if it were complete. The
+    # two table-level scalars are read the way E.7 reads them, off e7 and off a
+    # height-guarded e7_pub, so a fully suppressed table degrades instead of raising.
+    # At this site the smallest cell the figure names outright holds 79 intervals, so none
+    # of that fires -- but a smaller federated site is exactly where the n >= 10 rule bites,
+    # and an IndexError halfway through the publishing run is the worst available way to
+    # find out.
     #
     # Lines rather than bars: 92 bars in two overlapping series is unreadable, and the
     # question is where the two CROSS, which a line answers and a bar chart hides. Log y
     # because delta 0 is two orders of magnitude above the tail -- on a linear axis every
     # point past delta 2 is flat against the axis, which is the opposite of the finding.
-    _max = int(e7_pub.get_column("max_delta_min")[0])
-    _beyond = e7_pub.get_column("n_beyond_max_delta")[0]
+    # Both of these are read exactly the way E.7 reads them. max_delta_min comes off e7,
+    # the UNSUPPRESSED input: it is a constant of the input contract rather than a count,
+    # suppression cannot change it, and taking it from the input keeps the x axis alive even
+    # if every cell were withheld. n_beyond_max_delta IS a count, so it is read off the
+    # published frame -- guarded on its height, because a fully suppressed e7_pub has no row
+    # to index and `None` is already the value the caption renders as "withheld".
+    _max = int(e7.get_column("max_delta_min")[0])
+    _beyond = e7_pub.get_column("n_beyond_max_delta")[0] if e7_pub.height else None
     _cells = {(r["delta_min"], r["same_agent"]): r["n"] for r in e7_pub.to_dicts()}
     # 05 always emits the complete 0..max x {same, different} grid and asserts it, so any
     # shortfall in the published height is the n >= 10 rule and nothing else.
@@ -2420,7 +2437,21 @@ def _(
     _n_zero = sum(1 for _v in _cells.values() if _v == 0)
 
     def _tot(_same, _lo, _hi):
-        return sum(_v for (_k, _s), _v in _cells.items() if _s is _same and _lo <= _k <= _hi)
+        """Total over PUBLISHED cells in the span, and how many of the span's cells are gone.
+
+        The two travel together for the reason E.7's `_span` returns both: a sum that quietly
+        omits a withheld cell reads as a smaller true number, and this figure's title calls
+        two such sums "the same rate". The console summary already appends `*` and says
+        "Absent, not zero"; the figure is the artifact that actually leaves the site, so it
+        holds to the same standard.
+        """
+        _have = [_k for _k in range(_lo, _hi + 1) if (_k, _same) in _cells]
+        return sum(_cells[(_k, _same)] for _k in _have), (_hi - _lo + 1) - len(_have)
+
+    def _delta_total(_k):
+        """Both series at a single Δ, with the same incompleteness marker."""
+        (_a, _am), (_b, _bm) = _tot(False, _k, _k), _tot(True, _k, _k)
+        return _a + _b, _am + _bm
 
     def _fmt(_delta, _same):
         """A published count, or the fact that it was withheld -- never a guess."""
@@ -2479,14 +2510,63 @@ def _(
     )
 
     _r0_txt = _ratio(_cells.get((0, False)), _cells.get((0, True)), 1)
-    _rt_a, _rt_b = _tot(False, 2, _max), _tot(True, 2, _max)
-    _rt_txt = "" if not _rt_b else f" ({_rt_a / _rt_b:.2f}x — the same rate)"
+    (_rt_a, _rt_amiss), (_rt_b, _rt_bmiss) = _tot(False, 2, _max), _tot(True, 2, _max)
+    _rt_incomplete = _rt_amiss + _rt_bmiss
+    # `*` on whichever side lost a cell, and NO ratio when either did: "the same rate" is a
+    # claim about two complete totals, and a ratio between a complete number and one that is
+    # missing part of itself is not a ratio. Same rule, same marker as E.7's console summary.
+    _rt_as = f"{_rt_a:,}" + ("*" if _rt_amiss else "")
+    _rt_bs = f"{_rt_b:,}" + ("*" if _rt_bmiss else "")
+    _rt_txt = (
+        "" if not _rt_b or _rt_incomplete else f" ({_rt_a / _rt_b:.2f}x — the same rate)"
+    )
     _ax.set_title(
         f"E.7  the collapse window is a clinical choice, not a valley — {SITE}\n"
         f"Δ=0  {_fmt(0, False)} different-agent vs {_fmt(0, True)} same-agent"
-        f"{_r0_txt}     Δ≥2  {_rt_a:,} vs {_rt_b:,}{_rt_txt}",
+        f"{_r0_txt}     Δ≥2  {_rt_as} vs {_rt_bs}{_rt_txt}",
         loc="left", fontweight="bold", fontsize=10,
     )
+    # M-2's clause for the caption. When every cell in Δ∈[2,max] survived, the figure may
+    # say "the same rate" and show the two totals plainly. When one did not, both totals are
+    # lower bounds, the rate claim is withdrawn, and the reader is told the missing cells are
+    # absent rather than zero -- the wording E.7's console summary already uses.
+    _rate_clause = (
+        f"From Δ = 2 onward the two series run at the same rate ({_rt_as} different-agent "
+        f"against {_rt_bs} same-agent), so past one minute there is no co-administration "
+        "signal left — only routine repeat dosing. "
+        if not _rt_incomplete
+        else f"From Δ = 2 onward the two totals shown ({_rt_as} different-agent against "
+        f"{_rt_bs} same-agent) are sums over PUBLISHED cells only: {_rt_incomplete} cell(s) "
+        f"in Δ∈[2,{_max}] hold 1..{MIN_CELL - 1} intervals and are absent, not zero. Each "
+        "starred total is therefore a lower bound and no rate is claimed from the pair. "
+    )
+
+    # M-8. The fold's boundary is INCLUSIVE, and it lands on a charting-grid multiple of 5 --
+    # which is exactly where the intervals pile up. So `<=` versus `<` is not a rounding
+    # convention here, it decides the fate of every interval in that spike, and the caption
+    # has to size it. Counts come from the published cells and the clause degrades to a
+    # qualitative statement if any of the three Δ it names was withheld.
+    _edge = int(round(COLLAPSE_GAP_MINUTES))
+    _edge_n, _edge_miss = _delta_total(_edge)
+    _lo_n, _lo_miss = _delta_total(_edge - 1)
+    _hi_n, _hi_miss = _delta_total(_edge + 1)
+    _all_n = sum(_cells.values())
+    _edge_clause = (
+        f"That spike is also the largest in its neighbourhood — {_edge_n:,} intervals sit "
+        f"exactly on Δ = {_edge}, {100.0 * _edge_n / _all_n:.1f}% of all 0–{_max} min "
+        f"intervals, against {_lo_n:,} at Δ = {_edge - 1} and {_hi_n:,} at Δ = {_edge + 1} — "
+        f"and the window is inclusive, so all of them fold. Reading the parameter as `<` "
+        f"rather than `≤` would split every one: the choice turns on a measured "
+        f"{100.0 * _edge_n / _all_n:.1f}% of the intervals in this range, not on a rounding "
+        "convention. A site charting on a coarser grid will have its spike somewhere else "
+        "and will fold differently for the same reason. "
+        if _all_n and _edge_n and not (_edge_miss or _lo_miss or _hi_miss)
+        else f"The window is inclusive, so every interval sitting exactly on Δ = {_edge} "
+        "folds and reading the parameter as `<` rather than `≤` would split all of them; "
+        f"the counts that would size that choice are not fully published at Δ = {_edge - 1}"
+        f"..{_edge + 1}. A site charting on a coarser grid will fold differently. "
+    )
+
     # Just enough room under the axis label for the caption to start; `finish` hangs the
     # caption below the figure and bbox_inches="tight" grows the canvas to hold it, so a
     # large reservation here is pure white space between the two.
@@ -2499,16 +2579,16 @@ def _(
         "name different agents (a co-administration) or the same agent (a redose) — the two "
         "things the D43 fold merges. Co-administration is a Δ ≤ 1 min phenomenon: "
         f"{_fmt(0, False)} vs {_fmt(0, True)} intervals at Δ = 0 and "
-        f"{_fmt(1, False)} vs {_fmt(1, True)} at Δ = 1. From Δ = 2 onward the "
-        f"two series run at the same rate ({_rt_a:,} different-agent against "
-        f"{_rt_b:,} same-agent), so past one minute there is no "
-        "co-administration signal left — only routine repeat dosing. THE SHADED BAND IS THE "
+        f"{_fmt(1, False)} vs {_fmt(1, True)} at Δ = 1. "
+        + _rate_clause
+        + "THE SHADED BAND IS THE "
         f"WINDOW ACTUALLY USED: {COLLAPSE_GAP_MINUTES:.0f} min was chosen as a clinical "
         "definition of one induction sequence, NOT fitted to a valley in this distribution — "
         "there is no valley here to fit, and the threshold is wide because a charted "
         "induction is, not because the data marks that spot. The spikes at every multiple of "
-        "5 min are the charting grid; they are in both series, and the one at Δ = 15 is grid, "
-        "not boundary. "
+        f"5 min are the charting grid; they are in both series, and the one sitting on the "
+        f"boundary at Δ = {_edge} is grid, not boundary-induced. "
+        + _edge_clause
         + (
             f"{_beyond:,} intervals longer than {_max} min are not shown. "
             if _beyond is not None
