@@ -29,3 +29,4 @@ output/*
 
 # site-specific config (create from config_template.json)
 config/config.json
+*.pyc
