@@ -1586,8 +1586,10 @@ def _(mo):
         ## Tier F — how much of the medication signal is maintenance sedation?
 
         The D40 sub-analysis. **This is the only tier that reads `detected_induction_only`.**
-        Tiers A–E stay on `detected` (D42), so every number above is comparable against runs
-        that predate D40, and the denominator here is the same N\*\* they use.
+        Tiers A–E stay on `detected` (D42), so every number above stays comparable across
+        the change, and the denominator here is the same N\*\* they use. (Comparable *across
+        D40* — not against any run that predates it: such a run also predates D43's agent-event
+        fold, which moved Tier A's `PAIR` rows and the whole of Tier E.)
 
         D38's eligibility filter is deliberately *not* refined. If an episode qualified only
         when a non-prep induction agent were charted, every surviving episode would have one
@@ -2413,8 +2415,9 @@ def _(
     # withdraw the rate claim rather than publish a short sum as if it were complete. The
     # two table-level scalars are read the way E.7 reads them, off e7 and off a
     # height-guarded e7_pub, so a fully suppressed table degrades instead of raising.
-    # At this site the smallest cell the figure names outright holds 79 intervals, so none
-    # of that fires -- but a smaller federated site is exactly where the n >= 10 rule bites,
+    # At this site the four cells the caption names outright hold 4615/301/883/223 intervals
+    # and the smallest cell anywhere in E.7 holds 29, so none of that fires -- but a smaller
+    # federated site is exactly where the n >= 10 rule bites,
     # and an IndexError halfway through the publishing run is the worst available way to
     # find out.
     #
