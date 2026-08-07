@@ -558,6 +558,16 @@ def _(
     # Partitioned exactly as the fold is -- (encounter_block, drug_class) -- so the interval
     # being measured is the interval the fold decides on. admin_min via `epoch_minutes`,
     # never `datetime.timestamp()`; see that helper for why the difference is an hour.
+    #
+    # KNOWN AND LEFT ALONE: the shift runs within (encounter_block, drug_class) AFTER the
+    # peri-intubation filter, so in a block holding two episodes whose +/-3 h windows are
+    # disjoint, the last row of window A and the first of window B form one interval that
+    # spans administrations nobody measured. It is a real artifact of measuring on a
+    # filtered series, and it does not touch what this table is for: it affects the
+    # same-agent and different-agent series identically, and a cross-window interval is
+    # necessarily longer than a window gap, so it can only land in the delta >= 2 tail where
+    # D43.2 already reports the two series running at the same rate. The finding -- that the
+    # co-administration excess is confined to delta <= 1 -- does not rest on it.
     _intervals = (
         _rows.join(_peri_ids, on="_rid", how="semi")
         .sort(["encounter_block", "drug_class", "admin_dttm", "med_category"])
