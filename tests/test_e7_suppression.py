@@ -128,14 +128,23 @@ def test_min_cell_is_ten_in_the_notebook():
 # --------------------------------------------------------------------------------------
 
 
-def _deltas(overrides=None, base=40, beyond=5897):
+# The real table has a charting-grid pile-up on the collapse boundary -- 1,164 intervals
+# at Δ = 15 at MIMIC against ~200 either side -- and that pile-up is the whole premise of
+# the "largest in its neighbourhood" clause. The default frame reproduces it, so the
+# control test below exercises the clause firing; `spike=False` flattens it, which is the
+# other site the clause has to be honest at.
+SPIKE = {(15, False): 500, (15, True): 600}
+
+
+def _deltas(overrides=None, base=40, beyond=5897, spike=True):
     """A complete 0..MAX x {different, same} grid, as 05 emits and asserts.
 
-    `overrides` maps (delta_min, same_agent) -> n. Anything not overridden holds `base`,
-    which is comfortably above MIN_CELL, so the suppression under test is only ever the
-    suppression the test asked for.
+    `overrides` maps (delta_min, same_agent) -> n and is applied last, so a test can
+    suppress or flatten the boundary spike. Anything not set holds `base`, which is
+    comfortably above MIN_CELL, so the suppression under test is only ever the suppression
+    the test asked for.
     """
-    overrides = overrides or {}
+    overrides = {**(SPIKE if spike else {}), **(overrides or {})}
     rows = []
     for _delta in range(MAX_DELTA + 1):
         for _same in (False, True):
@@ -293,14 +302,62 @@ def test_a_short_span_total_is_starred_and_claims_no_rate(tmp_path, figures):
     assert "lower bound" in caption.lower()
 
 
+DEGRADED = "No count is put on that here"
+
+
 def test_the_boundary_sensitivity_clause_degrades(tmp_path, figures):
     """(15, same) is withheld, so the Δ=15 spike cannot be sized and must not be guessed."""
     _, fig = _render(_deltas({**SUPPRESSED, **ZERO_CELL}), tmp_path, figures)
     caption = fig["caption"]
-    assert "not fully published" in caption, caption
+    assert DEGRADED in caption, caption
     assert "largest in its neighbourhood" not in caption, (
         "the spike was sized from a span containing a withheld cell"
     )
+
+
+def test_a_flat_neighbourhood_is_not_called_a_spike(tmp_path, figures):
+    """Nothing is suppressed and every Δ holds the same count — so there is no spike.
+
+    `collapse_gap_minutes` is per-site config. At a site whose value is not a multiple of
+    the charting grid the boundary bin has no pile-up on it, and a caption that says
+    "the largest in its neighbourhood" is then a measured claim that is false — published,
+    to the consortium, exactly the failure I-1 blocked the merge over. The clause has to
+    be conditional on the comparison it makes, not merely on the cells being published.
+    """
+    _, fig = _render(_deltas(spike=False), tmp_path, figures)
+    caption = fig["caption"]
+    assert "largest in its neighbourhood" not in caption, (
+        "a flat neighbourhood was published as a spike: " + caption
+    )
+    assert DEGRADED in caption, caption
+    # ...and no measured size is smuggled in by another route.
+    assert "% of all" not in caption, caption
+    assert "turns on a measured" not in caption, caption
+    # The sentence one clause earlier makes the same claim in prose and is gated on the
+    # same comparison: with no spike on the boundary there is no spike to call grid.
+    assert "sitting on the boundary" not in caption, caption
+    assert "does not sit on one of them here" in caption, caption
+
+
+@pytest.mark.parametrize(
+    ("label", "spike_at_edge"),
+    [
+        ("ties its lower neighbour", {(15, False): 40, (15, True): 40}),
+        ("ties its upper neighbour", {(15, False): 45, (15, True): 35}),
+        ("sits below its neighbours", {(15, False): 10, (15, True): 10}),
+    ],
+)
+def test_a_boundary_that_does_not_exceed_both_neighbours_is_not_a_spike(
+    label, spike_at_edge, tmp_path, figures
+):
+    """Strictly greater than BOTH sides, or the clause says nothing.
+
+    A tie is not a spike, and at `base = 40` per cell the neighbours total 80 each — so
+    the first two cases sum to exactly 80 at the boundary and the third to 20.
+    """
+    _, fig = _render(_deltas(spike_at_edge, spike=False), tmp_path, figures)
+    assert "largest in its neighbourhood" not in fig["caption"], (label, fig["caption"])
+    assert DEGRADED in fig["caption"], (label, fig["caption"])
 
 
 def test_a_withheld_whole_table_margin_says_so(tmp_path, figures):
@@ -317,7 +374,7 @@ def test_every_cell_suppressed_still_renders(tmp_path, figures):
     frame; `n_beyond_max_delta` is a count and comes off a height-guarded published frame.
     Neither may be indexed blind.
     """
-    e7_pub, fig = _render(_deltas(base=5, beyond=3), tmp_path, figures)
+    e7_pub, fig = _render(_deltas(base=5, beyond=3, spike=False), tmp_path, figures)
     assert e7_pub.height == 0
     text = fig["title"] + " " + fig["caption"]
     assert f"withheld (<{MIN_CELL})" in text
@@ -332,8 +389,9 @@ def test_every_cell_suppressed_still_renders(tmp_path, figures):
     [
         ("none suppressed", _deltas()),
         ("some suppressed", _deltas({**SUPPRESSED, **ZERO_CELL})),
-        ("all suppressed", _deltas(base=5, beyond=3)),
+        ("all suppressed", _deltas(base=5, beyond=3, spike=False)),
         ("margin suppressed", _deltas(beyond=4)),
+        ("flat, no boundary spike", _deltas(spike=False)),
     ],
 )
 def test_no_figure_text_ever_contains_a_bare_nan(label, deltas, tmp_path, figures):
@@ -352,5 +410,13 @@ def test_the_unsuppressed_case_still_makes_its_claim(tmp_path, figures):
     _, fig = _render(_deltas(), tmp_path, figures)
     assert "the same rate)" in fig["title"], fig["title"]
     assert "withheld" not in fig["title"]
-    assert "largest in its neighbourhood" in fig["caption"]
     assert "*" not in fig["title"]
+    # The boundary spike (500 + 600 = 1,100) genuinely stands above both neighbours (80
+    # each), so the clause fires AND names all three counts. Without this the tests above
+    # would all pass on a clause that had simply been switched off.
+    caption = fig["caption"]
+    assert "largest in its neighbourhood" in caption, caption
+    assert "1,100 intervals sit exactly on Δ = 15" in caption, caption
+    assert "against 80 at Δ = 14 and 80 at Δ = 16" in caption, caption
+    assert "the one sitting on the boundary at Δ = 15 is grid, not boundary-induced" in caption
+    assert DEGRADED not in caption, caption

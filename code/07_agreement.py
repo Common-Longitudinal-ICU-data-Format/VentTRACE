@@ -2544,13 +2544,39 @@ def _(
     # M-8. The fold's boundary is INCLUSIVE, and it lands on a charting-grid multiple of 5 --
     # which is exactly where the intervals pile up. So `<=` versus `<` is not a rounding
     # convention here, it decides the fate of every interval in that spike, and the caption
-    # has to size it. Counts come from the published cells and the clause degrades to a
-    # qualitative statement if any of the three Δ it names was withheld.
+    # has to size it. Counts come from the published cells, and the clause degrades to a
+    # qualitative statement naming NO numbers unless it has earned every word of itself:
+    # all three Δ published, and the boundary bin actually GREATER than both neighbours.
+    # The second condition is not pedantry. `collapse_gap_minutes` is per-site config, and
+    # at a site whose value is not a charting-grid multiple there is no pile-up at the
+    # boundary at all -- "the largest in its neighbourhood" would then be a measured claim
+    # that is simply false, published to the consortium. Same failure mode as a hard-coded
+    # fold width: true here, untrue there.
     _edge = int(round(COLLAPSE_GAP_MINUTES))
     _edge_n, _edge_miss = _delta_total(_edge)
     _lo_n, _lo_miss = _delta_total(_edge - 1)
     _hi_n, _hi_miss = _delta_total(_edge + 1)
     _all_n = sum(_cells.values())
+    _edge_is_spike = bool(
+        _all_n
+        and not (_edge_miss or _lo_miss or _hi_miss)
+        and _lo_n
+        and _hi_n
+        and _edge_n > _lo_n
+        and _edge_n > _hi_n
+    )
+
+    # The sentence the caption already carried -- "the one sitting on the boundary is grid,
+    # not boundary-induced" -- asserts a spike exists at Δ = _edge. It does here, because 15
+    # is a charting-grid multiple. At a site whose collapse_gap_minutes is not, there is no
+    # spike on the boundary to characterise and the sentence names one anyway, so it is
+    # gated on the same measured comparison as the clause below it.
+    _grid_clause = (
+        f", and the one sitting on the boundary at Δ = {_edge} is grid, not "
+        "boundary-induced. "
+        if _edge_is_spike
+        else f". The collapse boundary at Δ = {_edge} does not sit on one of them here. "
+    )
     _edge_clause = (
         f"That spike is also the largest in its neighbourhood — {_edge_n:,} intervals sit "
         f"exactly on Δ = {_edge}, {100.0 * _edge_n / _all_n:.1f}% of all 0–{_max} min "
@@ -2560,11 +2586,13 @@ def _(
         f"{100.0 * _edge_n / _all_n:.1f}% of the intervals in this range, not on a rounding "
         "convention. A site charting on a coarser grid will have its spike somewhere else "
         "and will fold differently for the same reason. "
-        if _all_n and _edge_n and not (_edge_miss or _lo_miss or _hi_miss)
+        if _edge_is_spike
         else f"The window is inclusive, so every interval sitting exactly on Δ = {_edge} "
-        "folds and reading the parameter as `<` rather than `≤` would split all of them; "
-        f"the counts that would size that choice are not fully published at Δ = {_edge - 1}"
-        f"..{_edge + 1}. A site charting on a coarser grid will fold differently. "
+        "folds and reading the parameter as `<` rather than `≤` would split all of them. "
+        f"No count is put on that here: this figure sizes the choice only where Δ = {_edge} "
+        f"stands above both Δ = {_edge - 1} and Δ = {_edge + 1} and all three survived "
+        "publication, which is not the case at this site. A site charting on a grid the "
+        "collapse window does not land on will fold differently again. "
     )
 
     # Just enough room under the axis label for the caption to start; `finish` hangs the
@@ -2586,8 +2614,8 @@ def _(
         "definition of one induction sequence, NOT fitted to a valley in this distribution — "
         "there is no valley here to fit, and the threshold is wide because a charted "
         "induction is, not because the data marks that spot. The spikes at every multiple of "
-        f"5 min are the charting grid; they are in both series, and the one sitting on the "
-        f"boundary at Δ = {_edge} is grid, not boundary-induced. "
+        "5 min are the charting grid; they are in both series"
+        + _grid_clause
         + _edge_clause
         + (
             f"{_beyond:,} intervals longer than {_max} min are not shown. "
