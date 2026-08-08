@@ -26,8 +26,9 @@ output/intermediate_phi/*
 !output/intermediate_phi/README.md
 
 output/*
+ouput_mimic/*
 
 # site-specific config (create from config_template.json)
 config/config.json
 *.pyc
-ouput_mimic/*
+
