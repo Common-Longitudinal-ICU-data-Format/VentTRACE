@@ -1035,6 +1035,63 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
 def _(mo):
     mo.md(
         """
+        ### The composition of an index event
+
+        `n_admins` and `n_agents` answer two different questions and are published as
+        separate columns because at some sites they diverge and at others they do not.
+
+        - `n_admins` is how many pushes the fold absorbed. `n_admins == 1` is a **solo**
+          index paralytic; anything above it is a multi-administration event.
+        - `n_agents` is how many *distinct* drugs those pushes were. `n_agents > 1` is a
+          genuine **co-administration**; `n_agents == 1` with `n_admins > 1` is a
+          **redose** of one agent inside the fold window.
+
+        A site can have hundreds of multi-administration events and zero
+        co-administrations, and the distinction changes what the fifteen-minute window is
+        doing there. Reporting only `is_coadmin` (defined as `n_admins > 1`) would call
+        both cases co-administration and hide that.
+
+        Only observed combinations are emitted. Unlike the gap bins and the agent-pair
+        grid, `n_admins` has no upper bound to build a grid from, so an absent row means
+        no index event had that shape rather than a suppressed count.
+        """
+    )
+    return
+
+
+@app.cell
+def _(SHARE_DIR, index_paralytic, pl, publish):
+    # Grouped on (n_admins, n_agents), which are the group keys and therefore jointly
+    # unique -- no tiebreak is needed for the sort to be byte-identical across runs.
+    index_composition = (
+        index_paralytic.group_by(["n_admins", "n_agents"])
+        .agg(
+            n_index=pl.len(),
+            n_administrations=pl.col("n_admins").sum(),
+            n_blocks=pl.col("encounter_block").n_unique(),
+            n_patients=pl.col("patient_id").n_unique(),
+        )
+        .sort(["n_admins", "n_agents"])
+    )
+    publish(
+        index_composition,
+        SHARE_DIR / "index_composition.csv",
+        "index_composition",
+    )
+
+    _solo = index_composition.filter(pl.col("n_admins") == 1).get_column("n_index").sum()
+    _multi = index_composition.filter(pl.col("n_admins") > 1).get_column("n_index").sum()
+    _coadmin = index_composition.filter(pl.col("n_agents") > 1).get_column("n_index").sum()
+    print(f"solo index paralytics   : {_solo:,}")
+    print(f"multi-administration    : {_multi:,}")
+    print(f"  of which co-administration (2+ distinct agents): {_coadmin:,}")
+    return (index_composition,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
         ### The polars -> pandas -> polars boundary, standardising doses with clifpy
 
         P18, amended 2026-08-10: doses are converted to one preferred unit per
