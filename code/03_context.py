@@ -848,6 +848,30 @@ def _(mo):
         converted** (P18). Dose statistics are keyed on `(med_category, med_dose_unit)`, so
         a site charting propofol in both `mg` and `mg/kg` produces two rows a reader can
         see rather than one number that is silently wrong.
+
+        ### What E's counts count: PAIRS, not administrations
+
+        The join is on `encounter_block`, and a block holds up to five index paralytics. A
+        single physical administration that falls inside two index windows therefore
+        contributes **two** rows — once to each window. That is correct and intended: the
+        administration genuinely happened within ±60 minutes of both paralytics, and the
+        same fan-out is what `02`'s bridge relies on. Deduplicating would have to pick one
+        index paralytic to attribute it to, and there is no principled way to choose.
+
+        But it means every count E publishes is a count of **(index paralytic,
+        administration) pairs**, and at this site the two numbers differ:
+
+        | | |
+        |---|---|
+        | pairs inside a window | **3,570** |
+        | distinct administrations behind them | **3,297** |
+        | pairs that are a re-count of an administration already seen | **273 — 7.6% of the total** |
+
+        Calling that column `n` and its axis "administrations" would overstate the number of
+        drug administrations by that margin, so the published column is named
+        **`n_admin_windows`** and E.1's y-axis and E.2's row labels say the same. A patient
+        redosed inside a block with several index paralytics contributes more than once, on
+        purpose, and the column name is where a reader finds that out.
         """
     )
     return
@@ -926,6 +950,12 @@ def _(
         "above against the mCIDE med_category list before trusting a zero."
     )
 
+    # ONE ROW PER (index paralytic, administration) PAIR, not per administration. The join
+    # is on encounter_block, and a block holds up to five index paralytics, so a single
+    # physical administration that lies inside two index windows produces two rows. That
+    # fan-out is intended -- the administration genuinely belongs to both windows, the same
+    # reasoning 02's bridge uses -- but it means every count derived from this frame is a
+    # count of PAIRS. The published columns are named `n_admin_windows` for that reason.
     sed_in_window = (
         context_d.select(
             "index_paralytic_id", "encounter_block", _t_min=epoch_minutes("t_dttm")
@@ -939,6 +969,7 @@ def _(
         .filter(in_window_expr("offset_minutes", CONTEXT_WINDOW_MINUTES))
         .select(
             "index_paralytic_id",
+            "encounter_block",
             "med_category",
             "admin_dttm",
             "offset_minutes",
@@ -948,7 +979,25 @@ def _(
         )
     )
 
-    print(f"sedative administrations inside a window : {sed_in_window.height:,}")
+    # hospitalization_id is dropped at the bridge (P5), so the finest identity available
+    # for a physical administration is the block plus the charted row itself.
+    _distinct_admins = sed_in_window.select(
+        "encounter_block",
+        "admin_dttm",
+        "med_category",
+        "med_dose",
+        "med_dose_unit",
+        "mar_action_category",
+    ).unique().height
+    print(
+        f"(index paralytic, administration) pairs in a window : {sed_in_window.height:,}"
+    )
+    print(
+        f"distinct administrations behind them                : {_distinct_admins:,}  "
+        f"({sed_in_window.height - _distinct_admins:,} pairs, "
+        f"{100 * (sed_in_window.height - _distinct_admins) / sed_in_window.height:.1f}% of "
+        "the total, are an administration counted again in a second index window)"
+    )
     return sed_admin, sed_in_window
 
 
@@ -1092,19 +1141,205 @@ def _(mo):
         a second row has to go with it. Publishing this table without the guard is precisely
         the leak the guard was written for.
 
-        The other two are **not** partitions of a public total.
-        `sedation_offset_distribution.csv` counts administrations, not index paralytics, and
-        one index paralytic contributes as many rows as it had administrations (P17), so its
-        column sums to a number nothing else publishes. `sedation_dose.csv` sums to the same
-        unpublished total. Neither is recoverable by subtraction, so neither takes the second
-        withholding — the guard is applied where the arithmetic demands it, not everywhere,
-        because withholding a row that protects nothing costs a reader for free.
+        The other two tables partition **each other**, and that is a separate hazard with a
+        separate fix — see the cell below. Neither partitions the index paralytic total, so
+        neither takes `withhold_second_row`: the guard is applied where the arithmetic
+        demands it, not everywhere, because withholding a row that protects nothing costs a
+        reader for free.
 
         Every bin of the offset grid is emitted for every agent, including the empty ones: an
         explicit published zero is what lets a reader tell an empty bin from a withheld one.
         """
     )
     return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+        ### The per-agent leak between the two E tables, and why it is closed on the offset side
+
+        The two E tables are **partitions of one another, per agent**. Both count the same
+        3,570 (index paralytic, administration) pairs: `sedation_offset_distribution.csv`
+        splits them by offset bin, `sedation_dose.csv` splits them by charted unit. The grand
+        total is nothing any released file publishes — but the *per-agent* total is, and
+        `sedation_offset_distribution.csv` publishes it itself:
+
+        > **an agent's bin sum becomes a public total exactly when that agent has ZERO
+        > withheld bins**, because then the 24 published bins sum to its true in-window
+        > total.
+
+        Measured at this site before the fix, this was live and exact:
+
+        ```
+        propofol :  0 of 24 bins withheld  ->  published bin sum = 1,433 = its true total
+                    sedation_dose.csv publishes  propofol / mg / 1,427
+                    1,433 - 1,427 = 6   <-- the withheld propofol/mcg cell, recovered exactly
+        ```
+
+        Midazolam and ketamine escaped only by accident — they happen to have withheld bins,
+        so their bin sums are not their totals. Accident is not a control.
+
+        **The rule:** for any agent with at least one withheld **dose** row *and* zero
+        withheld **offset** bins, the two files must not both be published in full.
+
+        **Closed on the offset side, not the dose side.** Running `withhold_second_row` over
+        propofol's dose rows would pick `propofol / mg` as the victim — it is the only other
+        row — costing a reader the median dose of the dominant sedative at this site to
+        protect a count of 6. Withholding one offset bin costs one bar of a 24-bar histogram.
+        The cheaper withholding is also the more protective one, so there is no trade to
+        weigh.
+
+        **The arithmetic**, which fixes the threshold exactly as `withhold_second_row`'s does:
+
+        ```
+        true per-agent total          T
+        withheld dose cell            v,  1 <= v <= 9      (it was suppressed)
+        published dose total          D  =  T - v
+        withheld offset bin           w                    (we remove it)
+
+        reader sees   published_offset_sum = T - w = D + v - w
+        reader solves v = (published_offset_sum - D) + w = c + w,  c known, w unknown
+
+        w is only known to the reader as "a bin that is missing", which the row-level rule
+        alone could explain for any w in 1..9.  So the reader's candidate set is
+        w in [1-c, 9-c], and every one of v = 1..9 stays feasible provided no candidate w
+        can be excluded.  A candidate below MIN_CELL cannot be excluded either, so the
+        binding requirement is that the whole candidate range sit at or above MIN_CELL:
+
+            1 - c >= 10   <=>   c <= -9   <=>   w >= v + 9,  worst case v = 9  =>  w >= 18
+        ```
+
+        `w >= 18 = 2 * MIN_CELL - 2` — the same threshold, reached by the same argument. The
+        victim is the **smallest** surviving bin that reaches it, so the reader loses the
+        least. A published **zero** is never chosen: withholding a zero leaves the bin sum
+        unchanged and would look like protection while leaving `v` recoverable exactly as
+        before. The `w >= 18` threshold already excludes zeros; the rule is stated because it
+        is why the threshold may not be relaxed to "any bin".
+
+        **Degenerate case**, resolved the same way `withhold_second_row` resolves its own: if
+        no bin of that agent reaches 18, no single withholding can keep all nine values of
+        `v` feasible, so **the agent's entire offset distribution is withheld**. A partial
+        residual would lose bars *and* still narrow the withheld dose cell — the worst of
+        both. The unit that gets withheld is the agent's block of rows, because the agent is
+        the unit the leak is computed over.
+
+        This is the fourth instance of the P24 defect class in this pipeline, and the first
+        where the public total is published by a *sibling released file* rather than by an
+        upstream one. It is written as an explicit named function with its own tests rather
+        than folded into `withhold_second_row`, because the total it protects is a different
+        fact reached by a different route and the reasoning had to be re-done, not inherited.
+        """
+    )
+    return
+
+
+@app.cell
+def _(MIN_CELL, pl, small_cell_mask):
+    def close_per_agent_dose_leak(
+        offsets, dose, agent_col, count_col, label, min_cell=MIN_CELL
+    ):
+        """Stop an agent's published offset bins from summing to a total that reveals a
+        withheld dose cell.
+
+        `offsets` and `dose` are both UNSUPPRESSED; row-level suppression is applied
+        afterwards by `publish`. Returns `offsets` with extra rows removed for any agent
+        that is exposed. `count_col` must name the same quantity in both frames -- the two
+        tables are partitions of one another per agent, and that is the whole premise.
+
+        AN AGENT IS EXPOSED when it has at least one dose row that the row-level rule will
+        withhold AND zero offset bins that the rule will withhold. The second condition is
+        what makes its bin sum equal to its true total T; the first is what makes a
+        subtraction worth doing. Both must hold, and neither is a property of one table.
+
+        THE ARITHMETIC, and why the threshold is the same 2 * min_cell - 2:
+
+            true per-agent total   T
+            withheld dose cell     v,  1 <= v <= 9      (it was suppressed)
+            published dose total   D = T - v
+            offset bin we remove   w
+
+            the reader sees   published_offset_sum = T - w = D + v - w
+            and solves        v = (published_offset_sum - D) + w = c + w,  c known
+
+            The reader cannot tell WHY a bin is missing -- the row-level rule alone would
+            explain any w in 1..9 -- so the candidate set is w in [1-c, 9-c]. Every value
+            of v in 1..9 stays feasible only if no candidate w can be ruled out, and a
+            candidate below min_cell cannot be ruled out either, so the whole candidate
+            range must sit at or above min_cell:
+
+                1 - c >= 10  <=>  w >= v + 9,  worst case v = 9  =>  w >= 18
+
+        So the victim is the SMALLEST surviving bin whose count is at least
+        `2 * min_cell - 2`. Smallest-above-the-threshold, not simply largest: the threshold
+        buys the guarantee, and among the bins that clear it the smallest costs the reader
+        least. Do not "simplify" this to `.sort(count_col).head(1)` -- that picks a bin at
+        w = 10, which pins v exactly and destroys a bar for nothing.
+
+        A published ZERO is never chosen: withholding a zero leaves the bin sum unchanged,
+        so it would look like protection while leaving v recoverable exactly as before. The
+        w >= 18 threshold already excludes zeros; the rule is stated because it is why the
+        threshold may not be relaxed to "any bin".
+
+        DEGENERATE CASE, resolved as `withhold_second_row` resolves its own: if no bin of
+        that agent reaches 2 * min_cell - 2, no single withholding keeps all nine values of
+        v feasible, so THAT AGENT'S ENTIRE OFFSET DISTRIBUTION is withheld. The agent, not
+        the table, is the unit -- the leak is computed per agent, so the blast radius is one
+        agent's rows and the other agents' histograms survive intact.
+
+        Prints what it did in every branch; nothing about suppression is allowed to be
+        silent.
+        """
+        _min_bin = 2 * min_cell - 2
+
+        _dose_small = dose.filter(small_cell_mask(dose, [count_col], min_cell))
+        _off_small = offsets.filter(small_cell_mask(offsets, [count_col], min_cell))
+
+        _dose_exposed = set(_dose_small.get_column(agent_col).to_list())
+        _bins_protected = set(_off_small.get_column(agent_col).to_list())
+        _exposed = sorted(_dose_exposed - _bins_protected)
+
+        if not _exposed:
+            print(
+                f"  [{label}] per-agent leak check: no agent has both a withheld dose row "
+                "and a fully published bin distribution; every per-agent bin sum is "
+                "already short of its true total"
+            )
+            return offsets
+
+        _drop = []
+        for _agent in _exposed:
+            _rows = offsets.with_row_index("_r").filter(pl.col(agent_col) == _agent)
+            _victim = _rows.filter(pl.col(count_col) >= _min_bin).sort(count_col).head(1)
+            if _victim.height == 0:
+                print(
+                    f"  [{label}] per-agent leak check: {_agent!r} publishes every bin, so "
+                    f"its bin sum IS its true total and a withheld dose cell is recoverable "
+                    f"by subtraction -- but NO bin reaches {_min_bin}, so no single "
+                    f"withholding keeps all of 1..{min_cell - 1} feasible. Withholding "
+                    f"{_agent!r}'s ENTIRE offset distribution "
+                    f"({_rows.height} row(s)) instead."
+                )
+                _drop.extend(_rows.get_column("_r").to_list())
+                continue
+            print(
+                f"  [{label}] per-agent leak check: {_agent!r} publishes every bin, so its "
+                f"bin sum IS its true total and the withheld dose cell is recoverable as "
+                f"(bin sum - published dose total). Withholding one further bin -- the "
+                f"smallest with {count_col} >= {_min_bin} -- so the reader's residual "
+                f"admits every value 1..{min_cell - 1}:"
+            )
+            print(_victim.drop("_r"))
+            _drop.extend(_victim.get_column("_r").to_list())
+
+        return (
+            offsets.with_row_index("_r")
+            .filter(~pl.col("_r").is_in(_drop))
+            .drop("_r")
+        )
+
+    return (close_per_agent_dose_leak,)
 
 
 @app.cell
@@ -1115,6 +1350,7 @@ def _(
     OFFSET_BIN_WIDTH,
     PHI_DIR,
     SHARE_DIR,
+    close_per_agent_dose_leak,
     index_context,
     pl,
     publish,
@@ -1164,41 +1400,121 @@ def _(
             )
         )
         .group_by(["bin_order", "med_category"])
-        .agg(n=pl.len())
+        .agg(n_admin_windows=pl.len())
     )
 
+    # n_admin_windows, not n: this counts (index paralytic, administration) PAIRS, and an
+    # administration inside two index windows is in it twice.
     sedation_offsets = (
         _grid.join(_binned, on=["bin_order", "med_category"], how="left")
-        .with_columns(pl.col("n").fill_null(0))
+        .with_columns(pl.col("n_admin_windows").fill_null(0))
         .sort(["med_category", "bin_order"])
-    )
-    # Counts administrations, not index paralytics, and one index paralytic contributes as
-    # many rows as it had administrations -- so this column sums to a total no released
-    # file publishes and no row is recoverable by subtraction. No second withholding.
-    publish(
-        sedation_offsets,
-        SHARE_DIR / "sedation_offset_distribution.csv",
-        ["n"],
-        "sedation_offset_distribution",
     )
 
     # P18: keyed on the unit, never converted.
     sedation_dose = (
         sed_in_window.group_by(["med_category", "med_dose_unit"])
         .agg(
-            n=pl.len(),
+            n_admin_windows=pl.len(),
             median_dose=pl.col("med_dose").median(),
             p25_dose=pl.col("med_dose").quantile(0.25),
             p75_dose=pl.col("med_dose").quantile(0.75),
         )
-        .sort(["med_category", "n"], descending=[False, True])
+        .sort(["med_category", "n_admin_windows"], descending=[False, True])
     )
     print("sedation_dose, unsuppressed (run log only, never written):")
     print(sedation_dose)
-    # Same total as sedation_offset_distribution, and equally unpublished. No second
-    # withholding.
-    publish(sedation_dose, SHARE_DIR / "sedation_dose.csv", ["n"], "sedation_dose")
+
+    # These two tables are partitions of one another PER AGENT, and an agent with zero
+    # withheld bins publishes its own per-agent total. Computed on the unsuppressed frames
+    # because it has to know what the row-level rule is about to withhold from BOTH.
+    sedation_offsets_released = close_per_agent_dose_leak(
+        sedation_offsets,
+        sedation_dose,
+        "med_category",
+        "n_admin_windows",
+        "sedation_offset_distribution",
+    )
+    publish(
+        sedation_offsets_released,
+        SHARE_DIR / "sedation_offset_distribution.csv",
+        ["n_admin_windows"],
+        "sedation_offset_distribution",
+    )
+    publish(
+        sedation_dose,
+        SHARE_DIR / "sedation_dose.csv",
+        ["n_admin_windows"],
+        "sedation_dose",
+    )
     return sedation_dose, sedation_offsets, sedation_summary
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Verifying the leak is closed, on the released files themselves
+
+        The check below re-reads the two CSVs **from disk** rather than trusting the frames
+        in memory, and does by hand exactly what an attacker would do: for every agent, sum
+        the published bins, subtract the published dose total, and look at the residual. A
+        residual in 1..9 is a withheld cell recovered.
+
+        A residual is only *meaningful* to an attacker when the agent's bin sum is its true
+        total, which is knowable only when the agent has no withheld bins — so the check
+        reports the bin count beside every residual, and asserts on the dangerous case.
+        """
+    )
+    return
+
+
+@app.cell
+def _(MIN_CELL, N_OFFSET_BINS, SHARE_DIR, pl):
+    _off = pl.read_csv(SHARE_DIR / "sedation_offset_distribution.csv")
+    _dose = pl.read_csv(SHARE_DIR / "sedation_dose.csv")
+
+    _residuals = (
+        _off.group_by("med_category")
+        .agg(
+            bins_published=pl.len(),
+            bin_sum=pl.col("n_admin_windows").sum(),
+        )
+        .join(
+            _dose.group_by("med_category").agg(
+                dose_rows_published=pl.len(),
+                dose_sum=pl.col("n_admin_windows").sum(),
+            ),
+            on="med_category",
+            how="full",
+            coalesce=True,
+        )
+        .with_columns(pl.col("^(bins_published|bin_sum|dose_rows_published|dose_sum)$").fill_null(0))
+        .with_columns(
+            residual=pl.col("bin_sum") - pl.col("dose_sum"),
+            bin_sum_is_true_total=pl.col("bins_published") == N_OFFSET_BINS,
+        )
+        .sort("med_category")
+    )
+    print("per-agent differencing check, read back from the released CSVs:")
+    print(_residuals)
+
+    _leaks = _residuals.filter(
+        pl.col("bin_sum_is_true_total")
+        & (pl.col("residual") >= 1)
+        & (pl.col("residual") <= MIN_CELL - 1)
+    )
+    assert _leaks.height == 0, (
+        "a per-agent residual in 1..{} sits on an agent whose published bins sum to its "
+        "true total -- a withheld dose cell is recoverable by subtraction:\n{}".format(
+            MIN_CELL - 1, _leaks
+        )
+    )
+    print(
+        f"  OK: no agent with a fully published bin distribution has a residual in "
+        f"1..{MIN_CELL - 1}"
+    )
+    return
 
 
 @app.cell
@@ -1443,7 +1759,7 @@ def _(
 
     _e1 = pl.read_csv(SHARE_DIR / "sedation_offset_distribution.csv")
     _agents = sorted(_e1.get_column("med_category").unique().to_list())
-    _y_ref = int(_e1.get_column("n").max() or 0)
+    _y_ref = int(_e1.get_column("n_admin_windows").max() or 0)
     _total_withheld = len(_agents) * N_OFFSET_BINS - _e1.height
 
     _fig, _axes = plt.subplots(
@@ -1458,8 +1774,11 @@ def _(
         _missing = [_b for _b in range(N_OFFSET_BINS) if _b not in _present]
 
         for _row in _s.iter_rows(named=True):
-            if _row["n"] > 0:
-                _ax.bar([_row["bin_order"]], [_row["n"]], width=0.72, color=_BLUE)
+            if _row["n_admin_windows"] > 0:
+                _ax.bar(
+                    [_row["bin_order"]], [_row["n_admin_windows"]],
+                    width=0.72, color=_BLUE,
+                )
             else:
                 mark_zero(_ax, _row["bin_order"], _y_ref, _BLUE)
         for _b in _missing:
@@ -1488,22 +1807,27 @@ def _(
     _axes[-1].set_xlabel(
         "minutes from the index paralytic  (dashed rule = t)", color=_INK
     )
-    _axes[len(_axes) // 2].set_ylabel("administrations", color=_INK)
+    # PAIRS, not administrations -- an administration inside two index windows is counted
+    # in both. Saying "administrations" here would overstate the drug given by the fan-out.
+    _axes[len(_axes) // 2].set_ylabel(
+        "(index paralytic, administration) pairs", color=_INK
+    )
 
     _handles = [
         _axes[0].plot([], [], marker="D", markersize=5, color="0.3", linestyle="None",
                       label="published zero (measured, exactly 0)")[0],
         _axes[0].plot([], [], marker="x", markersize=7, markeredgewidth=1.8, color="0.3",
                       linestyle="None",
-                      label="withheld entirely (n<10 rule; drawn below axis)")[0],
+                      label="withheld entirely (n<10 or per-agent leak rule; "
+                            "drawn below axis)")[0],
     ]
     _axes[0].legend(handles=_handles, loc="upper right", fontsize=8, framealpha=0.9)
     _fig.suptitle(
         "E.1 — sedative administrations around the index paralytic, one panel per agent\n"
-        "every administration in the window, not just the nearest per agent (P17); "
-        "shared y-axis\n"
+        "every administration in the window, not just the nearest per agent (P17), counted "
+        "once per index window it falls in; shared y-axis\n"
         f"{_total_withheld} of {len(_agents) * N_OFFSET_BINS} agent-bin cell(s) withheld "
-        "under the n>=10 rule and dropped, never merged",
+        "under the n>=10 rule or the per-agent leak rule, and dropped, never merged",
         fontsize=11, color=_INK,
     )
     _fig.tight_layout()
@@ -1532,7 +1856,9 @@ def _(mo):
         of the figure instead of hiding it.
 
         Each bar is the median, with a whisker to p25 and p75 and the median printed at the
-        tip. `n` rides the row label, so the reader can see how much each row rests on.
+        tip. `n_admin_windows` rides the row label, so the reader can see how much each row
+        rests on — and it is labelled as pairs, not administrations, because that is what it
+        counts.
 
         Suppression here cannot be shown per-bin, because a withheld `(agent, unit)` row has
         no position on any axis — the release does not say which units that agent was charted
@@ -1614,7 +1940,10 @@ def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
             )
         _ax.set_yticks(_y)
         _ax.set_yticklabels(
-            [f"{_r['med_category']}  (n={_r['n']:,})" for _r in _p.iter_rows(named=True)],
+            [
+                f"{_r['med_category']}  ({_r['n_admin_windows']:,} pairs)"
+                for _r in _p.iter_rows(named=True)
+            ],
             fontsize=8, color=_INK,
         )
         _ax.set_ylim(-0.5, _p.height - 0.5)
@@ -1633,7 +1962,9 @@ def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
         )
 
     _axes[len(_units) - 1].set_xlabel(
-        "charted dose — median, with p25–p75 whiskers", color=_INK
+        "charted dose — median, with p25–p75 whiskers   ·   row counts are "
+        "(index paralytic, administration) pairs",
+        color=_INK,
     )
 
     if _no_dose:
