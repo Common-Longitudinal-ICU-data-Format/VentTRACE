@@ -162,8 +162,9 @@ Every **unordered pair** of paralytic administrations within a block, same-agent
 computed **before** the fold and depending on nothing it decides — this is the evidence for the
 15-minute boundary, not a consequence of choosing it. At this site: **1,192 pairs** total, and
 the split is stark — **1,181 are same-agent** (a redose of the same drug) against **11
-cross-agent** (two different paralytics). `rocuronium+rocuronium`'s own peak bin holds 234 pairs;
-`rocuronium+vecuronium`'s peak holds 5. The pooled histogram cannot tell a redose from a
+cross-agent** (two different paralytics). `rocuronium+rocuronium` accounts for 980 of those pairs
+and peaks at 223 in the `(3,7]d` bin; `rocuronium+vecuronium` totals 11 and peaks at 5, in `>7d`.
+The pooled histogram cannot tell a redose from a
 co-administration; the same/cross split is what lets it.
 
 ### The 15-minute fold — anchor and close

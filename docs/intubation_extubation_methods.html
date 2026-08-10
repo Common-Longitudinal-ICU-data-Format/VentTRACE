@@ -1495,10 +1495,17 @@ hr.soft{border:none; border-top:1px solid var(--rule-2); margin:26px 0}
 
   <div class="col">
     <div class="note warn">
-      <p><b>Reporting constraints.</b> Only aggregate results leave a site; minimum cell size
-      <b>n ≥ 10</b> for every reported statistic; no <code>patient_id</code>, no row-level records, no
-      raw <code>.csv</code>/<code>.parquet</code> in <code>output/final_no_phi/</code>. Chart-review
-      adjudications are PHI and stay in <code>output/intermediate_phi/</code>.</p>
+      <p><b>Reporting constraints.</b> Only aggregate results leave a site: no
+      <code>patient_id</code>, no row-level records, no raw <code>.csv</code>/<code>.parquet</code>
+      in <code>output/final_no_phi/</code>. Chart-review adjudications are PHI and stay in
+      <code>output/intermediate_phi/</code>.</p>
+      <p><b>Superseded, 2026-08-10.</b> This page records a design exploration that was not
+      built; the methods it compares no longer exist in the codebase. It formerly also
+      required a minimum cell size of <b>n&nbsp;≥&nbsp;10</b> for every reported statistic.
+      That rule was withdrawn: the disclosure boundary is row-level versus aggregate, not
+      cell size, and an aggregate count is published at its true value including counts
+      below ten. See decisions P21, P23 and P24 in
+      <code>docs/superpowers/specs/2026-08-10-paralytic-index-design.md</code>.</p>
     </div>
   </div>
 </section>
