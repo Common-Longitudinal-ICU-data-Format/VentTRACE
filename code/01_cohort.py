@@ -43,7 +43,9 @@ def _(mo):
         """
         # 01 — Cohort and CONSORT
 
-        Builds the analytic cohort for the intubation detection method comparison.
+        Builds the analytic cohort. Unchanged by the paralytic-index overhaul (spec P2) —
+        the cohort definition, the stitching, and the waterfall don't know or care which
+        drug is being studied.
 
         **The analytic unit is the stitched `encounter_block`, not `hospitalization_id`.**
 
@@ -55,11 +57,12 @@ def _(mo):
         4. **Exclude** — tracheostomy or trach collar within `trach_window_hours` of block admission
         5. **Waterfall** the respiratory table and publish the raw charted IMV rows
 
-        `01` does **not** resolve t0. Under D34 t0 is the first *waterfalled* IMV row of an
-        episode, and under D35 a block holds as many episodes as it has sustained
-        intubations — `02` resolves both.
+        `01` resolves no index event. The paralytic administration is the index now — `02`
+        folds paralytic administrations into index events (anchor-and-close at 15 minutes,
+        spec P6), and `03` reads this notebook's waterfalled device timeline for the
+        non-IMV → IMV transition around each one (sub-analysis D).
 
-        Design: `docs/superpowers/specs/2026-08-04-intubation-method-comparison-design.md` §5.1–§5.8
+        Design: `docs/superpowers/specs/2026-08-10-paralytic-index-design.md`
         """
     )
     return
@@ -672,7 +675,7 @@ def _(mo):
 
         The waterfall runs per `hospitalization_id`, but rows are then mapped to
         `encounter_block` and ordered **within the block**, which is what makes stitching
-        effective: the transition sequence `02` evaluates is assembled across the whole
+        effective: the transition sequence `03` evaluates is assembled across the whole
         encounter in time order.
 
         **This is where lower-casing on load pays for itself.** The waterfall lower-cases
@@ -784,14 +787,16 @@ def _(mo):
         """
         ## Raw charted IMV rows
 
-        **`01` does not resolve t0.** Under D34 t0 is the first *waterfalled* IMV row of an
-        **episode**, and under D35 a block holds as many episodes as it has sustained
-        intubations — neither is a fact `01` is in a position to know. `02` resolves both.
+        **`01` resolves no index event.** The paralytic administration is the index now
+        (spec P6, resolved entirely in `02`) — there is no episode or t0 concept left for
+        `01` to compute.
 
-        What `01` publishes instead is the raw charted IMV rows, block-keyed. No rule reads
-        this frame. Its only consumer is `charting_delay_min` in `02`, which measures how
-        far behind the settings-based inference the device field was filled in — the
-        quantity D34 was decided on, and now a published result rather than a QC check.
+        What `01` publishes instead is the raw charted IMV rows, block-keyed
+        (`cohort_resp_imv_raw.parquet`). This is a leftover from the superseded
+        ventilator-anchored design, where it fed a charting-delay comparison against the
+        waterfalled IMV row. That comparison was not carried into `02` or `03` — nothing in
+        the live pipeline reads this file. It remains written because `01`'s logic is
+        unchanged by this overhaul (spec P2).
         """
     )
     return
@@ -836,8 +841,10 @@ def _(mo):
         """
         ## QC statistics
 
-        Two checks that must be read before any downstream result is trusted. The third,
-        the waterfall-minus-raw t0 delta, moved to `02` and became `charting_delay_min`.
+        Two checks that must be read before any downstream result is trusted. A third
+        check — a waterfall-minus-raw charting-delay delta — existed under the superseded
+        ventilator-anchored design and was retired with it when the anchor moved to the
+        paralytic administration; nothing in the live pipeline computes it.
         """
     )
     return
@@ -847,10 +854,11 @@ def _(mo):
 def _(cohort_index, pl, resp_waterfall):
     # QC 1 -- how much stitching actually did.
     #
-    # The waterfall-minus-raw delta that used to head this cell has MOVED to 02, where it
-    # became charting_delay_min (§5.10). It is per EPISODE now rather than per block --
-    # under D35 a block has several -- and it is a published result rather than a QC
-    # check, because under D34 it is the quantity the anchor was chosen on.
+    # A waterfall-minus-raw charting-delay delta used to head this cell under the
+    # superseded ventilator-anchored design. It measured how far behind a settings-based
+    # device inference the raw device field was filled in -- a quantity that design's t0
+    # anchor was chosen on. It was retired when the anchor moved to the paralytic
+    # administration (spec P6); nothing in this pipeline recomputes it.
     qc_blocks_per_encounter = (
         cohort_index.get_column("n_hospitalizations")
         .value_counts(sort=True)
@@ -921,10 +929,11 @@ def _(
 ):
     # The JOIN SPINE and nothing more.
     #
-    # t0_dttm, window_start, window_end and intubation_episode_id are NOT written here.
-    # Under D34 t0 is a property of an episode and 02 resolves it; under D35 a block has
-    # several. A block-level t0 written here would be a stale duplicate of the first
-    # episode's -- exactly the drift D14 warns about -- and 02 asserts it is absent.
+    # No t0, window, or episode columns are written here -- there is no such concept in
+    # this design. The index event is a `02` construct built entirely from paralytic
+    # administrations (spec P6); `01` supplies only the join keys and the two cohort
+    # summary columns below. The explicit `.select()` above is what enforces that -- an
+    # accidental extra column here could not survive it.
     cohort_index_out = cohort_index.with_columns(
         cohort_run_id=pl.lit(COHORT_RUN_ID),
     ).select(
