@@ -35,6 +35,14 @@ import pytest
 NOTEBOOK = Path(__file__).parent.parent / "code" / "02_index_paralytic.py"
 NOTEBOOK_TREE = ast.parse(NOTEBOOK.read_text())
 
+# P19 ("the timezone always comes from config['timezone']; no code path consults the
+# OS zone") binds in every notebook, not just this one -- test_notebook_calls_no_naive_
+# timestamp below walks all three.
+ALL_NOTEBOOKS = [
+    Path(__file__).parent.parent / "code" / name
+    for name in ("01_cohort.py", "02_index_paralytic.py", "03_context.py")
+]
+
 
 def _load_from_notebook(name, namespace=None):
     """Compile a single named function out of the marimo notebook."""
@@ -119,8 +127,8 @@ def test_anchor_does_not_walk_forward():
 def test_partition_property(times):
     """Concatenating the returned index-lists reproduces range(n) exactly.
 
-    Nothing lost, nothing duplicated, nothing reordered — the property `05` asserts on
-    real data as `sum(n_admin) == scan_rows.height`.
+    Nothing lost, nothing duplicated, nothing reordered — the property `02` asserts on
+    real data as `sum(n_admins) == scan_rows.height`.
     """
     events = _call(times)
     flat = [i for event in events for i in event]
@@ -234,21 +242,25 @@ def test_collapse_merges_across_a_dst_fall_back(central_os_timezone):
     assert collapse_agent_events(naive, ["rocuronium", "vecuronium"], GAP) == [[0], [1]]
 
 
-def test_notebook_calls_no_naive_timestamp():
-    """No stage of `05` may convert a timestamp by asking the OS what zone it is in.
+@pytest.mark.parametrize("notebook_path", ALL_NOTEBOOKS, ids=lambda p: p.name)
+def test_notebook_calls_no_naive_timestamp(notebook_path):
+    """No stage of `01`, `02` or `03` may convert a timestamp by asking the OS what
+    zone it is in.
 
-    Walks the notebook's AST rather than grepping, so the trap named in `epoch_minutes`'
-    docstring does not itself trip the check. Both the collapse and the scan driver used
-    this idiom once; neither may again.
+    Walks each notebook's AST rather than grepping, so the trap named in
+    `epoch_minutes`' docstring does not itself trip the check. P19 binds everywhere in
+    this pipeline, not only in the notebook the rest of this file otherwise pins.
     """
+    tree = ast.parse(notebook_path.read_text())
     offenders = [
         node.lineno
-        for node in ast.walk(NOTEBOOK_TREE)
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "timestamp"
     ]
     assert not offenders, (
-        f"{NOTEBOOK.name} calls .timestamp() at line(s) {offenders}. On a site-naive "
-        "column that reads the OS timezone, not config['timezone'] — use epoch_minutes()."
+        f"{notebook_path.name} calls .timestamp() at line(s) {offenders}. On a "
+        "site-naive column that reads the OS timezone, not config['timezone'] -- use "
+        "epoch_minutes()."
     )
