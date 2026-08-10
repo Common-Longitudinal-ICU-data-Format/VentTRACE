@@ -287,7 +287,14 @@ def _(is_transition_expr, pl):
         the published table has to be able to tell them apart.
         """
         return (
-            waterfall.sort(["encounter_block", "recorded_dttm"])
+            # maintain_order=True: after to_site_naive, the November DST fall-back
+            # collapses two distinct instants onto one naive recorded_dttm, so a handful
+            # of (encounter_block, recorded_dttm) keys carry two rows with different
+            # device_category in this run. polars' default sort is unstable, which would
+            # let _prev_device below -- and therefore transition detection -- differ
+            # run to run at those rows. maintain_order makes the tiebreak the frame's own
+            # input order, which is deterministic.
+            waterfall.sort(["encounter_block", "recorded_dttm"], maintain_order=True)
             .with_columns(
                 _pos=pl.int_range(pl.len()).over("encounter_block"),
                 _prev_device=pl.col("device_category").shift(1).over("encounter_block"),
@@ -664,17 +671,31 @@ def _(SHARE_DIR, context_d, pl, publish):
         .agg(n=pl.len())
     )
     # Contiguous from 1 to the observed maximum: a value that never occurred is published
-    # as an explicit zero rather than being absent from the table.
-    _max_in_window = int(
-        context_d.filter(pl.col("imv_transition")).get_column("n_transitions_in_window").max()
-    )
-    transitions_in_window = (
-        pl.DataFrame({"n_transitions_in_window": list(range(1, _max_in_window + 1))})
-        .with_columns(pl.col("n_transitions_in_window").cast(pl.Int32))
-        .join(_observed, on="n_transitions_in_window", how="left")
-        .with_columns(pl.col("n").fill_null(0))
-        .sort("n_transitions_in_window")
-    )
+    # as an explicit zero rather than being absent from the table. At a site where no
+    # index paralytic has a transition in window at all, `_observed` is empty and
+    # `.max()` returns None -- `int(None)` would raise TypeError here, after
+    # consort_cohort.csv, cohort_qc.csv, imv_transition_summary.csv and
+    # imv_offset_distribution.csv are already published. Guard it: publish the
+    # well-formed, zero-row table instead of crashing partway through the run.
+    if _observed.height == 0:
+        print("no index paralytic has an IMV transition in window at this site -- "
+              "publishing imv_transitions_in_window.csv with zero rows")
+        transitions_in_window = _observed.with_columns(
+            pl.col("n_transitions_in_window").cast(pl.Int32)
+        )
+    else:
+        _max_in_window = int(
+            context_d.filter(pl.col("imv_transition"))
+            .get_column("n_transitions_in_window")
+            .max()
+        )
+        transitions_in_window = (
+            pl.DataFrame({"n_transitions_in_window": list(range(1, _max_in_window + 1))})
+            .with_columns(pl.col("n_transitions_in_window").cast(pl.Int32))
+            .join(_observed, on="n_transitions_in_window", how="left")
+            .with_columns(pl.col("n").fill_null(0))
+            .sort("n_transitions_in_window")
+        )
     publish(
         transitions_in_window,
         SHARE_DIR / "imv_transitions_in_window.csv",
@@ -709,7 +730,8 @@ def _(mo):
 
         ### What E's counts count: PAIRS, not administrations
 
-        The join is on `encounter_block`, and a block holds up to five index paralytics. A
+        The join is on `encounter_block`, and a block holds up to twelve index paralytics
+        (`index_per_block.csv`). A
         single physical administration that falls inside two index windows therefore
         contributes **two** rows — once to each window. That is correct and intended: the
         administration genuinely happened within ±60 minutes of both paralytics, and the
@@ -777,25 +799,60 @@ def _(
         filters={"hospitalization_id": _hosp_ids},
     )
 
+    _sed_lower = pl.from_pandas(
+        _sed.df.assign(admin_dttm=lambda d: to_site_naive(d["admin_dttm"]))
+    ).with_columns(
+        med_category=pl.col("med_category").str.to_lowercase(),
+        mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
+        # P20's posture, applied to med_dose_unit too: a site charting `MG` beside `mg`
+        # would otherwise split both *_dose_units.csv tables and drive
+        # n_in_preferred_unit's preferred-unit comparison to undercount, since that
+        # comparison runs on this column directly (see convert_doses_to_preferred_units
+        # below). Normalised once, here, so every consumer downstream agrees.
+        med_dose_unit=pl.col("med_dose_unit").str.strip_chars().str.to_lowercase(),
+    )
+
+    # Vocabulary probe: computed on `med_category` alone, BEFORE the mar_action_category
+    # filter below. Filtering first and reporting after (the original bug here) makes a
+    # site charting an unlisted action -- "administered", "iv push", "new bag", a null --
+    # indistinguishable from a genuinely absent agent, and an agent present only under
+    # such an action would print as "NOT PRESENT AT THIS SITE", which is wrong. Reporting
+    # on the pre-filter frame is the only way a vocabulary mismatch can be told apart from
+    # genuine absence (spec §4).
+    _sedative_all = _sed_lower.filter(pl.col("med_category").is_in(SEDATIVES))
+    _seen = _sedative_all.group_by(["med_category", "mar_action_category"]).agg(n=pl.len())
+    _missing = sorted(set(SEDATIVES) - set(_sedative_all.get_column("med_category").unique()))
+    _dropped_by_action_filter = (
+        _sedative_all.group_by("med_category")
+        .agg(n_total=pl.len())
+        .join(
+            _sedative_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
+            .group_by("med_category")
+            .agg(n_kept=pl.len()),
+            on="med_category",
+            how="left",
+        )
+        .with_columns(n_kept=pl.col("n_kept").fill_null(0))
+        .with_columns(n_dropped=pl.col("n_total") - pl.col("n_kept"))
+        .sort("n_dropped", descending=True)
+    )
+
     sed_admin = (
-        pl.from_pandas(_sed.df.assign(admin_dttm=lambda d: to_site_naive(d["admin_dttm"])))
-        .with_columns(
-            med_category=pl.col("med_category").str.to_lowercase(),
-            mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
-        )
-        .filter(
-            pl.col("med_category").is_in(SEDATIVES)
-            & pl.col("mar_action_category").is_in(MAR_ACTIONS)
-        )
+        _sedative_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
         .join(_bridge, on="hospitalization_id", how="inner")
         .drop("hospitalization_id")
     )
 
     assert "hospitalization_id" not in sed_admin.columns, "the bridge leaked its key"
 
-    _found = sed_admin.get_column("med_category").unique().to_list()
-    _missing = sorted(set(SEDATIVES) - set(_found))
+    # Post-filter reporting, kept alongside the pre-filter probe above -- this is what
+    # actually feeds every downstream distribution, so it stays visible too.
     print(f"sedative administrations : {sed_admin.height:,}")
+    print("\nvalue_counts seen, by (med_category, mar_action_category), BEFORE the action filter:")
+    print(_seen.sort("n", descending=True))
+    print("\nrows dropped by the mar_action_category filter, per agent:")
+    print(_dropped_by_action_filter)
+    print("\nvalue_counts, by (med_category, mar_action_category), AFTER the action filter:")
     print(
         sed_admin.group_by(["med_category", "mar_action_category"])
         .agg(n=pl.len())
@@ -809,8 +866,9 @@ def _(
     )
 
     # ONE ROW PER (index paralytic, administration) PAIR, not per administration. The join
-    # is on encounter_block, and a block holds up to five index paralytics, so a single
-    # physical administration that lies inside two index windows produces two rows. That
+    # is on encounter_block, and a block holds up to twelve index paralytics
+    # (index_per_block.csv), so a single physical administration that lies inside two
+    # index windows produces two rows. That
     # fan-out is intended -- the administration genuinely belongs to both windows, the same
     # reasoning 02's bridge uses -- but it means every count derived from this frame is a
     # count of PAIRS. The published columns are named `n_admin_windows` for that reason.
@@ -1246,7 +1304,18 @@ def _(SHARE_DIR, pl, publish, sedation_dose_converted):
     # P18 (amended): keyed on med_category ALONE, in the standardised unit.
     # interpolation="linear" on both quantiles, explicitly: polars' default is
     # "nearest", which at small n republishes a raw charted dose verbatim as the
-    # statistic.
+    # statistic (n=3 -> p75 IS the largest of the three charted values). Linear
+    # interpolation does not avoid that outcome, it only changes when it happens:
+    # polars places the q-th quantile of n sorted values at the fractional index
+    # (n-1)*q, and whenever that index is a whole number the "interpolated" value
+    # IS one of the charted observations -- not a rare edge case, but guaranteed
+    # whenever (n-1) is a multiple of 4, since p25, median and p75 then land at
+    # indices (n-1)/4, (n-1)/2 and 3(n-1)/4 all at once. That is live in this
+    # pipeline: ketamine's sedation dose is n=13 here, so indices 3, 6 and 9 are
+    # exact, and the published p25/median/p75 (0.03 / 0.15 / 16.0 this run) are
+    # three specific charted doses, not synthesised values. Linear interpolation
+    # buys smoother behaviour as n changes; it does not buy a guarantee of never
+    # equaling an individual observation.
     sedation_dose = (
         sedation_dose_converted.group_by("med_category")
         .agg(
@@ -1371,7 +1440,7 @@ def _():
         lower half falls outside the axes; `clip_on=False` is what keeps that half drawn.
         """
         ax.plot(
-            [x], [0], marker="D", markersize=5, color=color,
+            [x], [0], marker="D", markersize=7, color=color,
             linestyle="None", zorder=5, clip_on=False,
         )
 
@@ -1442,7 +1511,7 @@ def _(
     )
 
     _handles = [
-        _ax.plot([], [], marker="D", markersize=5, color="0.3", linestyle="None",
+        _ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
                  label="published zero (measured, exactly 0)")[0],
     ]
     _ax.legend(handles=_handles, loc="upper right", fontsize=8, framealpha=0.9)
@@ -1504,75 +1573,88 @@ def _(
     _e1 = pl.read_csv(SHARE_DIR / "sedation_offset_distribution.csv")
     _agents = sorted(_e1.get_column("med_category").unique().to_list())
 
-    _fig, _axes = plt.subplots(
-        len(_agents), 1, figsize=(11, 1.55 * len(_agents) + 2.6),
-        sharex=True, sharey=True, squeeze=False,
-    )
-    _axes = [_a[0] for _a in _axes]
+    if not _agents:
+        # No sedative administration falls inside any index paralytic's ±60-minute
+        # window at this site -- sedation_offset_distribution.csv is published with
+        # zero rows (see the cross-join that builds it) and there is nothing to plot.
+        # plt.subplots(0, 1, ...) below would raise; skip with a clear message instead.
+        print(
+            "E1_sedation_offset.png skipped -- sedation_offset_distribution.csv has "
+            "zero rows at this site (no sedative administration in any index "
+            "paralytic's window)"
+        )
+    else:
+        _fig, _axes = plt.subplots(
+            len(_agents), 1, figsize=(11, 1.55 * len(_agents) + 2.6),
+            sharex=True, sharey=True, squeeze=False,
+        )
+        _axes = [_a[0] for _a in _axes]
 
-    for _ax, _agent in zip(_axes, _agents):
-        _s = _e1.filter(pl.col("med_category") == _agent).sort("bin_order")
+        for _ax, _agent in zip(_axes, _agents):
+            _s = _e1.filter(pl.col("med_category") == _agent).sort("bin_order")
 
-        for _row in _s.iter_rows(named=True):
-            if _row["n_admin_windows"] > 0:
-                _ax.bar(
-                    [_row["bin_order"]], [_row["n_admin_windows"]],
-                    width=0.72, color=_BLUE,
-                )
-            else:
-                mark_zero(_ax, _row["bin_order"], _BLUE)
+            for _row in _s.iter_rows(named=True):
+                if _row["n_admin_windows"] > 0:
+                    _ax.bar(
+                        [_row["bin_order"]], [_row["n_admin_windows"]],
+                        width=0.72, color=_BLUE,
+                    )
+                else:
+                    mark_zero(_ax, _row["bin_order"], _BLUE)
 
-        _ax.axvline(ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
-        _ax.set_xlim(-0.8, N_OFFSET_BINS - 0.2)
-        _ax.set_ylim(bottom=0)
-        _ax.set_axisbelow(True)
-        _ax.grid(axis="y", color=_GRID, linewidth=0.8)
-        for _side in ("top", "right"):
-            _ax.spines[_side].set_visible(False)
-        # The panel title is the identity channel -- colour carries none of it.
-        _ax.set_title(_agent, fontsize=9, loc="left", color=_INK)
-        _ax.tick_params(axis="y", labelsize=8, colors=_MUTED)
+            _ax.axvline(ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
+            _ax.set_xlim(-0.8, N_OFFSET_BINS - 0.2)
+            _ax.set_ylim(bottom=0)
+            _ax.set_axisbelow(True)
+            _ax.grid(axis="y", color=_GRID, linewidth=0.8)
+            for _side in ("top", "right"):
+                _ax.spines[_side].set_visible(False)
+            # The panel title is the identity channel -- colour carries none of it.
+            _ax.set_title(_agent, fontsize=9, loc="left", color=_INK)
+            _ax.tick_params(axis="y", labelsize=8, colors=_MUTED)
 
-        # On the shared y-axis a small-total agent's bars can be a few pixels tall next
-        # to fentanyl's or propofol's -- correct, but a panel that shows no visible bar
-        # communicates nothing on its own. This annotation carries the panel's true
-        # magnitude, read from the same published frame the bars are drawn from -- never
-        # recomputed -- so it cannot disagree with sedation_offset_distribution.csv.
-        _ax.text(
-            0.01, 0.90,
-            f"n = {_s['n_admin_windows'].sum():,}, peak = {_s['n_admin_windows'].max():,}",
-            transform=_ax.transAxes, ha="left", va="top", fontsize=8, color=_INK,
+            # On the shared y-axis a small-total agent's bars can be a few pixels tall
+            # next to fentanyl's or propofol's -- correct, but a panel that shows no
+            # visible bar communicates nothing on its own. This annotation carries the
+            # panel's true magnitude, read from the same published frame the bars are
+            # drawn from -- never recomputed -- so it cannot disagree with
+            # sedation_offset_distribution.csv.
+            _ax.text(
+                0.01, 0.90,
+                f"n = {_s['n_admin_windows'].sum():,}, peak = {_s['n_admin_windows'].max():,}",
+                transform=_ax.transAxes, ha="left", va="top", fontsize=8, color=_INK,
+            )
+
+        _axes[-1].set_xticks(list(range(N_OFFSET_BINS)))
+        _axes[-1].set_xticklabels(OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)
+        _axes[-1].set_xlabel(
+            "minutes from the index paralytic  (dashed rule = t)", color=_INK
+        )
+        # PAIRS, not administrations -- an administration inside two index windows is
+        # counted in both. Saying "administrations" here would overstate the drug given
+        # by the fan-out.
+        _axes[len(_axes) // 2].set_ylabel(
+            "(index paralytic, administration) pairs", color=_INK
         )
 
-    _axes[-1].set_xticks(list(range(N_OFFSET_BINS)))
-    _axes[-1].set_xticklabels(OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)
-    _axes[-1].set_xlabel(
-        "minutes from the index paralytic  (dashed rule = t)", color=_INK
-    )
-    # PAIRS, not administrations -- an administration inside two index windows is counted
-    # in both. Saying "administrations" here would overstate the drug given by the fan-out.
-    _axes[len(_axes) // 2].set_ylabel(
-        "(index paralytic, administration) pairs", color=_INK
-    )
-
-    _handles = [
-        _axes[0].plot([], [], marker="D", markersize=5, color="0.3", linestyle="None",
-                      label="published zero (measured, exactly 0)")[0],
-    ]
-    _axes[0].legend(handles=_handles, loc="upper right", fontsize=8, framealpha=0.9)
-    _fig.suptitle(
-        "E.1 — sedative administrations around the index paralytic, one panel per agent\n"
-        "every administration in the window, not just the nearest per agent (P17), counted "
-        "once per index window it falls in; shared y-axis",
-        fontsize=11, color=_INK,
-    )
-    _fig.tight_layout()
-    _fig.subplots_adjust(
-        top=1 - 1.15 / (1.55 * len(_agents) + 2.6), bottom=0.20, hspace=0.62
-    )
-    _fig.savefig(FIG_DIR / "E1_sedation_offset.png", dpi=150)
-    plt.close(_fig)
-    print(f"E1_sedation_offset.png -> {FIG_DIR}")
+        _handles = [
+            _axes[0].plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
+                          label="published zero (measured, exactly 0)")[0],
+        ]
+        _axes[0].legend(handles=_handles, loc="upper right", fontsize=8, framealpha=0.9)
+        _fig.suptitle(
+            "E.1 — sedative administrations around the index paralytic, one panel per agent\n"
+            "every administration in the window, not just the nearest per agent (P17), counted "
+            "once per index window it falls in; shared y-axis",
+            fontsize=11, color=_INK,
+        )
+        _fig.tight_layout()
+        _fig.subplots_adjust(
+            top=1 - 1.15 / (1.55 * len(_agents) + 2.6), bottom=0.20, hspace=0.62
+        )
+        _fig.savefig(FIG_DIR / "E1_sedation_offset.png", dpi=150)
+        plt.close(_fig)
+        print(f"E1_sedation_offset.png -> {FIG_DIR}")
     return
 
 
@@ -1611,88 +1693,100 @@ def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
     _e2 = pl.read_csv(SHARE_DIR / "sedation_dose.csv")
 
     _units = sorted(_e2.get_column("med_dose_unit").unique().to_list())
-    _ratios = [
-        max(1, _e2.filter(pl.col("med_dose_unit") == _u).height) for _u in _units
-    ]
-    _n_panels = len(_ratios)
 
-    # height_ratios in row counts gives every panel the SAME row pitch, so a bar in the
-    # one-row panel is not drawn twice as thick as a bar in the two-row panel -- thickness
-    # here is chrome and must not vary with how many units a panel happens to hold.
-    _FIG_H = 1.2 + 0.45 * sum(_ratios) + 0.78 * _n_panels
-    _fig, _axes = plt.subplots(
-        _n_panels, 1, figsize=(10, _FIG_H),
-        gridspec_kw={"height_ratios": _ratios}, squeeze=False,
-    )
-    _axes = [_a[0] for _a in _axes]
-
-    for _ax, _unit in zip(_axes, _units):
-        _p = _e2.filter(pl.col("med_dose_unit") == _unit).sort("median_dose")
-        _y = list(range(_p.height))
-        _ax.barh(_y, _p.get_column("median_dose").to_list(), height=0.4, color=_BLUE)
-        # The IQR whisker crosses the bar it belongs to, so it carries a 3px ring in the
-        # surface colour -- the dataviz surface-ring rule for overlapping marks. Without
-        # it the whisker reads as part of the fill and the bar looks like it reaches p75.
-        _ax.errorbar(
-            _p.get_column("median_dose").to_list(),
-            _y,
-            xerr=[
-                (_p.get_column("median_dose") - _p.get_column("p25_dose")).to_list(),
-                (_p.get_column("p75_dose") - _p.get_column("median_dose")).to_list(),
-            ],
-            fmt="none", ecolor=_SECOND, elinewidth=1.4, capsize=4,
-            path_effects=[
-                path_effects.withStroke(linewidth=3.4, foreground=_SURFACE),
-            ],
+    if not _units:
+        # No sedative administration falls inside any index paralytic's window at this
+        # site -- sedation_dose.csv is published with zero rows and there is nothing to
+        # plot. plt.subplots(0, 1, ...) below would raise; skip with a clear message.
+        print(
+            "E2_sedation_dose.png skipped -- sedation_dose.csv has zero rows at this "
+            "site (no sedative administration in any index paralytic's window)"
         )
-        for _i, _row in enumerate(_p.iter_rows(named=True)):
-            # The value rides the bar TIP, set just above it: at the whisker end it would
-            # be read as p75, and inside the fill it would be clipped by a short bar.
-            _ax.text(
-                _row["median_dose"], _i + 0.24, f"{_row['median_dose']:g}",
-                ha="center", va="bottom", fontsize=8, color=_SECOND,
+    else:
+        _ratios = [
+            max(1, _e2.filter(pl.col("med_dose_unit") == _u).height) for _u in _units
+        ]
+        _n_panels = len(_ratios)
+
+        # height_ratios in row counts gives every panel the SAME row pitch, so a bar in
+        # the one-row panel is not drawn twice as thick as a bar in the two-row panel --
+        # thickness here is chrome and must not vary with how many units a panel holds.
+        _FIG_H = 1.2 + 0.45 * sum(_ratios) + 0.78 * _n_panels
+        _fig, _axes = plt.subplots(
+            _n_panels, 1, figsize=(10, _FIG_H),
+            gridspec_kw={"height_ratios": _ratios}, squeeze=False,
+        )
+        _axes = [_a[0] for _a in _axes]
+
+        for _ax, _unit in zip(_axes, _units):
+            _p = _e2.filter(pl.col("med_dose_unit") == _unit).sort("median_dose")
+            _y = list(range(_p.height))
+            _ax.barh(_y, _p.get_column("median_dose").to_list(), height=0.4, color=_BLUE)
+            # The IQR whisker crosses the bar it belongs to, so it carries a 3px ring in
+            # the surface colour -- the dataviz surface-ring rule for overlapping marks.
+            # Without it the whisker reads as part of the fill and the bar looks like it
+            # reaches p75.
+            _ax.errorbar(
+                _p.get_column("median_dose").to_list(),
+                _y,
+                xerr=[
+                    (_p.get_column("median_dose") - _p.get_column("p25_dose")).to_list(),
+                    (_p.get_column("p75_dose") - _p.get_column("median_dose")).to_list(),
+                ],
+                fmt="none", ecolor=_SECOND, elinewidth=1.4, capsize=4,
+                path_effects=[
+                    path_effects.withStroke(linewidth=3.4, foreground=_SURFACE),
+                ],
             )
-        _ax.set_yticks(_y)
-        _ax.set_yticklabels(
-            [
-                f"{_r['med_category']}  ({_r['n_admin_windows']:,} pairs)"
-                for _r in _p.iter_rows(named=True)
-            ],
-            fontsize=8, color=_INK,
-        )
-        _ax.set_ylim(-0.5, _p.height - 0.5)
-        _ax.margins(x=0.12)
-        _ax.set_xlim(left=0)
-        _ax.set_axisbelow(True)
-        _ax.grid(axis="x", color=_GRID, linewidth=0.8)
-        for _side in ("top", "right", "left"):
-            _ax.spines[_side].set_visible(False)
-        _ax.tick_params(axis="x", labelsize=8, colors=_MUTED)
-        _ax.tick_params(axis="y", length=0)
-        # The panel title is the standardised unit, and the unit is the reason the
-        # panel exists.
-        _ax.set_title(
-            f"standardised unit: {_unit}   ·   its own axis (P18)",
-            fontsize=9, loc="left", color=_INK,
+            for _i, _row in enumerate(_p.iter_rows(named=True)):
+                # The value rides the bar TIP, set just above it: at the whisker end it
+                # would be read as p75, and inside the fill it would be clipped by a
+                # short bar.
+                _ax.text(
+                    _row["median_dose"], _i + 0.24, f"{_row['median_dose']:g}",
+                    ha="center", va="bottom", fontsize=8, color=_SECOND,
+                )
+            _ax.set_yticks(_y)
+            _ax.set_yticklabels(
+                [
+                    f"{_r['med_category']}  ({_r['n_admin_windows']:,} pairs)"
+                    for _r in _p.iter_rows(named=True)
+                ],
+                fontsize=8, color=_INK,
+            )
+            _ax.set_ylim(-0.5, _p.height - 0.5)
+            _ax.margins(x=0.12)
+            _ax.set_xlim(left=0)
+            _ax.set_axisbelow(True)
+            _ax.grid(axis="x", color=_GRID, linewidth=0.8)
+            for _side in ("top", "right", "left"):
+                _ax.spines[_side].set_visible(False)
+            _ax.tick_params(axis="x", labelsize=8, colors=_MUTED)
+            _ax.tick_params(axis="y", length=0)
+            # The panel title is the standardised unit, and the unit is the reason the
+            # panel exists.
+            _ax.set_title(
+                f"standardised unit: {_unit}   ·   its own axis (P18)",
+                fontsize=9, loc="left", color=_INK,
+            )
+
+        _axes[-1].set_xlabel(
+            "standardised dose — median, with p25–p75 whiskers   ·   row counts are "
+            "(index paralytic, administration) pairs",
+            color=_INK,
         )
 
-    _axes[-1].set_xlabel(
-        "standardised dose — median, with p25–p75 whiskers   ·   row counts are "
-        "(index paralytic, administration) pairs",
-        color=_INK,
-    )
-
-    _fig.suptitle(
-        "E.2 — sedative dose by agent and standardised unit\n"
-        "one panel per unit; the raw charted mix is in sedation_dose_units.csv, not here (P18)\n"
-        f"{_e2.height} agent row(s) published",
-        fontsize=11, color=_INK,
-    )
-    _fig.tight_layout()
-    _fig.subplots_adjust(top=1 - 1.15 / _FIG_H, hspace=1.15)
-    _fig.savefig(FIG_DIR / "E2_sedation_dose.png", dpi=150)
-    plt.close(_fig)
-    print(f"E2_sedation_dose.png -> {FIG_DIR}")
+        _fig.suptitle(
+            "E.2 — sedative dose by agent and standardised unit\n"
+            "one panel per unit; the raw charted mix is in sedation_dose_units.csv, not here (P18)\n"
+            f"{_e2.height} agent row(s) published",
+            fontsize=11, color=_INK,
+        )
+        _fig.tight_layout()
+        _fig.subplots_adjust(top=1 - 1.15 / _FIG_H, hspace=1.15)
+        _fig.savefig(FIG_DIR / "E2_sedation_dose.png", dpi=150)
+        plt.close(_fig)
+        print(f"E2_sedation_dose.png -> {FIG_DIR}")
     return
 
 

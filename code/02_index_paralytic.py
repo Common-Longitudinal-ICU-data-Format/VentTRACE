@@ -313,30 +313,62 @@ def _(
     ).with_columns(
         med_category=pl.col("med_category").str.to_lowercase(),
         mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
+        # P20's posture, applied to med_dose_unit too: a site charting `MG` beside `mg`
+        # would otherwise split both *_dose_units.csv tables and drive
+        # n_in_preferred_unit's preferred-unit comparison to undercount, since that
+        # comparison runs on this column directly (see convert_doses_to_preferred_units
+        # below). Normalised once, here, so every consumer downstream agrees.
+        med_dose_unit=pl.col("med_dose_unit").str.strip_chars().str.to_lowercase(),
+    )
+
+    # Vocabulary probe: computed on `med_category` alone, BEFORE the mar_action_category
+    # filter below. Filtering first and reporting after (the original bug here) makes a
+    # site charting an unlisted action -- "administered", "iv push", "new bag", a null --
+    # indistinguishable from a genuinely absent agent, and an agent present only under
+    # such an action would print as "NOT PRESENT AT THIS SITE", which is wrong. Reporting
+    # on the pre-filter frame is the only way a vocabulary mismatch can be told apart from
+    # genuine absence (spec §4).
+    _paralytic_all = med_all.filter(pl.col("med_category").is_in(PARALYTICS))
+    _seen = _paralytic_all.group_by(["med_category", "mar_action_category"]).agg(n=pl.len())
+    _missing = sorted(
+        set(PARALYTICS) - set(_paralytic_all.get_column("med_category").unique())
+    )
+    _dropped_by_action_filter = (
+        _paralytic_all.group_by("med_category")
+        .agg(n_total=pl.len())
+        .join(
+            _paralytic_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
+            .group_by("med_category")
+            .agg(n_kept=pl.len()),
+            on="med_category",
+            how="left",
+        )
+        .with_columns(n_kept=pl.col("n_kept").fill_null(0))
+        .with_columns(n_dropped=pl.col("n_total") - pl.col("n_kept"))
+        .sort("n_dropped", descending=True)
     )
 
     med_admin = (
-        med_all.filter(
-            pl.col("med_category").is_in(PARALYTICS)
-            & pl.col("mar_action_category").is_in(MAR_ACTIONS)
-        )
+        _paralytic_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
         .join(bridge, on="hospitalization_id", how="inner")
         .drop("hospitalization_id")  # the bridge ends here -- everything below is per block
     )
 
     assert "hospitalization_id" not in med_admin.columns, "the bridge leaked its key"
 
-    # A category filter that matches nothing looks exactly like a site where the drug is
-    # never given. Print what was actually found so the two are distinguishable, and fail
-    # only if the whole list came back empty -- an individual agent may genuinely be absent
-    # from a formulary; succinylcholine often is.
+    # Post-filter reporting, kept alongside the pre-filter probe above -- this is what
+    # actually feeds every downstream distribution, so it stays visible too.
     _found = med_admin.group_by(["med_category", "mar_action_category"]).agg(n=pl.len())
-    _missing = sorted(set(PARALYTICS) - set(med_admin.get_column("med_category").unique()))
 
     print(f"intermittent rows loaded : {med_all.height:,}")
     print(f"paralytic administrations: {med_admin.height:,}")
     print(f"  over encounter blocks  : {med_admin.get_column('encounter_block').n_unique():,}")
     print(f"  over patients          : {med_admin.get_column('patient_id').n_unique():,}")
+    print("\nvalue_counts seen, by (med_category, mar_action_category), BEFORE the action filter:")
+    print(_seen.sort("n", descending=True))
+    print("\nrows dropped by the mar_action_category filter, per agent:")
+    print(_dropped_by_action_filter)
+    print("\nvalue_counts, by (med_category, mar_action_category), AFTER the action filter:")
     print(_found.sort("n", descending=True))
     if _missing:
         print(f"\nNOT PRESENT AT THIS SITE: {', '.join(_missing)}")
@@ -655,11 +687,11 @@ def _(COLLAPSE_GAP_MINUTES, collapse_agent_events, epoch_minutes, med_admin, pl)
     )
 
     _grouped = _sorted.group_by("encounter_block", maintain_order=True).agg(
-        pl.col("_t_min"), pl.col("med_category"), _row=pl.int_range(pl.len())
+        pl.col("_t_min"), pl.col("med_category")
     )
 
     _rows = []
-    for _block, _times, _cats, _ in _grouped.iter_rows():
+    for _block, _times, _cats in _grouped.iter_rows():
         for _n, _event in enumerate(
             collapse_agent_events(_times, _cats, COLLAPSE_GAP_MINUTES), start=1
         ):
@@ -1193,10 +1225,16 @@ def _(SHARE_DIR, dose_converted, pl, publish):
     # interpolation="linear" on both quantiles, explicitly: polars' default is
     # "nearest", which at small n republishes a raw charted dose verbatim as the
     # statistic (n=3 -> p75 IS the largest of the three charted values). Linear
-    # interpolation publishes the same statistic in the sense the label promises
-    # without ever equaling an individual observation except where the math forces
-    # it -- the median of an odd n is unavoidably one of the charted values under
-    # ANY interpolation scheme, since it has no neighbour to interpolate against.
+    # interpolation does not avoid that outcome, it only changes when it happens:
+    # polars places the q-th quantile of n sorted values at the fractional index
+    # (n-1)*q, and whenever that index is a whole number the "interpolated" value
+    # IS one of the charted observations -- not a rare edge case, but guaranteed
+    # whenever (n-1) is a multiple of 4, since p25, median and p75 then land at
+    # indices (n-1)/4, (n-1)/2 and 3(n-1)/4 all at once. That is live in this
+    # pipeline: ketamine's sedation dose (n=13, see sedation_dose.csv / 03) publishes
+    # p25/median/p75 as three specific charted doses, not synthesised values. Linear
+    # interpolation buys smoother behaviour as n changes; it does not buy a guarantee
+    # of never equaling an individual observation.
     index_dose = (
         dose_converted.group_by("med_category")
         .agg(
