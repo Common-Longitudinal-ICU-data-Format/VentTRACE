@@ -497,30 +497,37 @@ def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, pl, publish):
         )
 
     gap_distribution = pl.DataFrame(_rows)
-    gap_distribution_published = publish(
+    publish(
         gap_distribution,
         SHARE_DIR / "coadmin_gap_distribution.csv",
         "coadmin_gap_distribution",
     )
 
-    # Every observed agent_pair, in every bin it appears in, at its true count.
+    # Every observed agent_pair, in EVERY bin -- not just the bins it was observed in.
+    # A plain group_by only emits observed (agent_pair, gap_bin) combinations, which
+    # silently drops a pair's zero bins from the table entirely rather than publishing
+    # them (the same principle the sibling table above already follows). Cross-joining
+    # the observed pairs against the full bin grid and filling nulls to 0 makes every
+    # pair x bin combination present.
+    _bin_grid = pl.DataFrame({"gap_bin": GAP_BIN_LABELS}).with_row_index("bin_order")
+    _observed_pairs = coadmin_pairs.select("agent_pair").unique()
     gap_by_pair = (
-        coadmin_pairs.group_by(["agent_pair", "gap_bin"])
-        .agg(n=pl.len())
+        _observed_pairs.join(_bin_grid, how="cross")
         .join(
-            pl.DataFrame({"gap_bin": GAP_BIN_LABELS}).with_row_index("bin_order"),
-            on="gap_bin",
+            coadmin_pairs.group_by(["agent_pair", "gap_bin"]).agg(n=pl.len()),
+            on=["agent_pair", "gap_bin"],
             how="left",
         )
+        .with_columns(pl.col("n").fill_null(0))
         .sort(["agent_pair", "bin_order"])
     )
-    gap_by_pair_published = publish(
+    publish(
         gap_by_pair,
         SHARE_DIR / "coadmin_gap_by_pair.csv",
         "coadmin_gap_by_pair",
     )
 
-    return gap_by_pair_published, gap_distribution_published
+    return gap_by_pair, gap_distribution
 
 
 @app.cell
@@ -902,11 +909,22 @@ def _(mo):
 
 @app.cell
 def _(SHARE_DIR, index_paralytic, pl, publish):
-    index_per_block = (
+    _observed = (
         index_paralytic.group_by("encounter_block")
         .agg(n_index=pl.len())
         .group_by("n_index")
         .agg(n_blocks=pl.len())
+    )
+    # Contiguous from 1 to the observed maximum: a value that never occurred (e.g. every
+    # block has either 8, 10 or 12 index paralytics but never 9 or 11) is published as an
+    # explicit zero rather than being absent from the table -- the same principle every
+    # other bin grid in this pipeline follows.
+    _max_index = int(_observed.get_column("n_index").max())
+    index_per_block = (
+        pl.DataFrame({"n_index": list(range(1, _max_index + 1))})
+        .with_columns(pl.col("n_index").cast(pl.Int32))
+        .join(_observed, on="n_index", how="left")
+        .with_columns(pl.col("n_blocks").fill_null(0))
         .sort("n_index")
     )
     publish(
@@ -971,6 +989,13 @@ def _(mo):
 
 @app.cell
 def _(SHARE_DIR, index_paralytic, pl, publish):
+    # interpolation="linear" on both quantiles, explicitly: polars' default is
+    # "nearest", which at small n republishes a raw charted dose verbatim as the
+    # statistic (n=3 -> p75 IS the largest of the three charted values). Linear
+    # interpolation publishes the same statistic in the sense the label promises
+    # without ever equaling an individual observation except where the math forces
+    # it -- the median of an odd n is unavoidably one of the charted values under
+    # ANY interpolation scheme, since it has no neighbour to interpolate against.
     index_dose = (
         index_paralytic.explode("doses")
         .unnest("doses")
@@ -978,17 +1003,17 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
         .agg(
             n=pl.len(),
             median_dose=pl.col("med_dose").median(),
-            p25_dose=pl.col("med_dose").quantile(0.25),
-            p75_dose=pl.col("med_dose").quantile(0.75),
+            p25_dose=pl.col("med_dose").quantile(0.25, interpolation="linear"),
+            p75_dose=pl.col("med_dose").quantile(0.75, interpolation="linear"),
         )
         .sort(["med_category", "n"], descending=[False, True])
     )
-    index_dose_published = publish(
+    publish(
         index_dose,
         SHARE_DIR / "index_paralytic_dose.csv",
         "index_paralytic_dose",
     )
-    return index_dose, index_dose_published
+    return (index_dose,)
 
 
 @app.cell
@@ -1036,16 +1061,22 @@ def _(mo):
 
 @app.cell
 def _(plt):
-    def mark_zero(ax, x, y_ref, color):
-        """A published, exactly-zero value: a diamond just above the baseline.
+    def mark_zero(ax, x, color):
+        """A published, exactly-zero value: a diamond centered on the baseline.
 
-        Placed at a small fixed fraction of the axis range rather than at y=0 itself, so
-        it is not clipped by the x-axis spine, and shaped as a marker rather than a bar
-        so it can never be mistaken for a bar of real (if tiny) height.
+        Placed at y=0 in DATA coordinates -- not scaled off `y_ref` or any other frame
+        statistic. A marker scaled off the frame's max is only guaranteed smaller than a
+        real bar while every real bar is at least that tall, which stopped being true the
+        moment counts of 1..9 started being drawn (P21): a `y_ref * 0.02` marker on a
+        frame whose max is in the hundreds sits well above bars of height 1..3, inverting
+        the encoding it exists to make legible. A marker centered exactly at y=0 has zero
+        data-height by construction, so it can never equal or exceed a bar of ANY positive
+        height, however small. `clip_on=False` keeps its upper half from being clipped by
+        the x-axis spine, since its center sits exactly on `ylim`'s bottom edge.
         """
         ax.plot(
-            [x], [y_ref * 0.02], marker="D", markersize=7, color=color,
-            linestyle="None", zorder=5,
+            [x], [0], marker="D", markersize=7, color=color,
+            linestyle="None", zorder=5, clip_on=False,
         )
 
     return (mark_zero,)
@@ -1074,10 +1105,6 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     _ORANGE = "#eb6834"
 
     _dist = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv")
-    _y_ref = max(
-        int(_dist.get_column("n_same_agent").max() or 0),
-        int(_dist.get_column("n_cross_agent").max() or 0),
-    )
 
     _fig, _ax = plt.subplots(figsize=(11, 6.5))
 
@@ -1086,11 +1113,11 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
         if _row["n_same_agent"] > 0:
             _ax.bar([_o - 0.2], [_row["n_same_agent"]], width=0.4, color=_BLUE)
         else:
-            mark_zero(_ax, _o - 0.2, _y_ref, _BLUE)
+            mark_zero(_ax, _o - 0.2, _BLUE)
         if _row["n_cross_agent"] > 0:
             _ax.bar([_o + 0.2], [_row["n_cross_agent"]], width=0.4, color=_ORANGE)
         else:
-            mark_zero(_ax, _o + 0.2, _y_ref, _ORANGE)
+            mark_zero(_ax, _o + 0.2, _ORANGE)
 
     _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
     _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
@@ -1160,8 +1187,6 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
         "bin_order", "gap_bin", "n"
     )
 
-    _y_ref = max(int(_a.get_column("n_pooled").max() or 0), int(_c.get_column("n").max() or 0))
-
     _fig, _ax = plt.subplots(figsize=(11, 6.5))
 
     for _row in _a.iter_rows(named=True):
@@ -1169,14 +1194,14 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
         if _row["n_pooled"] > 0:
             _ax.bar([_o - 0.2], [_row["n_pooled"]], width=0.4, color=_BLUE)
         else:
-            mark_zero(_ax, _o - 0.2, _y_ref, _BLUE)
+            mark_zero(_ax, _o - 0.2, _BLUE)
 
     for _row in _c.iter_rows(named=True):
         _o = _row["bin_order"]
         if _row["n"] > 0:
             _ax.bar([_o + 0.2], [_row["n"]], width=0.4, color=_AQUA, edgecolor=_EDGE, linewidth=0.6)
         else:
-            mark_zero(_ax, _o + 0.2, _y_ref, _AQUA)
+            mark_zero(_ax, _o + 0.2, _AQUA)
 
     _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
     _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")

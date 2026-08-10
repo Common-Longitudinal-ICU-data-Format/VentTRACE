@@ -1,4 +1,5 @@
-"""Pins the row-level disclosure boundary of `utils/suppress.py` (spec P21, P23).
+"""Pins the row-level disclosure boundary of `utils/suppress.py` (spec P21, P23,
+amended 0992a5c).
 
 This is the only shared module in the project and the reason it is shared is
 recorded in P23: duplicating *analysis* logic risks correlated errors that look
@@ -9,12 +10,24 @@ impossible rather than merely unlikely.
 The rule, stated once: an aggregate count is publishable at its true value,
 including counts of 1 to 9 (P21 supersedes the n>=10 cell rule). What may never
 leave the site is a row that describes one person -- an identifier column, or a
-table of pure row detail with the identifiers stripped, which is still row
-detail. `publish()` is the single route into `final_no_phi/` and is a
-column-name guard, not a cell-count filter: nothing it writes is ever altered.
+row carrying a timestamp, since an aggregate has no timestamp and every
+row-level artifact in this study does. `publish()` is the single route into
+`final_no_phi/` and is a schema guard (column names for identifiers, column
+dtypes for datetimes), not a cell-count filter: nothing it writes is ever
+altered.
+
+The count-column requirement ("must have a column named `n` or starting with
+`n_`") this module originally carried is WITHDRAWN (spec P23, amended
+0992a5c): it blocked `cohort_qc.csv` (columns `stat,value`) and did not block
+what it was written for -- `index_context.parquet` with its identifier columns
+dropped still carries `n_admins`, so it satisfied the count-column check while
+being pure row detail with raw timestamps. The datetime guard below replaces
+it.
 
 Run:  uv run pytest tests/test_publish_guard.py -v
 """
+
+import datetime
 
 import polars as pl
 import pytest
@@ -23,7 +36,7 @@ from utils.suppress import publish
 
 
 def _agg_frame():
-    """A frame that clears both guards: no identifier column, has a count column."""
+    """A frame that clears both guards: no identifier column, no datetime column."""
     return pl.DataFrame({"bin": ["a", "b", "c"], "n": [0, 3, 50]})
 
 
@@ -46,8 +59,8 @@ def test_an_arbitrary_id_suffix_column_is_refused_even_off_the_explicit_list(tmp
 
 
 def test_cohort_run_id_is_accepted(tmp_path):
-    """cohort_run_id is a provenance stamp, not an identifier -- the one deliberate
-    exception to the *_id refusal."""
+    """cohort_run_id is a provenance stamp, not an identifier -- the one deliberate,
+    EXACT-NAME exception to the *_id refusal."""
     path = tmp_path / "out.csv"
     df = pl.DataFrame({"cohort_run_id": ["2026-08-06", "2026-08-06"], "n": [5, 5]})
     written = publish(df, path, "t")
@@ -58,16 +71,54 @@ def test_cohort_run_id_is_accepted(tmp_path):
     ]
 
 
-def test_a_frame_with_no_count_column_is_refused(tmp_path):
-    """No column named `n` or starting with `n_` -- a table of pure row detail with
-    the ids already stripped is still row detail."""
-    df = pl.DataFrame({"bin": ["a", "b"], "median_dose": [10.0, 20.0]})
-    with pytest.raises(AssertionError):
+@pytest.mark.parametrize("run_id_col", ["run_id", "xyz_run_id"])
+def test_a_bare_or_prefixed_run_id_column_is_still_refused(run_id_col, tmp_path):
+    """The cohort_run_id exemption is an EXACT name, not a `*run_id` suffix pattern --
+    narrowing the *_id refusal to `endswith('run_id')` would wrongly admit both of
+    these, and both still describe a *_id-shaped column that isn't the one named
+    exemption."""
+    df = pl.DataFrame({run_id_col: [1, 2], "n": [5, 5]})
+    with pytest.raises(AssertionError, match=run_id_col):
         publish(df, tmp_path / "out.csv", "t")
 
 
-def test_an_n_prefixed_column_other_than_n_itself_satisfies_the_guard(tmp_path):
-    df = pl.DataFrame({"bin": ["a"], "n_blocks": [5]})
+def test_a_frame_with_no_count_column_is_now_accepted(tmp_path):
+    """The count-column requirement is withdrawn (spec P23, amended 0992a5c): it
+    blocked cohort_qc.csv (columns stat,value) without blocking anything the
+    datetime guard doesn't already catch. This is that exact shape."""
+    path = tmp_path / "out.csv"
+    df = pl.DataFrame({"stat": ["min_age", "stitch_hours"], "value": ["18", "6"]})
+    written = publish(df, path, "t")
+    assert written.equals(df)
+    assert pl.read_csv(path).get_column("stat").to_list() == ["min_age", "stitch_hours"]
+
+
+def test_a_naive_datetime_column_is_refused(tmp_path):
+    df = pl.DataFrame({"t_dttm": [datetime.datetime(2024, 1, 1)], "n": [5]})
+    with pytest.raises(AssertionError, match="t_dttm"):
+        publish(df, tmp_path / "out.csv", "t")
+
+
+def test_a_timezone_aware_datetime_column_is_refused(tmp_path):
+    """Checked on dtype, not name: a tz-aware Datetime is still `pl.Datetime`."""
+    df = pl.DataFrame(
+        {"admin_dttm": [datetime.datetime(2024, 1, 1)], "n": [5]}
+    ).with_columns(pl.col("admin_dttm").dt.replace_time_zone("US/Eastern"))
+    assert isinstance(df.schema["admin_dttm"], pl.Datetime)
+    with pytest.raises(AssertionError, match="admin_dttm"):
+        publish(df, tmp_path / "out.csv", "t")
+
+
+def test_a_date_column_is_refused(tmp_path):
+    df = pl.DataFrame({"d": [datetime.date(2024, 1, 1)], "n": [5]})
+    with pytest.raises(AssertionError, match="d"):
+        publish(df, tmp_path / "out.csv", "t")
+
+
+def test_a_plain_string_or_numeric_column_named_like_a_date_is_not_a_datetime(tmp_path):
+    """The guard checks dtype, never column name -- a string column happening to be
+    called `admit_date` is not what P23 refuses."""
+    df = pl.DataFrame({"admit_date": ["2024-01-01"], "n": [5]})
     written = publish(df, tmp_path / "out.csv", "t")
     assert written.height == 1
 

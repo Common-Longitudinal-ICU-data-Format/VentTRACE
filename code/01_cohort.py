@@ -7,6 +7,7 @@ app = marimo.App(width="full")
 @app.cell
 def _():
     import json
+    import sys
     from pathlib import Path
 
     import pandas as pd
@@ -18,6 +19,9 @@ def _():
 
     import marimo as mo
 
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from utils.suppress import publish
+
     return (
         Adt,
         Hospitalization,
@@ -28,6 +32,7 @@ def _():
         pd,
         pl,
         process_resp_support_waterfall,
+        publish,
         stitch_encounters,
     )
 
@@ -906,6 +911,7 @@ def _(
     cohort_index,
     consort_rows,
     pl,
+    publish,
     qc_blocks_per_encounter,
     qc_pct_imv_elsewhere,
     resp_waterfall,
@@ -939,7 +945,7 @@ def _(
     cohort_index_out.write_parquet(PHI_DIR / "cohort_index.parquet")
 
     consort_df = pl.DataFrame(consort_rows)
-    consort_df.write_csv(SHARE_DIR / "consort_cohort.csv")
+    publish(consort_df, SHARE_DIR / "consort_cohort.csv", "consort_cohort")
 
     cohort_qc = pl.DataFrame(
         [
@@ -951,7 +957,7 @@ def _(
             {"stat": "pct_first_imv_outside_first_hosp", "value": f"{qc_pct_imv_elsewhere:.2f}"},
         ]
     )
-    cohort_qc.write_csv(SHARE_DIR / "cohort_qc.csv")
+    publish(cohort_qc, SHARE_DIR / "cohort_qc.csv", "cohort_qc")
 
     print(f"cohort.parquet                 {cohort.height:,} rows  -> {PHI_DIR}")
     print(f"cohort_resp_waterfall.parquet  {resp_waterfall.height:,} rows")

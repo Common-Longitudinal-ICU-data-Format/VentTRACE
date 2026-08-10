@@ -1042,14 +1042,16 @@ def _(
         "sedation_offset_distribution",
     )
 
-    # P18: keyed on the unit, never converted.
+    # P18: keyed on the unit, never converted. interpolation="linear" on both
+    # quantiles, explicitly: polars' default is "nearest", which at small n
+    # republishes a raw charted dose verbatim as the statistic.
     sedation_dose = (
         sed_in_window.group_by(["med_category", "med_dose_unit"])
         .agg(
             n_admin_windows=pl.len(),
             median_dose=pl.col("med_dose").median(),
-            p25_dose=pl.col("med_dose").quantile(0.25),
-            p75_dose=pl.col("med_dose").quantile(0.75),
+            p25_dose=pl.col("med_dose").quantile(0.25, interpolation="linear"),
+            p75_dose=pl.col("med_dose").quantile(0.75, interpolation="linear"),
         )
         .sort(["med_category", "n_admin_windows"], descending=[False, True])
     )
@@ -1073,9 +1075,12 @@ def _(mo):
         Form was chosen before color, and two of the three forms differ from the obvious
         one for reasons the data forced:
 
-        * **E.1 is small multiples, not a five-line chart.** Faceting one agent per panel
-          puts every bin on its own mark and removes color from the identity job entirely:
-          the panel title names the agent, so nobody is matching hues.
+        * **E.1 is small multiples, not one multi-line chart.** Faceting one agent per
+          panel puts every bin on its own mark and removes color from the identity job
+          entirely: the panel title names the agent, so nobody is matching hues. (The
+          panel count follows the agents actually charted at the site, not the five-agent
+          `SEDATIVES` list -- one line per agent would overlap badly regardless of how
+          many are present.)
         * **E.2 is faceted by charted unit, not one shared axis.** `mg` and `mcg/kg/min` on
           a single x-axis is the horizontal form of a dual-axis chart: the alignment of the
           two scales is arbitrary and the picture invents a comparison that is not in the
@@ -1122,16 +1127,22 @@ def _(mo):
 
 @app.cell
 def _():
-    def mark_zero(ax, x, y_ref, color):
-        """A published, exactly-zero value: a diamond just above the baseline.
+    def mark_zero(ax, x, color):
+        """A published, exactly-zero value: a diamond centered on the baseline.
 
-        Placed at a small fixed fraction of the axis range rather than at y=0 itself, so
-        it is not clipped by the x-axis spine, and shaped as a marker rather than a bar
-        so it can never be mistaken for a bar of real (if tiny) height.
+        Placed at y=0 in DATA coordinates -- not scaled off `y_ref` or any other frame
+        statistic. A marker scaled off the frame's max is only guaranteed smaller than a
+        real bar while every real bar is at least that tall, which stopped being true the
+        moment counts of 1..9 started being drawn (P21): a `y_ref * 0.03` marker on a
+        frame whose max is in the hundreds sits well above bars of height 1..3, inverting
+        the encoding it exists to make legible. A marker centered exactly at y=0 has zero
+        data-height by construction, so it can never equal or exceed a bar of ANY positive
+        height, however small. `clip_on=False` keeps its upper half from being clipped by
+        the x-axis spine, since its center sits exactly on `ylim`'s bottom edge.
         """
         ax.plot(
-            [x], [y_ref * 0.03], marker="D", markersize=5, color=color,
-            linestyle="None", zorder=5,
+            [x], [0], marker="D", markersize=5, color=color,
+            linestyle="None", zorder=5, clip_on=False,
         )
 
     return (mark_zero,)
@@ -1171,7 +1182,6 @@ def _(
     _GRID = "#e1e0d9"
 
     _d1 = pl.read_csv(SHARE_DIR / "imv_offset_distribution.csv").sort("bin_order")
-    _y_ref = int(_d1.get_column("n").max() or 0)
 
     _fig, _ax = plt.subplots(figsize=(11, 5.4))
 
@@ -1179,7 +1189,7 @@ def _(
         if _row["n"] > 0:
             _ax.bar([_row["bin_order"]], [_row["n"]], width=0.72, color=_BLUE)
         else:
-            mark_zero(_ax, _row["bin_order"], _y_ref, _BLUE)
+            mark_zero(_ax, _row["bin_order"], _BLUE)
 
     _ax.set_xticks(list(range(N_OFFSET_BINS)))
     _ax.set_xticklabels(OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)
@@ -1255,7 +1265,6 @@ def _(
 
     _e1 = pl.read_csv(SHARE_DIR / "sedation_offset_distribution.csv")
     _agents = sorted(_e1.get_column("med_category").unique().to_list())
-    _y_ref = int(_e1.get_column("n_admin_windows").max() or 0)
 
     _fig, _axes = plt.subplots(
         len(_agents), 1, figsize=(11, 1.55 * len(_agents) + 2.6),
@@ -1273,7 +1282,7 @@ def _(
                     width=0.72, color=_BLUE,
                 )
             else:
-                mark_zero(_ax, _row["bin_order"], _y_ref, _BLUE)
+                mark_zero(_ax, _row["bin_order"], _BLUE)
 
         _ax.axvline(ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
         _ax.set_xlim(-0.8, N_OFFSET_BINS - 0.2)
