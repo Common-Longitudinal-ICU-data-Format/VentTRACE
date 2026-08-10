@@ -1,86 +1,92 @@
-# *CLIF Project Title*
+# VentTRACE
 
-> [!NOTE]
-> **Building a project from this template?** Read the
-> [Project Creator Guide](guides/creator-guide.md) first, then **delete this note** and customize the
-> sections below to describe your project for the consortium sites that will run it.
+A single-site CLIF pipeline studying what surrounds a paralytic administration during intubation
+in the ICU. Full walkthrough of what each notebook does and why:
+[`docs/pipeline_flow.md`](docs/pipeline_flow.md). Authoritative design decisions:
+[`docs/superpowers/specs/2026-08-10-paralytic-index-design.md`](docs/superpowers/specs/2026-08-10-paralytic-index-design.md).
 
 ## CLIF VERSION
 
-[major].[minor]
+Built and tested against `clifpy>=0.5.0` (see [`pyproject.toml`](pyproject.toml)), mCIDE
+categories current as of 2026-08.
 
 ## Objective
 
-*Describe the project objective*
+The paralytic administration — not a ventilator record or a billing code — is the index event.
+For every paralytic administration (folded into a single **index paralytic** when several land
+within 15 minutes of one another), the study asks:
+
+1. How are paralytic administrations distributed in time relative to one another?
+2. How many distinct index paralytic events does a hospitalization have, and how far apart are
+   they?
+3. Does the ventilator record show a transition onto invasive ventilation within ±60 minutes of
+   the index paralytic — a device *change*, not merely "was IMV charted"?
+4. Was a sedative charted in the same ±60 minutes, and at what dose?
+
+This is **intubation-adjacent, not intubation-confirming** — the study describes what surrounds a
+paralytic, and does not adjudicate whether an intubation occurred.
 
 ## Required CLIF tables and fields
 
-Please refer to the [CLIF data dictionary](https://clif-icu.com/data-dictionary), [CLIF Tools](https://clif-icu.com/tools), [ETL Guide](https://clif-icu.com/etl-guide), and [specific table contacts](https://github.com/clif-consortium/CLIF?tab=readme-ov-file#relational-clif) for more information on constructing the required tables and fields.
+1. **hospitalization**: `patient_id`, `hospitalization_id`, `admission_dttm`, `age_at_admission`
+2. **adt**: `hospitalization_id`, `location_category` (ED / ICU presence)
+3. **respiratory_support**: `hospitalization_id`, `recorded_dttm`, `device_category`,
+   `tracheostomy`, and the fields `clifpy`'s waterfall needs to infer device from ventilator
+   settings
+4. **medication_admin_intermittent**: `hospitalization_id`, `admin_dttm`, `med_category`,
+   `mar_action_category`, `med_dose`, `med_dose_unit` — filtered to the paralytics
+   (`rocuronium`, `succinylcholine`, `vecuronium`) and the sedatives (`midazolam`, `etomidate`,
+   `ketamine`, `propofol`, `fentanyl`)
 
-*List all required tables for the project here, and provide a brief rationale for why they are required.*
-
-Example:
-The following tables are required:
-1. **patient**: `patient_id`, `race_category`, `ethnicity_category`, `sex_category`
-2. **hospitalization**: `patient_id`, `hospitalization_id`, `admission_dttm`, `discharge_dttm`, `age_at_admission`
-3. **vitals**: `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value`
-   - `vital_category` = 'heart_rate', 'resp_rate', 'sbp', 'dbp', 'map', 'resp_rate', 'spo2'
-4. **labs**: `hospitalization_id`, `lab_result_dttm`, `lab_category`, `lab_value`
-   - `lab_category` = 'lactate'
-5. **medication_admin_continuous**: `hospitalization_id`, `admin_dttm`, `med_name`, `med_category`, `med_dose`, `med_dose_unit`
-   - `med_category` = "norepinephrine", "epinephrine", "phenylephrine", "vasopressin", "dopamine", "angiotensin", "nicardipine", "nitroprusside", "clevidipine", "cisatracurium"
-6. **respiratory_support**: `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `tracheostomy`, `fio2_set`, `lpm_set`, `resp_rate_set`, `peep_set`, `resp_rate_obs`
-
-For Python users, the [clifpy](https://common-longitudinal-icu-data-format.github.io/clifpy/) package provides essential utilities for working with CLIF data, including:
-- Key features: outlier handling, encounter stitching, wide data creation, and more
-- Advanced features: SOFA score computation, respiratory support waterfall, medication unit conversion, and more
-
-See the [clifpy user guide](https://common-longitudinal-icu-data-format.github.io/clifpy/user-guide/) for detailed documentation.
+`medication_admin_continuous` is never opened — every dose in this study is a discrete charted
+push. See [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §2 for the full per-notebook table map.
 
 ## Cohort identification
-*Describe study cohort inclusion and exclusion criteria here*
 
-## Expected Results
+Adults (≥18 at admission), ED or ICU at some point in the stay, at least one raw charted
+`device_category == 'imv'` row, no tracheostomy signal in the first 24 hours. Hospitalizations
+less than 6 hours apart for the same patient are stitched into one `encounter_block`, the
+analytic unit for the whole pipeline. See [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §3 for
+the full CONSORT funnel.
 
-*Describe the output of the analysis. The final project results should be saved in the [`output/final_no_phi`](output/README.md) directory.*
+## Expected results
+
+Aggregate counts, rates, quantiles and figures — never a row-level record — written to
+`output/final_no_phi/`. That directory, and only that directory, is what a site shares with the
+project PI / consortium.
 
 > [!WARNING]
-> **Never upload patient-level data to Box.** Only **aggregate** results may be placed in
-> [`output/final_no_phi/`](output/README.md) and shared with the project PI / consortium:
-> - No `patient_id` or any row-level / individual patient records — no identifier column, no
->   raw timestamp, nothing that describes one person.
-> - No raw `.csv` / `.parquet` data files.
->
-> See [`output/README.md`](output/README.md) for the file-naming convention and
-> [`guides/primer.md`](guides/primer.md) for the full data-security rules.
+> **Never upload patient-level data to Box.** Only `output/final_no_phi/` may be shared — no
+> `patient_id`, no raw timestamp, nothing that describes one person. `output/intermediate_phi/`
+> and `output/logs/` are row-level or PHI-adjacent and never leave the site — see
+> [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §6 and [`guides/primer.md`](guides/primer.md)
+> for the full data-security rules.
 
-## Detailed Instructions for running the project
+## Running the pipeline
 
-### 1. Configure `config/config.json`
-Follow the instructions in [`config/README.md`](config/README.md) to set your site name, the path to
-your CLIF tables, and the file type. You can add any other project specific common config requirements.
+1. **Configure.**
+   ```
+   cp config/config_template.json config/config.json
+   ```
+   Then edit `config/config.json` — site name, path to your CLIF tables, file type, timezone.
+   See [`config/README.md`](config/README.md).
 
+2. **Install dependencies** (Python via [uv](https://docs.astral.sh/uv/getting-started/installation/)):
+   ```
+   uv sync
+   ```
 
-### 2. Set up the project environment
+3. **Run.**
+   ```
+   ./run_all.sh            # 01_cohort -> 02_index_paralytic -> 03_context, in order
+   ./run_all.sh 02 03      # or just a subset of steps
+   ```
+   Each run is logged to `output/logs/run_<UTC timestamp>/`. Results land in
+   `output/final_no_phi/`; figures in `output/final_no_phi/figures/`.
 
-Set up the environment for the language(s) this project uses.
+4. **Verify.**
+   ```
+   uv run pytest
+   ```
 
-**Python (using uv):** install [uv](https://docs.astral.sh/uv/getting-started/installation/), then from
-the project root install the project's dependencies:
-```
-uv sync
-```
-Run project code inside the managed environment with `uv run python code/<script>.py` (or
-`uv run jupyter lab`).
-
-**R (using renv):** run `00_renv_restore.R` in [`code/`](code) to install the project's R packages.
-
-### 3. Run code
-
-Detailed instructions on the code workflow are provided in the [code directory](code/README.md).
-Final results are written to [`output/final_no_phi`](output/README.md) — remember the data-security rules
-above before sharing anything.
-
-## Example Repositories
-* [CLIF Variation in Ventilation](https://github.com/ingra107/clif_vent_variation) for R
-* [CLIF Eligibility for mobilization](https://github.com/kaveriC/CLIF-eligibility-for-mobilization) for Python
+`code/README.md` has a short per-notebook description of what `01`, `02` and `03` each do.

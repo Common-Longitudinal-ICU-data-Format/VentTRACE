@@ -1,52 +1,23 @@
 ## Code directory
 
-This is where your project's scripts live. The repository ships starter scripts under
-[`templates/`](templates) for both **R** and **Python** — as the project creator you **copy the
-language(s) you use into `code/`** (see the [Creator Guide](../guides/creator-guide.md)), then adapt
-them.
+Three marimo notebooks, run in order by [`../run_all.sh`](../run_all.sh), each named for the
+CLIF table it opens rather than for a step number that would drift as the design changes. The
+full walkthrough — what each one does, why, and the numbers this run produced — is
+[`../docs/pipeline_flow.md`](../docs/pipeline_flow.md); this file is just the map.
 
-> [!NOTE]
-> **These templates are suggestions, not requirements.** They exist to make it easy to follow a
-> shared convention across the consortium — the numbered steps, file layout, and naming are just a
-> starting point. Rename, restructure, combine, or replace anything to fit your project.
+| notebook | what it does | reads | writes |
+|---|---|---|---|
+| `01_cohort.py` | Builds the analytic cohort: adults, ED/ICU, ever-IMV, no trach in 24h; stitches hospitalizations `<6h` apart into `encounter_block`; waterfalls `respiratory_support` into a gap-free device timeline. | `hospitalization`, `adt`, `respiratory_support` | `output/intermediate_phi/cohort_index.parquet`, `cohort_resp_waterfall.parquet` (PHI); `output/final_no_phi/consort_cohort.csv`, `cohort_qc.csv` |
+| `02_index_paralytic.py` | Folds paralytic administrations within 15 minutes of one another into index paralytics (the study's index event); publishes the co-administration gap distribution and the gap between index paralytics. | `medication_admin_intermittent`, filtered to the paralytics | `output/intermediate_phi/index_paralytic.parquet` (PHI); several `output/final_no_phi/*.csv` + `figures/` |
+| `03_context.py` | For each index paralytic: does the ventilator record show a device transition onto IMV within ±60 min, and was a sedative charted in the same window, at what dose. | `cohort_resp_waterfall.parquet`, `medication_admin_intermittent` filtered to the sedatives | `output/intermediate_phi/index_context.parquet` (PHI); several `output/final_no_phi/*.csv` + `figures/` |
 
-Only **step 01 (cohort identification)** is a fully worked example
-([Python](templates/Python/01_cohort_identification_template.py) ·
-[R](templates/R/01_cohort_identification_template.R)) — it shows the CLIF idiom end to end:
-load `config/config.json`, read the tables you need, build a cohort, and split outputs into
-patient-level working data ([`output/intermediate_phi/`](../output/intermediate_phi)) vs. shareable
-aggregates ([`output/final_no_phi/`](../output/final_no_phi)).
+Run individually with `uv run python code/<script>.py`, or all together with
+`./run_all.sh` from the repo root (see the top-level [`README.md`](../README.md)).
 
-**Steps 02–04 are skeletons** (purpose + expected inputs/outputs, no code) for you to fill in.
+`utils/suppress.py`'s `publish()` is the only route into `output/final_no_phi/` — every
+published table goes through it, and it refuses to write a frame carrying an identifier or a
+datetime column. See [`../docs/pipeline_flow.md`](../docs/pipeline_flow.md) §6.
 
-**Try it on demo data:** the config defaults to the bundled [`clif_demo/`](../clif_demo) dataset, so
-once you create your config you can run `01` immediately — no real data needed:
-```
-cp config/config_template.json config/config.json   # default data_directory = clif_demo
-uv run python code/templates/Python/01_cohort_identification_template.py
-# or: Rscript code/templates/R/01_cohort_identification_template.R
-```
-Point `data_directory` at your CLIF tables when you're ready to run on real data.
-
-### General workflow
-
-1. **Cohort identification** (`01`, worked example)
-   - Apply inclusion/exclusion criteria, select required fields, filter the tables.
-   - Output: the cohort + a `cohort_summary` aggregate.
-
-2. **Quality checks** (`02`, skeleton)
-   - Project-specific QC on the cohort: required fields present, categories valid (mCIDE),
-     plausible ranges.
-   - Input: cohort from `01` → Output: cleaned cohort.
-
-3. **Outlier handling** (`03`, skeleton)
-   - Set physiologically implausible values to NaN/NA. **Python:** use clifpy's
-     `apply_outlier_handling` (CLIF-wide thresholds, no CSVs to manage). **R:** apply your
-     project's agreed plausible ranges.
-   - Input: cleaned cohort → Output: outlier-handled data.
-
-4. **Analysis** (`04`, skeleton)
-   - The main analysis. Write **aggregate** results to
-     [`output/final_no_phi/`](../output/README.md) — no row-level data: no `patient_id`, no
-     `hospitalization_id`, no identifier column, no raw timestamp (see the data-security rules
-     in [`output/README.md`](../output/README.md) and [`../guides/primer.md`](../guides/primer.md)).
+`01`'s cohort logic and the encounter-stitching/waterfall machinery are unchanged from the
+pipeline's previous, ventilator-anchored design; `02` and `03` are what changed when the anchor
+moved to the paralytic administration.
