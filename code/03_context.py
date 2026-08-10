@@ -828,5 +828,849 @@ def _(SHARE_DIR, context_d, pl, publish, withhold_second_row):
     return (transitions_in_window,)
 
 
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+        ## E — sedation in the same window
+
+        The **identical** window predicate as D (P15), applied to
+        `medication_admin_intermittent` over the five induction agents.
+
+        **Every** administration in the window is kept, not just the nearest per agent
+        (P17). The superseded design deduplicated by `med_category` because it was building
+        a rank ladder, where one patient redosed six times would have dominated a
+        distribution of ranks. This study publishes an offset *histogram*, where every
+        administration is a legitimate observation of when sedation was charted —
+        deduplicating would delete the redosing pattern the histogram exists to show.
+
+        `med_dose` and `med_dose_unit` are the raw charted values and are **never
+        converted** (P18). Dose statistics are keyed on `(med_category, med_dose_unit)`, so
+        a site charting propofol in both `mg` and `mg/kg` produces two rows a reader can
+        see rather than one number that is silently wrong.
+        """
+    )
+    return
+
+
+@app.cell
+def _(
+    CONTEXT_WINDOW_MINUTES,
+    DATA_DIR,
+    FILETYPE,
+    MAR_ACTIONS,
+    MedicationAdminIntermittent,
+    PHI_DIR,
+    SEDATIVES,
+    TIMEZONE,
+    context_d,
+    epoch_minutes,
+    in_window_expr,
+    pl,
+    to_site_naive,
+):
+    # The bridge again -- 03 reaches the medication table by hospitalization_id and drops
+    # the column at the join, exactly as 02 does (P5). cohort_index is re-read here rather
+    # than threaded through index_paralytic, which deliberately carries no hospitalization.
+    _cohort_index = pl.read_parquet(PHI_DIR / "cohort_index.parquet")
+    _bridge = (
+        _cohort_index.select(["encounter_block", "list_hospitalization_id"])
+        .explode("list_hospitalization_id")
+        .rename({"list_hospitalization_id": "hospitalization_id"})
+    )
+    _hosp_ids = _bridge.get_column("hospitalization_id").unique().to_list()
+
+    _sed = MedicationAdminIntermittent.from_file(
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=[
+            "hospitalization_id",
+            "admin_dttm",
+            "med_category",
+            "mar_action_category",
+            "med_dose",
+            "med_dose_unit",
+        ],
+        filters={"hospitalization_id": _hosp_ids},
+    )
+
+    sed_admin = (
+        pl.from_pandas(_sed.df.assign(admin_dttm=lambda d: to_site_naive(d["admin_dttm"])))
+        .with_columns(
+            med_category=pl.col("med_category").str.to_lowercase(),
+            mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
+        )
+        .filter(
+            pl.col("med_category").is_in(SEDATIVES)
+            & pl.col("mar_action_category").is_in(MAR_ACTIONS)
+        )
+        .join(_bridge, on="hospitalization_id", how="inner")
+        .drop("hospitalization_id")
+    )
+
+    assert "hospitalization_id" not in sed_admin.columns, "the bridge leaked its key"
+
+    _found = sed_admin.get_column("med_category").unique().to_list()
+    _missing = sorted(set(SEDATIVES) - set(_found))
+    print(f"sedative administrations : {sed_admin.height:,}")
+    print(
+        sed_admin.group_by(["med_category", "mar_action_category"])
+        .agg(n=pl.len())
+        .sort("n", descending=True)
+    )
+    if _missing:
+        print(f"\nNOT PRESENT AT THIS SITE: {', '.join(_missing)}")
+    assert sed_admin.height > 0, (
+        "no administration matched the sedative list at all -- compare the value_counts "
+        "above against the mCIDE med_category list before trusting a zero."
+    )
+
+    sed_in_window = (
+        context_d.select(
+            "index_paralytic_id", "encounter_block", _t_min=epoch_minutes("t_dttm")
+        )
+        .join(
+            sed_admin.with_columns(_s_min=epoch_minutes("admin_dttm")),
+            on="encounter_block",
+            how="inner",
+        )
+        .with_columns(offset_minutes=(pl.col("_s_min") - pl.col("_t_min")).round(3))
+        .filter(in_window_expr("offset_minutes", CONTEXT_WINDOW_MINUTES))
+        .select(
+            "index_paralytic_id",
+            "med_category",
+            "admin_dttm",
+            "offset_minutes",
+            "med_dose",
+            "med_dose_unit",
+            "mar_action_category",
+        )
+    )
+
+    print(f"sedative administrations inside a window : {sed_in_window.height:,}")
+    return sed_admin, sed_in_window
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+        ### `index_context` — the canonical artifact, one row per index paralytic
+
+        `context_d` gains E's columns and nothing else changes: the row count is asserted
+        unchanged, so every index paralytic keeps its record whether or not sedation was
+        found.
+
+        `sedatives` and `sedative_agents` are written as **empty arrays, never nulls**, for
+        an index paralytic with no sedation in the window. A null in a canonical artifact is
+        ambiguous between "nothing was given" and "this was not processed"; an empty array
+        says the first and only the first. `n_sedative_admins` is filled to a real `0` for
+        the same reason.
+
+        `nearest_sedative_med` is the single nearest administration by |offset|, kept as a
+        convenience column beside — not instead of — the full `sedatives` list. Ties on an
+        identical |offset| break alphabetically on `med_category` so the column is
+        byte-identical across runs.
+        """
+    )
+    return
+
+
+@app.cell
+def _(context_d, pl, sed_in_window):
+    _nearest = (
+        sed_in_window.with_columns(_abs=pl.col("offset_minutes").abs())
+        # med_category breaks a tie on identical |offset| alphabetically, so the column is
+        # byte-identical across runs.
+        .sort(["index_paralytic_id", "_abs", "med_category"])
+        .group_by("index_paralytic_id", maintain_order=True)
+        .agg(
+            nearest_sedative_med=pl.col("med_category").first(),
+            nearest_sedative_offset_min=pl.col("offset_minutes").first(),
+        )
+    )
+
+    _agg = sed_in_window.group_by("index_paralytic_id").agg(
+        n_sedative_admins=pl.len(),
+        sedative_agents=pl.col("med_category").unique().sort(),
+        sedatives=pl.struct(
+            med_category="med_category",
+            admin_dttm="admin_dttm",
+            offset_minutes="offset_minutes",
+            med_dose="med_dose",
+            med_dose_unit="med_dose_unit",
+            mar_action_category="mar_action_category",
+        ),
+    )
+
+    index_context = (
+        context_d.join(_agg, on="index_paralytic_id", how="left")
+        .join(_nearest, on="index_paralytic_id", how="left")
+        .with_columns(
+            n_sedative_admins=pl.col("n_sedative_admins").fill_null(0).cast(pl.Int32),
+            sedative_agents=pl.col("sedative_agents").fill_null([]),
+            # An EMPTY array, not a null: the record is written for every index paralytic
+            # so "nothing was given" and "this was not processed" stay distinguishable.
+            sedatives=pl.col("sedatives").fill_null([]),
+        )
+        .with_columns(any_sedative=pl.col("n_sedative_admins") > 0)
+        .sort(["encounter_block", "p_num"])
+    )
+
+    assert index_context.height == context_d.height, "the sedation join changed the row count"
+    assert (
+        index_context.filter(
+            pl.col("any_sedative") & pl.col("nearest_sedative_med").is_null()
+        ).height
+        == 0
+    ), "an index paralytic has sedation but no nearest agent"
+    # The empty-array contract, asserted rather than assumed: a null here would be the
+    # ambiguity the fill_null above exists to remove.
+    assert (
+        index_context.filter(
+            pl.col("sedatives").is_null() | pl.col("sedative_agents").is_null()
+        ).height
+        == 0
+    ), "an index paralytic carries a NULL sedative list where an empty array was required"
+
+    print(
+        f"index paralytics with sedation in window : "
+        f"{index_context.get_column('any_sedative').sum():,} / {index_context.height:,} "
+        f"({100 * index_context.get_column('any_sedative').mean():.1f}%)"
+    )
+    return (index_context,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### The offset bin grid, defined once for E's table and E's figure
+
+        Twenty-four five-minute bins across the full 120 minutes, on exactly the same edges
+        D's distribution uses: left-closed and right-open except the last, which is closed
+        so an offset of exactly +60 has a home. The labels are exported rather than rebuilt
+        inside each figure, because a figure that reconstructs its own bin grid can drift
+        from the table it is drawing.
+        """
+    )
+    return
+
+
+@app.cell
+def _(CONTEXT_WINDOW_MINUTES, OFFSET_BIN_WIDTH):
+    N_OFFSET_BINS = int(2 * CONTEXT_WINDOW_MINUTES // OFFSET_BIN_WIDTH)
+    _edges = [
+        -CONTEXT_WINDOW_MINUTES + OFFSET_BIN_WIDTH * i for i in range(N_OFFSET_BINS + 1)
+    ]
+    OFFSET_BIN_LABELS = [
+        f"[{_edges[i]:.0f},{_edges[i + 1]:.0f})" for i in range(N_OFFSET_BINS)
+    ]
+    OFFSET_BIN_LABELS[-1] = f"[{_edges[-2]:.0f},{_edges[-1]:.0f}]"
+
+    # The bin whose left edge is t itself -- the dashed rule in every offset figure sits
+    # immediately to its left, so "before" and "after" are never read off a tick label.
+    ZERO_BIN = N_OFFSET_BINS // 2
+    return N_OFFSET_BINS, OFFSET_BIN_LABELS, ZERO_BIN
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Publishing E, and the partition hazard `sedation_summary.csv` inherits
+
+        `index_context.parquet` is written first — the canonical artifact, PHI, never
+        shared. Then three released tables.
+
+        `sedation_summary.csv` partitions the **total number of index paralytics**, exactly
+        as `imv_transition_summary.csv` does, and that total is already effectively public
+        through `index_paralytic_summary.csv`'s `n_index` per `agent_label`. So it carries
+        the same `withhold_second_row` check: if the row-level n≥10 rule withholds exactly
+        one row, that row's count is recoverable as *public total minus published rows*, and
+        a second row has to go with it. Publishing this table without the guard is precisely
+        the leak the guard was written for.
+
+        The other two are **not** partitions of a public total.
+        `sedation_offset_distribution.csv` counts administrations, not index paralytics, and
+        one index paralytic contributes as many rows as it had administrations (P17), so its
+        column sums to a number nothing else publishes. `sedation_dose.csv` sums to the same
+        unpublished total. Neither is recoverable by subtraction, so neither takes the second
+        withholding — the guard is applied where the arithmetic demands it, not everywhere,
+        because withholding a row that protects nothing costs a reader for free.
+
+        Every bin of the offset grid is emitted for every agent, including the empty ones: an
+        explicit published zero is what lets a reader tell an empty bin from a withheld one.
+        """
+    )
+    return
+
+
+@app.cell
+def _(
+    CONTEXT_WINDOW_MINUTES,
+    N_OFFSET_BINS,
+    OFFSET_BIN_LABELS,
+    OFFSET_BIN_WIDTH,
+    PHI_DIR,
+    SHARE_DIR,
+    index_context,
+    pl,
+    publish,
+    sed_in_window,
+    withhold_second_row,
+):
+    index_context.write_parquet(PHI_DIR / "index_context.parquet")
+    print(f"index_context.parquet   {index_context.height:,} rows -> {PHI_DIR}")
+
+    sedation_summary = (
+        index_context.with_columns(agent_set=pl.col("sedative_agents").list.join("+"))
+        .with_columns(
+            agent_set=pl.when(pl.col("agent_set") == "")
+            .then(pl.lit("(none)"))
+            .otherwise(pl.col("agent_set"))
+        )
+        .group_by(["any_sedative", "agent_set"])
+        .agg(n=pl.len(), median_n_admins=pl.col("n_sedative_admins").median())
+        .sort("n", descending=True)
+    )
+    print("sedation_summary, unsuppressed (run log only, never written):")
+    print(sedation_summary)
+
+    # This table partitions the total number of index paralytics, which
+    # index_paralytic_summary.csv already makes public through n_index per agent_label.
+    publish(
+        withhold_second_row(sedation_summary, ["n"], "sedation_summary"),
+        SHARE_DIR / "sedation_summary.csv",
+        ["n"],
+        "sedation_summary",
+    )
+
+    _grid = (
+        pl.DataFrame(
+            {"bin_order": list(range(N_OFFSET_BINS)), "offset_bin": OFFSET_BIN_LABELS}
+        )
+        .with_columns(pl.col("bin_order").cast(pl.Int32))
+        .join(sed_in_window.select("med_category").unique(), how="cross")
+    )
+
+    _binned = (
+        sed_in_window.with_columns(
+            bin_order=(
+                ((pl.col("offset_minutes") + CONTEXT_WINDOW_MINUTES) // OFFSET_BIN_WIDTH)
+                .cast(pl.Int32)
+                .clip(0, N_OFFSET_BINS - 1)
+            )
+        )
+        .group_by(["bin_order", "med_category"])
+        .agg(n=pl.len())
+    )
+
+    sedation_offsets = (
+        _grid.join(_binned, on=["bin_order", "med_category"], how="left")
+        .with_columns(pl.col("n").fill_null(0))
+        .sort(["med_category", "bin_order"])
+    )
+    # Counts administrations, not index paralytics, and one index paralytic contributes as
+    # many rows as it had administrations -- so this column sums to a total no released
+    # file publishes and no row is recoverable by subtraction. No second withholding.
+    publish(
+        sedation_offsets,
+        SHARE_DIR / "sedation_offset_distribution.csv",
+        ["n"],
+        "sedation_offset_distribution",
+    )
+
+    # P18: keyed on the unit, never converted.
+    sedation_dose = (
+        sed_in_window.group_by(["med_category", "med_dose_unit"])
+        .agg(
+            n=pl.len(),
+            median_dose=pl.col("med_dose").median(),
+            p25_dose=pl.col("med_dose").quantile(0.25),
+            p75_dose=pl.col("med_dose").quantile(0.75),
+        )
+        .sort(["med_category", "n"], descending=[False, True])
+    )
+    print("sedation_dose, unsuppressed (run log only, never written):")
+    print(sedation_dose)
+    # Same total as sedation_offset_distribution, and equally unpublished. No second
+    # withholding.
+    publish(sedation_dose, SHARE_DIR / "sedation_dose.csv", ["n"], "sedation_dose")
+    return sedation_dose, sedation_offsets, sedation_summary
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## Figures D.1, E.1 and E.2
+
+        All three read the **published CSVs and nothing else** (P21). A figure drawn from
+        the PHI frame would show the suppressed cells, and the released `.png` would carry
+        what the released `.csv` withheld.
+
+        Form was chosen before color, and two of the three forms differ from the obvious
+        one for reasons the data forced:
+
+        * **E.1 is small multiples, not a five-line chart.** A line joins its neighbours,
+          and a line drawn across a bin that was *withheld* interpolates a value the release
+          does not contain — the one thing a suppressed cell must never do. Faceting one
+          agent per panel puts every bin on its own mark, so a withheld bin can be drawn as
+          absent rather than bridged. It also removes color from the identity job entirely:
+          the panel title names the agent, so nobody is matching hues.
+        * **E.2 is faceted by charted unit, not one shared axis.** `mg` and `mcg/kg/min` on
+          a single x-axis is the horizontal form of a dual-axis chart: the alignment of the
+          two scales is arbitrary and the picture invents a comparison that is not in the
+          data. One panel per unit, each with its own axis, is what P18 looks like drawn.
+
+        Color therefore does no identity work in any of the three, so all three use one hue
+        (categorical slot 1) for the data and reserve every other channel for the three
+        states below. Y-axes are **linear**: roughly half these cells are exactly zero, and
+        a log axis cannot place zero on it at all.
+        """
+    )
+    return
+
+
+@app.cell
+def _():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.patheffects as path_effects
+    import matplotlib.pyplot as plt
+
+    return path_effects, plt
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### The three states, drawn the same way `02` draws them
+
+        A count is zero exactly when polars computed zero; a count is *absent* exactly when
+        the row never cleared the n≥10 rule. A bar's height cannot show that difference — a
+        zero-height bar and a bar that was never drawn look identical. So every figure below
+        plots two extra glyphs:
+
+        | state | glyph |
+        |---|---|
+        | positive count | a coloured bar |
+        | published zero (measured, exactly 0) | a **diamond** just above the baseline, in the series colour |
+        | withheld under n≥10 | a **cross below the x-axis**, in axes-fraction space |
+
+        The cross is placed in the axes' x-data / y-axes-fraction transform, so its vertical
+        position is fixed to the axes box rather than the data scale: it carries no
+        magnitude and cannot be misread as a small measured value.
+
+        These two helpers are a deliberate duplicate of `02`'s (spec §4 — nothing but
+        `utils/suppress.py` is shared). The visual vocabulary is identical on purpose; the
+        code is separate on purpose.
+        """
+    )
+    return
+
+
+@app.cell
+def _():
+    def mark_zero(ax, x, y_ref, color):
+        """A published, exactly-zero value: a diamond just above the baseline.
+
+        Placed at a small fixed fraction of the axis range rather than at y=0 itself, so
+        it is not clipped by the x-axis spine, and shaped as a marker rather than a bar
+        so it can never be mistaken for a bar of real (if tiny) height.
+        """
+        ax.plot(
+            [x], [y_ref * 0.03], marker="D", markersize=5, color=color,
+            linestyle="None", zorder=5,
+        )
+
+    def mark_withheld(ax, x, color, y=-0.22):
+        """Nothing published for this bin/series: a cross drawn BELOW the x-axis.
+
+        Uses the axes' x-data / y-axes-fraction transform, so the vertical position is
+        fixed relative to the axes box, not the data scale -- it carries no magnitude and
+        cannot be misread as a small measured value.
+        """
+        ax.plot(
+            [x], [y], marker="x", markersize=7, markeredgewidth=1.8, color=color,
+            linestyle="None", transform=ax.get_xaxis_transform(), clip_on=False, zorder=5,
+        )
+
+    return mark_withheld, mark_zero
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Figure D.1 — where the non-IMV → IMV transition sits
+
+        One series — index paralytics per five-minute bin — so there is no legend of series
+        colours to read; the title names what is plotted and the legend carries only the two
+        suppression glyphs. The dashed rule sits at `t`, so "the vent came first" is read off
+        the rule rather than off a tick label.
+
+        The withheld bins are computed as the bin grid minus the bins present in
+        `imv_offset_distribution.csv`. They are **dropped, never merged into a neighbour** —
+        merging would move real counts into the wrong bin to hide a small one — and the
+        caption states how many were lost.
+        """
+    )
+    return
+
+
+@app.cell
+def _(
+    FIG_DIR,
+    N_OFFSET_BINS,
+    OFFSET_BIN_LABELS,
+    SHARE_DIR,
+    ZERO_BIN,
+    mark_withheld,
+    mark_zero,
+    pl,
+    plt,
+):
+    # Categorical slot 1. One series, so colour does no identity work here at all -- it is
+    # the same blue that means "a count of index paralytics" in 02's figures.
+    _BLUE = "#2a78d6"
+    _INK = "#0b0b0b"
+    _MUTED = "#898781"
+    _GRID = "#e1e0d9"
+
+    _d1 = pl.read_csv(SHARE_DIR / "imv_offset_distribution.csv").sort("bin_order")
+    _present = set(_d1.get_column("bin_order").to_list())
+    _withheld = [_b for _b in range(N_OFFSET_BINS) if _b not in _present]
+    _y_ref = int(_d1.get_column("n").max() or 0)
+
+    _fig, _ax = plt.subplots(figsize=(11, 5.4))
+
+    for _row in _d1.iter_rows(named=True):
+        if _row["n"] > 0:
+            _ax.bar([_row["bin_order"]], [_row["n"]], width=0.72, color=_BLUE)
+        else:
+            mark_zero(_ax, _row["bin_order"], _y_ref, _BLUE)
+    for _b in _withheld:
+        mark_withheld(_ax, _b, _BLUE)
+
+    _ax.set_xticks(list(range(N_OFFSET_BINS)))
+    _ax.set_xticklabels(OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)
+    _ax.set_xlim(-0.8, N_OFFSET_BINS - 0.2)
+    _ax.set_ylim(bottom=0)
+    _ax.set_axisbelow(True)
+    _ax.grid(axis="y", color=_GRID, linewidth=0.8)
+    for _side in ("top", "right"):
+        _ax.spines[_side].set_visible(False)
+    # The withheld crosses live in the band below the tick labels, so the axis title has
+    # to clear that band as well -- an axis title sitting on the crosses would be read as
+    # a caption for them.
+    _ax.set_xlabel(
+        "minutes from the index paralytic  (negative = the vent came first)",
+        color=_INK, labelpad=42,
+    )
+    _ax.set_ylabel("index paralytics", color=_INK)
+
+    _ax.axvline(ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
+    _ax.text(
+        ZERO_BIN - 0.4, _ax.get_ylim()[1] * 0.96, "t\n(the index paralytic)",
+        fontsize=8, va="top", color=_INK,
+    )
+
+    _handles = [
+        _ax.plot([], [], marker="D", markersize=5, color="0.3", linestyle="None",
+                 label="published zero (measured, exactly 0)")[0],
+        _ax.plot([], [], marker="x", markersize=7, markeredgewidth=1.8, color="0.3",
+                 linestyle="None", label="withheld entirely (n<10 rule; drawn below axis)")[0],
+    ]
+    _ax.legend(handles=_handles, loc="upper right", fontsize=8, framealpha=0.9)
+    _ax.set_title(
+        "D.1 — where the non-IMV to IMV transition sits relative to the index paralytic\n"
+        "a transition, not a state: the airway changed here (spec P12)\n"
+        f"{len(_withheld)} of {N_OFFSET_BINS} bin(s) withheld under the n>=10 rule "
+        "and dropped, never merged into a neighbour",
+        color=_INK,
+    )
+    _fig.tight_layout()
+    _fig.subplots_adjust(bottom=0.34)
+    _fig.savefig(FIG_DIR / "D1_imv_offset.png", dpi=150)
+    plt.close(_fig)
+    print(f"D1_imv_offset.png -> {FIG_DIR}  ({len(_withheld)} bin(s) withheld)")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Figure E.1 — sedative administrations around the index paralytic
+
+        One panel per agent on a shared bin grid and a **shared y-axis**, so the panels are
+        comparable by eye — a per-panel y-scale would make a rare agent look as busy as a
+        common one, which is the opposite of what this figure is for.
+
+        Every administration in the window is a bar, not just the nearest per agent (P17):
+        the redosing pattern is the thing the histogram exists to show, and deduplicating
+        would delete it.
+
+        The three-state encoding matters more here than anywhere else in the pipeline. With
+        five agents across twenty-four bins there are many small cells, and a great many of
+        them are withheld. Each panel's own withheld count is printed on the panel.
+        """
+    )
+    return
+
+
+@app.cell
+def _(
+    FIG_DIR,
+    N_OFFSET_BINS,
+    OFFSET_BIN_LABELS,
+    SHARE_DIR,
+    ZERO_BIN,
+    mark_withheld,
+    mark_zero,
+    pl,
+    plt,
+):
+    _BLUE = "#2a78d6"
+    _INK = "#0b0b0b"
+    _MUTED = "#898781"
+    _GRID = "#e1e0d9"
+
+    _e1 = pl.read_csv(SHARE_DIR / "sedation_offset_distribution.csv")
+    _agents = sorted(_e1.get_column("med_category").unique().to_list())
+    _y_ref = int(_e1.get_column("n").max() or 0)
+    _total_withheld = len(_agents) * N_OFFSET_BINS - _e1.height
+
+    _fig, _axes = plt.subplots(
+        len(_agents), 1, figsize=(11, 1.55 * len(_agents) + 2.6),
+        sharex=True, sharey=True, squeeze=False,
+    )
+    _axes = [_a[0] for _a in _axes]
+
+    for _ax, _agent in zip(_axes, _agents):
+        _s = _e1.filter(pl.col("med_category") == _agent).sort("bin_order")
+        _present = set(_s.get_column("bin_order").to_list())
+        _missing = [_b for _b in range(N_OFFSET_BINS) if _b not in _present]
+
+        for _row in _s.iter_rows(named=True):
+            if _row["n"] > 0:
+                _ax.bar([_row["bin_order"]], [_row["n"]], width=0.72, color=_BLUE)
+            else:
+                mark_zero(_ax, _row["bin_order"], _y_ref, _BLUE)
+        for _b in _missing:
+            mark_withheld(_ax, _b, _BLUE, y=-0.16)
+
+        _ax.axvline(ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
+        _ax.set_xlim(-0.8, N_OFFSET_BINS - 0.2)
+        _ax.set_ylim(bottom=0)
+        _ax.set_axisbelow(True)
+        _ax.grid(axis="y", color=_GRID, linewidth=0.8)
+        for _side in ("top", "right"):
+            _ax.spines[_side].set_visible(False)
+        # The panel title is the identity channel -- colour carries none of it.
+        _ax.set_title(
+            f"{_agent}   ·   {len(_missing)} of {N_OFFSET_BINS} bin(s) withheld",
+            fontsize=9, loc="left", color=_INK,
+        )
+        _ax.tick_params(axis="y", labelsize=8, colors=_MUTED)
+
+    _axes[-1].set_xticks(list(range(N_OFFSET_BINS)))
+    _axes[-1].set_xticklabels(OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)
+    # Only the bottom panel carries tick labels, and its withheld crosses sit in the same
+    # band. Padding the labels down keeps that band clear whichever agent sorts last --
+    # the layout must not depend on the bottom agent happening to have nothing withheld.
+    _axes[-1].tick_params(axis="x", pad=20)
+    _axes[-1].set_xlabel(
+        "minutes from the index paralytic  (dashed rule = t)", color=_INK
+    )
+    _axes[len(_axes) // 2].set_ylabel("administrations", color=_INK)
+
+    _handles = [
+        _axes[0].plot([], [], marker="D", markersize=5, color="0.3", linestyle="None",
+                      label="published zero (measured, exactly 0)")[0],
+        _axes[0].plot([], [], marker="x", markersize=7, markeredgewidth=1.8, color="0.3",
+                      linestyle="None",
+                      label="withheld entirely (n<10 rule; drawn below axis)")[0],
+    ]
+    _axes[0].legend(handles=_handles, loc="upper right", fontsize=8, framealpha=0.9)
+    _fig.suptitle(
+        "E.1 — sedative administrations around the index paralytic, one panel per agent\n"
+        "every administration in the window, not just the nearest per agent (P17); "
+        "shared y-axis\n"
+        f"{_total_withheld} of {len(_agents) * N_OFFSET_BINS} agent-bin cell(s) withheld "
+        "under the n>=10 rule and dropped, never merged",
+        fontsize=11, color=_INK,
+    )
+    _fig.tight_layout()
+    _fig.subplots_adjust(
+        top=1 - 1.15 / (1.55 * len(_agents) + 2.6), bottom=0.20, hspace=0.62
+    )
+    _fig.savefig(FIG_DIR / "E1_sedation_offset.png", dpi=150)
+    plt.close(_fig)
+    print(
+        f"E1_sedation_offset.png -> {FIG_DIR}  "
+        f"({_total_withheld} agent-bin cell(s) withheld)"
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Figure E.2 — sedative dose by agent and charted unit
+
+        One panel per `med_dose_unit`, each with **its own x-axis**. Doses are the raw
+        charted values and are never converted (P18); putting `mg` and `mcg/kg/min` on a
+        single shared axis would draw a comparison that does not exist, which is the whole
+        defect P18 was written against. Separate panels make the heterogeneity the subject
+        of the figure instead of hiding it.
+
+        Each bar is the median, with a whisker to p25 and p75 and the median printed at the
+        tip. `n` rides the row label, so the reader can see how much each row rests on.
+
+        Suppression here cannot be shown per-bin, because a withheld `(agent, unit)` row has
+        no position on any axis — the release does not say which units that agent was charted
+        in. What *is* derivable is the agent list: every agent with any administration in the
+        window appears in `sedation_offset_distribution.csv` (its empty bins are published as
+        zeros). An agent present there but absent from `sedation_dose.csv` therefore has
+        **every** one of its `(agent, unit)` rows withheld, and gets a labelled cross in a
+        strip of its own rather than silently vanishing from the figure.
+        """
+    )
+    return
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
+    _BLUE = "#2a78d6"
+    _INK = "#0b0b0b"
+    _SECOND = "#52514e"
+    _MUTED = "#898781"
+    _GRID = "#e1e0d9"
+    _SURFACE = "#ffffff"
+
+    _e2 = pl.read_csv(SHARE_DIR / "sedation_dose.csv")
+    # Every agent with any administration in the window appears in E.1's grid, because its
+    # empty bins are published as explicit zeros. So this difference is exactly "agent whose
+    # every (agent, unit) dose row was withheld".
+    _seen = sorted(
+        pl.read_csv(SHARE_DIR / "sedation_offset_distribution.csv")
+        .get_column("med_category")
+        .unique()
+        .to_list()
+    )
+    _dosed = set(_e2.get_column("med_category").to_list())
+    _no_dose = [_a for _a in _seen if _a not in _dosed]
+
+    _units = sorted(_e2.get_column("med_dose_unit").unique().to_list())
+    _ratios = [
+        max(1, _e2.filter(pl.col("med_dose_unit") == _u).height) for _u in _units
+    ]
+    if _no_dose:
+        _ratios.append(len(_no_dose))
+    _n_panels = len(_ratios)
+
+    # height_ratios in row counts gives every panel the SAME row pitch, so a bar in the
+    # one-row panel is not drawn twice as thick as a bar in the two-row panel -- thickness
+    # here is chrome and must not vary with how many units a panel happens to hold.
+    _FIG_H = 1.2 + 0.45 * sum(_ratios) + 0.78 * _n_panels
+    _fig, _axes = plt.subplots(
+        _n_panels, 1, figsize=(10, _FIG_H),
+        gridspec_kw={"height_ratios": _ratios}, squeeze=False,
+    )
+    _axes = [_a[0] for _a in _axes]
+
+    for _ax, _unit in zip(_axes, _units):
+        _p = _e2.filter(pl.col("med_dose_unit") == _unit).sort("median_dose")
+        _y = list(range(_p.height))
+        _ax.barh(_y, _p.get_column("median_dose").to_list(), height=0.4, color=_BLUE)
+        # The IQR whisker crosses the bar it belongs to, so it carries a 3px ring in the
+        # surface colour -- the dataviz surface-ring rule for overlapping marks. Without
+        # it the whisker reads as part of the fill and the bar looks like it reaches p75.
+        _ax.errorbar(
+            _p.get_column("median_dose").to_list(),
+            _y,
+            xerr=[
+                (_p.get_column("median_dose") - _p.get_column("p25_dose")).to_list(),
+                (_p.get_column("p75_dose") - _p.get_column("median_dose")).to_list(),
+            ],
+            fmt="none", ecolor=_SECOND, elinewidth=1.4, capsize=4,
+            path_effects=[
+                path_effects.withStroke(linewidth=3.4, foreground=_SURFACE),
+            ],
+        )
+        for _i, _row in enumerate(_p.iter_rows(named=True)):
+            # The value rides the bar TIP, set just above it: at the whisker end it would
+            # be read as p75, and inside the fill it would be clipped by a short bar.
+            _ax.text(
+                _row["median_dose"], _i + 0.24, f"{_row['median_dose']:g}",
+                ha="center", va="bottom", fontsize=8, color=_SECOND,
+            )
+        _ax.set_yticks(_y)
+        _ax.set_yticklabels(
+            [f"{_r['med_category']}  (n={_r['n']:,})" for _r in _p.iter_rows(named=True)],
+            fontsize=8, color=_INK,
+        )
+        _ax.set_ylim(-0.5, _p.height - 0.5)
+        _ax.margins(x=0.12)
+        _ax.set_xlim(left=0)
+        _ax.set_axisbelow(True)
+        _ax.grid(axis="x", color=_GRID, linewidth=0.8)
+        for _side in ("top", "right", "left"):
+            _ax.spines[_side].set_visible(False)
+        _ax.tick_params(axis="x", labelsize=8, colors=_MUTED)
+        _ax.tick_params(axis="y", length=0)
+        # The panel title is the unit, and the unit is the reason the panel exists.
+        _ax.set_title(
+            f"charted unit: {_unit}   ·   its own axis, never converted (P18)",
+            fontsize=9, loc="left", color=_INK,
+        )
+
+    _axes[len(_units) - 1].set_xlabel(
+        "charted dose — median, with p25–p75 whiskers", color=_INK
+    )
+
+    if _no_dose:
+        _ax = _axes[-1]
+        _y = list(range(len(_no_dose)))
+        _ax.plot(
+            [0] * len(_no_dose), _y, marker="x", markersize=7, markeredgewidth=1.8,
+            color="0.3", linestyle="None", clip_on=False,
+        )
+        _ax.set_yticks(_y)
+        _ax.set_yticklabels(_no_dose, fontsize=8, color=_INK)
+        _ax.set_ylim(-0.5, len(_no_dose) - 0.5)
+        _ax.set_xlim(-0.01, 1)
+        _ax.set_xticks([])
+        _ax.tick_params(axis="y", length=0, pad=10)
+        for _side in ("top", "right", "left", "bottom"):
+            _ax.spines[_side].set_visible(False)
+        _ax.set_title(
+            "no dose row published in ANY unit — every (agent, unit) row withheld "
+            "under the n>=10 rule",
+            fontsize=9, loc="left", color=_INK,
+        )
+
+    _fig.suptitle(
+        "E.2 — sedative dose by agent and charted unit\n"
+        "one panel per unit: the heterogeneity is shown, never normalised away (P18)\n"
+        f"{_e2.height} (agent, unit) row(s) published; "
+        f"{len(_no_dose)} of {len(_seen)} agent(s) have no published dose row at all",
+        fontsize=11, color=_INK,
+    )
+    _fig.tight_layout()
+    _fig.subplots_adjust(top=1 - 1.15 / _FIG_H, hspace=1.15)
+    _fig.savefig(FIG_DIR / "E2_sedation_dose.png", dpi=150)
+    plt.close(_fig)
+    print(f"E2_sedation_dose.png -> {FIG_DIR}  ({len(_no_dose)} agent(s) fully withheld)")
+    return
+
+
 if __name__ == "__main__":
     app.run()
