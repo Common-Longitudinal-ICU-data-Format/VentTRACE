@@ -13,6 +13,7 @@ def _():
     import polars as pl
 
     from clifpy.tables import MedicationAdminIntermittent
+    from clifpy.utils.unit_converter import convert_dose_units_by_med_category
 
     import marimo as mo
 
@@ -22,6 +23,7 @@ def _():
     return (
         MedicationAdminIntermittent,
         Path,
+        convert_dose_units_by_med_category,
         json,
         mo,
         pl,
@@ -102,10 +104,28 @@ def _(Path, json):
     # except the last, which is closed so an offset of exactly +60 has a home.
     OFFSET_BIN_WIDTH = 5
 
+    # P18, amended 2026-08-10: doses are standardised with clifpy to one preferred
+    # unit per med_category before any statistic is taken. mg for every agent
+    # except fentanyl, which this cohort's own raw medians confirm is charted in
+    # mcg. Identical to 02's constant, defined here again rather than imported
+    # (spec §4) -- duplicated analysis logic is the deliberate posture this
+    # project takes so a future divergence is a choice, not a shared bug.
+    PREFERRED_DOSE_UNITS = {
+        "rocuronium": "mg",
+        "succinylcholine": "mg",
+        "vecuronium": "mg",
+        "midazolam": "mg",
+        "etomidate": "mg",
+        "ketamine": "mg",
+        "propofol": "mg",
+        "fentanyl": "mcg",
+    }
+
     print(f"site           : {SITE}")
     print(f"window         : +/- {CONTEXT_WINDOW_MINUTES:.0f} min   (P15)")
     print(f"sedatives      : {' | '.join(SEDATIVES)}")
     print(f"mar actions    : {' | '.join(MAR_ACTIONS)}")
+    print(f"preferred units: {PREFERRED_DOSE_UNITS}   (P18)")
     return (
         CONTEXT_WINDOW_MINUTES,
         DATA_DIR,
@@ -114,6 +134,7 @@ def _(Path, json):
         MAR_ACTIONS,
         OFFSET_BIN_WIDTH,
         PHI_DIR,
+        PREFERRED_DOSE_UNITS,
         SEDATIVES,
         SHARE_DIR,
         TIMEZONE,
@@ -678,10 +699,13 @@ def _(mo):
         administration is a legitimate observation of when sedation was charted —
         deduplicating would delete the redosing pattern the histogram exists to show.
 
-        `med_dose` and `med_dose_unit` are the raw charted values and are **never
-        converted** (P18). Dose statistics are keyed on `(med_category, med_dose_unit)`, so
-        a site charting propofol in both `mg` and `mg/kg` produces two rows a reader can
-        see rather than one number that is silently wrong.
+        `med_dose` and `med_dose_unit` are the raw charted values carried through this
+        section; they are standardised with clifpy to one preferred unit per
+        `med_category` before `sedation_dose.csv` is built (P18, amended 2026-08-10),
+        the identical conversion boundary `02` uses. Dose statistics are keyed on
+        `med_category` **alone** afterward; the raw unit mix moves to
+        `sedation_dose_units.csv`, a counts-only table, so charting heterogeneity stays
+        visible without reintroducing the split the conversion replaces.
 
         ### What E's counts count: PAIRS, not administrations
 
@@ -962,11 +986,138 @@ def _(CONTEXT_WINDOW_MINUTES, OFFSET_BIN_WIDTH):
 def _(mo):
     mo.md(
         """
+        ### The polars -> pandas -> polars boundary, standardising doses with clifpy
+
+        The identical conversion boundary `02` uses, deliberately duplicated rather than
+        imported (spec §4, §7.5, P23): `convert_dose_units_by_med_category` takes
+        pandas, and only `med_category`, `med_dose`, `med_dose_unit`, an all-null
+        `weight_kg` and one integer row key cross that boundary -- never `admin_dttm`
+        or any other datetime, since the timezone comes from `config["timezone"]`
+        alone and a tz-aware timestamp round-tripping through pandas is the likeliest
+        place in this codebase to violate that silently.
+
+        `/kg` dosing is detected and refused before anything crosses into pandas: no
+        `/kg` unit is observed at this site, and a site that charts sedation per
+        kilogram needs the vitals table for `weight_kg`, which this pipeline does not
+        currently load. That is a scope decision for the study lead, so the notebook
+        fails loudly rather than guessing.
+        """
+    )
+    return
+
+
+@app.cell
+def _(convert_dose_units_by_med_category, pl):
+    def convert_doses_to_preferred_units(df, preferred_units):
+        """Standardise `med_dose` to one preferred unit per `med_category` via clifpy.
+
+        A deliberate duplicate of `02`'s function of the same name (spec §4, P23):
+        `df` needs `med_category`, `med_dose`, `med_dose_unit` and nothing else --
+        never a datetime column. Returns `df` with `med_dose_converted`,
+        `med_dose_unit_converted`, `_unit_class` and `_convert_status` joined back on,
+        at the identical height and row order as `df`.
+
+        The boundary: add an integer row key, send the four columns the converter
+        needs (the three above plus a null `weight_kg`) through pandas, and join the
+        result back on the key. Height is asserted equal before AND after the join --
+        a converter that silently dropped an unrecognised unit would otherwise change
+        a denominator without anything raising.
+        """
+        _kg_units = sorted(
+            df.filter(
+                pl.col("med_dose_unit").str.to_lowercase().str.contains("/kg", literal=True)
+            )
+            .get_column("med_dose_unit")
+            .unique()
+            .to_list()
+        )
+        assert not _kg_units, (
+            f"weight-based dosing observed ({_kg_units}) but this pipeline does not load "
+            "the vitals table clifpy needs for weight_kg. Converting on a missing weight "
+            "would be worse than not converting -- adding a vitals load is a scope "
+            "decision the study lead has not made, so this stops here instead of "
+            "guessing."
+        )
+
+        _n_in = df.height
+        _present = set(df.get_column("med_category").unique().to_list())
+        _preferred = {k: v for k, v in preferred_units.items() if k in _present}
+
+        _keyed = df.with_row_index("_dose_row_key").with_columns(
+            pl.col("_dose_row_key").cast(pl.Int64)
+        )
+        _pd = _keyed.select(
+            "_dose_row_key", "med_category", "med_dose", "med_dose_unit"
+        ).to_pandas()
+        _pd["weight_kg"] = None
+
+        _converted_pd, _ = convert_dose_units_by_med_category(
+            _pd, preferred_units=_preferred
+        )
+
+        _converted = pl.from_pandas(
+            _converted_pd[
+                [
+                    "_dose_row_key",
+                    "med_dose_converted",
+                    "med_dose_unit_converted",
+                    "_unit_class",
+                    "_convert_status",
+                ]
+            ]
+        ).with_columns(pl.col("_dose_row_key").cast(pl.Int64))
+        assert _converted.height == _n_in, (
+            f"the converter returned {_converted.height:,} rows for {_n_in:,} sent -- a "
+            "row was silently dropped or duplicated crossing the pandas boundary"
+        )
+
+        _out = (
+            _keyed.join(_converted, on="_dose_row_key", how="inner")
+            .sort("_dose_row_key")
+            .drop("_dose_row_key")
+        )
+        assert _out.height == _n_in, (
+            f"the join back onto the row key produced {_out.height:,} rows for {_n_in:,} "
+            "sent -- the row key did not round-trip 1:1"
+        )
+
+        _failed = _out.filter(pl.col("_convert_status") != "success")
+        if _failed.height > 0:
+            _breakdown = (
+                _failed.group_by(["med_category", "med_dose_unit", "_convert_status"])
+                .agg(n=pl.len())
+                .sort("n", descending=True)
+            )
+            print("UNIT CONVERSION FAILED for the following (med_category, med_dose_unit):")
+            print(_breakdown)
+            raise AssertionError(
+                f"{_failed.height:,} rows failed unit conversion -- see the breakdown "
+                "printed above. Never filtered out: a site whose units this converter "
+                "cannot read must see that, not get a quietly smaller table."
+            )
+
+        _bad_class = _out.filter(pl.col("_unit_class") != "amount")
+        assert _bad_class.height == 0, (
+            f"{_bad_class.height:,} rows classified _unit_class != 'amount' -- this "
+            "notebook opens only medication_admin_intermittent, so a 'rate' here means "
+            "the wrong table was read."
+        )
+
+        return _out
+
+    return (convert_doses_to_preferred_units,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
         ### Publishing E
 
         `index_context.parquet` is written first — the canonical artifact, PHI, never
-        shared. Then three released tables, each at its true count (P21):
-        `sedation_summary.csv`, `sedation_offset_distribution.csv` and `sedation_dose.csv`.
+        shared. Then four released tables, each at its true count (P21):
+        `sedation_summary.csv`, `sedation_offset_distribution.csv`,
+        `sedation_dose.csv` and `sedation_dose_units.csv`.
 
         Every bin of the offset grid is emitted for every agent, including the empty ones: an
         explicit published zero is what lets a reader tell an empty bin from one with no
@@ -1041,26 +1192,86 @@ def _(
         SHARE_DIR / "sedation_offset_distribution.csv",
         "sedation_offset_distribution",
     )
+    return sedation_offsets, sedation_summary
 
-    # P18: keyed on the unit, never converted. interpolation="linear" on both
-    # quantiles, explicitly: polars' default is "nearest", which at small n
-    # republishes a raw charted dose verbatim as the statistic.
-    sedation_dose = (
+
+@app.cell
+def _(PREFERRED_DOSE_UNITS, convert_doses_to_preferred_units, pl, sed_in_window):
+    # The sanity check that the conversion actually happened, not a silent no-op:
+    # printed per (med_category, med_dose_unit) BEFORE conversion, and per
+    # med_category AFTER. Ketamine is the one case at this site where folding
+    # changes a published number materially -- see the report for the reading.
+    _before = (
         sed_in_window.group_by(["med_category", "med_dose_unit"])
+        .agg(n=pl.len(), median_dose=pl.col("med_dose").median())
+        .sort(["med_category", "med_dose_unit"])
+    )
+    print("BEFORE conversion -- n and median dose per (med_category, med_dose_unit):")
+    print(_before)
+
+    sedation_dose_converted = convert_doses_to_preferred_units(
+        sed_in_window, PREFERRED_DOSE_UNITS
+    )
+
+    _after = (
+        sedation_dose_converted.group_by("med_category")
+        .agg(n=pl.len(), median_dose=pl.col("med_dose_converted").median())
+        .sort("med_category")
+    )
+    print("AFTER conversion -- n and median dose per med_category:")
+    print(_after)
+
+    _status_breakdown = (
+        sedation_dose_converted.group_by("_convert_status")
+        .agg(n=pl.len())
+        .sort("n", descending=True)
+    )
+    print("_convert_status breakdown:")
+    print(_status_breakdown)
+
+    return (sedation_dose_converted,)
+
+
+@app.cell
+def _(SHARE_DIR, pl, publish, sedation_dose_converted):
+    # P18 (amended): keyed on med_category ALONE, in the standardised unit.
+    # interpolation="linear" on both quantiles, explicitly: polars' default is
+    # "nearest", which at small n republishes a raw charted dose verbatim as the
+    # statistic.
+    sedation_dose = (
+        sedation_dose_converted.group_by("med_category")
         .agg(
             n_admin_windows=pl.len(),
-            median_dose=pl.col("med_dose").median(),
-            p25_dose=pl.col("med_dose").quantile(0.25, interpolation="linear"),
-            p75_dose=pl.col("med_dose").quantile(0.75, interpolation="linear"),
+            median_dose=pl.col("med_dose_converted").median(),
+            p25_dose=pl.col("med_dose_converted").quantile(0.25, interpolation="linear"),
+            p75_dose=pl.col("med_dose_converted").quantile(0.75, interpolation="linear"),
+            med_dose_unit=pl.col("med_dose_unit_converted").first(),
         )
-        .sort(["med_category", "n_admin_windows"], descending=[False, True])
+        .sort("med_category")
     )
     publish(
         sedation_dose,
         SHARE_DIR / "sedation_dose.csv",
         "sedation_dose",
     )
-    return sedation_dose, sedation_offsets, sedation_summary
+    return (sedation_dose,)
+
+
+@app.cell
+def _(SHARE_DIR, pl, publish, sedation_dose_converted):
+    # Counts only -- no dose statistics. This is where the raw charting
+    # heterogeneity the conversion folds together is still published (P18).
+    sedation_dose_units = (
+        sedation_dose_converted.group_by(["med_category", "med_dose_unit"])
+        .agg(n=pl.len())
+        .sort(["med_category", "n"], descending=[False, True])
+    )
+    publish(
+        sedation_dose_units,
+        SHARE_DIR / "sedation_dose_units.csv",
+        "sedation_dose_units",
+    )
+    return (sedation_dose_units,)
 
 
 @app.cell
@@ -1081,10 +1292,12 @@ def _(mo):
           panel count follows the agents actually charted at the site, not the five-agent
           `SEDATIVES` list -- one line per agent would overlap badly regardless of how
           many are present.)
-        * **E.2 is faceted by charted unit, not one shared axis.** `mg` and `mcg/kg/min` on
-          a single x-axis is the horizontal form of a dual-axis chart: the alignment of the
-          two scales is arbitrary and the picture invents a comparison that is not in the
-          data. One panel per unit, each with its own axis, is what P18 looks like drawn.
+        * **E.2 is faceted by the standardised unit, not one shared axis.** `mg` and `mcg`
+          on a single x-axis is the horizontal form of a dual-axis chart: the alignment of
+          the two scales is arbitrary and the picture invents a comparison that is not in
+          the data. One panel per unit, each with its own axis, is what P18 (amended) looks
+          like drawn -- fentanyl standardises to `mcg` and every other agent to `mg`, so
+          each agent now appears exactly once, in the panel its preferred unit belongs to.
 
         Color therefore does no identity work in any of the three, so all three use one hue
         (categorical slot 1) for the data and reserve the diamond marker for a published
@@ -1350,13 +1563,15 @@ def _(
 def _(mo):
     mo.md(
         """
-        ### Figure E.2 — sedative dose by agent and charted unit
+        ### Figure E.2 — sedative dose by agent and standardised unit
 
-        One panel per `med_dose_unit`, each with **its own x-axis**. Doses are the raw
-        charted values and are never converted (P18); putting `mg` and `mcg/kg/min` on a
-        single shared axis would draw a comparison that does not exist, which is the whole
-        defect P18 was written against. Separate panels make the heterogeneity the subject
-        of the figure instead of hiding it.
+        One panel per `med_dose_unit`, each with **its own x-axis**. Doses are
+        standardised with clifpy before this figure is drawn (P18, amended
+        2026-08-10), so `med_dose_unit` here is the preferred unit per `med_category`,
+        not the raw charted one -- `sedation_dose_units.csv` is where the raw mix is
+        published. Putting `mg` and `mcg` on a single shared axis would still draw a
+        comparison that is not meaningful at a glance, so separate panels are kept even
+        though standardisation means the units within a panel now genuinely agree.
 
         Each bar is the median, with a whisker to p25 and p75 and the median printed at the
         tip. `n_admin_windows` rides the row label, so the reader can see how much each row
@@ -1437,22 +1652,23 @@ def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
             _ax.spines[_side].set_visible(False)
         _ax.tick_params(axis="x", labelsize=8, colors=_MUTED)
         _ax.tick_params(axis="y", length=0)
-        # The panel title is the unit, and the unit is the reason the panel exists.
+        # The panel title is the standardised unit, and the unit is the reason the
+        # panel exists.
         _ax.set_title(
-            f"charted unit: {_unit}   ·   its own axis, never converted (P18)",
+            f"standardised unit: {_unit}   ·   its own axis (P18)",
             fontsize=9, loc="left", color=_INK,
         )
 
     _axes[-1].set_xlabel(
-        "charted dose — median, with p25–p75 whiskers   ·   row counts are "
+        "standardised dose — median, with p25–p75 whiskers   ·   row counts are "
         "(index paralytic, administration) pairs",
         color=_INK,
     )
 
     _fig.suptitle(
-        "E.2 — sedative dose by agent and charted unit\n"
-        "one panel per unit: the heterogeneity is shown, never normalised away (P18)\n"
-        f"{_e2.height} (agent, unit) row(s) published",
+        "E.2 — sedative dose by agent and standardised unit\n"
+        "one panel per unit; the raw charted mix is in sedation_dose_units.csv, not here (P18)\n"
+        f"{_e2.height} agent row(s) published",
         fontsize=11, color=_INK,
     )
     _fig.tight_layout()

@@ -13,6 +13,7 @@ def _():
     import polars as pl
 
     from clifpy.tables import MedicationAdminIntermittent
+    from clifpy.utils.unit_converter import convert_dose_units_by_med_category
 
     import marimo as mo
 
@@ -22,6 +23,7 @@ def _():
     return (
         MedicationAdminIntermittent,
         Path,
+        convert_dose_units_by_med_category,
         json,
         mo,
         pl,
@@ -84,6 +86,24 @@ def _(Path, json):
     # paralytics, and zero is indistinguishable from a site that gives none.
     MAR_ACTIONS = ["given", "bolus"]
 
+    # P18, amended 2026-08-10: doses are standardised with clifpy to one preferred
+    # unit per med_category before any statistic is taken. mg for every agent
+    # except fentanyl, which this cohort's own raw medians confirm is charted in
+    # mcg -- matching how each agent is conventionally charted, not an arbitrary
+    # pick. Defined locally rather than imported (spec §4): a shared constant
+    # would force 02 and 03 to agree even if a future amendment needed them not
+    # to, and the duplication costs nothing since both currently agree anyway.
+    PREFERRED_DOSE_UNITS = {
+        "rocuronium": "mg",
+        "succinylcholine": "mg",
+        "vecuronium": "mg",
+        "midazolam": "mg",
+        "etomidate": "mg",
+        "ketamine": "mg",
+        "propofol": "mg",
+        "fentanyl": "mcg",
+    }
+
     COLLAPSE_GAP_MINUTES = config["collapse_gap_minutes"]
 
     # P11. An ANALYSIS grid, not a site parameter -- a site that changed its bins would
@@ -114,6 +134,7 @@ def _(Path, json):
     print(f"collapse gap   : {COLLAPSE_GAP_MINUTES} min   (P6, P7)")
     print(f"gap bins       : {len(GAP_BIN_LABELS)}  {GAP_BIN_LABELS}")
     print(f"max pairs      : {MAX_TOTAL_PAIRS:,}")
+    print(f"preferred units: {PREFERRED_DOSE_UNITS}   (P18)")
     return (
         COLLAPSE_GAP_MINUTES,
         DATA_DIR,
@@ -126,6 +147,7 @@ def _(Path, json):
         MAX_TOTAL_PAIRS,
         PARALYTICS,
         PHI_DIR,
+        PREFERRED_DOSE_UNITS,
         SHARE_DIR,
         TIMEZONE,
     )
@@ -977,18 +999,188 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
 def _(mo):
     mo.md(
         """
-        ### Dose statistics, keyed on `(med_category, med_dose_unit)`
+        ### The polars -> pandas -> polars boundary, standardising doses with clifpy
 
-        P18: no unit conversion, anywhere. Keying on the unit means a site charting the
-        same agent in both `mg` and `mg/kg` produces two rows a reader can see, rather than
-        one number that is silently wrong because two incompatible units were pooled.
+        P18, amended 2026-08-10: doses are converted to one preferred unit per
+        `med_category` (`clifpy.utils.unit_converter.convert_dose_units_by_med_category`)
+        before any statistic is taken, in place of the withdrawn "never convert, key on
+        the unit" rule.
+
+        `convert_dose_units_by_med_category` takes **pandas**, and this pipeline is
+        polars everywhere else. `convert_doses_to_preferred_units` below is the whole
+        boundary crossing, and it is deliberately narrow: it sends only `med_category`,
+        `med_dose`, `med_dose_unit`, an all-null `weight_kg` (present so the converter
+        never tries to pull a weight from a vitals table this pipeline does not load)
+        and one integer row key -- **never** `admin_dttm` or any other datetime. The
+        project's absolute rule is that the timezone comes from `config["timezone"]`
+        alone; a tz-aware timestamp making a round trip through pandas on its way to a
+        unit converter is the single most likely place in this codebase to violate that
+        silently, and there is no reason for a dose converter to see a timestamp at all.
+
+        `/kg` dosing is detected and refused **before** anything crosses into pandas --
+        no `/kg` unit is observed at this site, and this notebook must not assume that
+        holds everywhere. A site whose paralytic is charted per kilogram needs the
+        vitals table for `weight_kg`, and this pipeline does not currently load one;
+        that is a scope decision for the study lead, not something to default into
+        silently, so the notebook fails loudly instead.
         """
     )
     return
 
 
 @app.cell
-def _(SHARE_DIR, index_paralytic, pl, publish):
+def _(convert_dose_units_by_med_category, pl):
+    def convert_doses_to_preferred_units(df, preferred_units):
+        """Standardise `med_dose` to one preferred unit per `med_category` via clifpy.
+
+        `df` needs `med_category`, `med_dose`, `med_dose_unit` and nothing else --
+        never a datetime column. Returns `df` with `med_dose_converted`,
+        `med_dose_unit_converted`, `_unit_class` and `_convert_status` joined back on,
+        at the identical height and row order as `df`.
+
+        The boundary: add an integer row key, send the four columns the converter
+        needs (the three above plus a null `weight_kg`) through pandas, and join the
+        result back on the key. Height is asserted equal before AND after the join --
+        a converter that silently dropped an unrecognised unit would otherwise change
+        a denominator without anything raising.
+        """
+        _kg_units = sorted(
+            df.filter(
+                pl.col("med_dose_unit").str.to_lowercase().str.contains("/kg", literal=True)
+            )
+            .get_column("med_dose_unit")
+            .unique()
+            .to_list()
+        )
+        assert not _kg_units, (
+            f"weight-based dosing observed ({_kg_units}) but this pipeline does not load "
+            "the vitals table clifpy needs for weight_kg. Converting on a missing weight "
+            "would be worse than not converting -- adding a vitals load is a scope "
+            "decision the study lead has not made, so this stops here instead of "
+            "guessing."
+        )
+
+        _n_in = df.height
+        _present = set(df.get_column("med_category").unique().to_list())
+        _preferred = {k: v for k, v in preferred_units.items() if k in _present}
+
+        _keyed = df.with_row_index("_dose_row_key").with_columns(
+            pl.col("_dose_row_key").cast(pl.Int64)
+        )
+        _pd = _keyed.select(
+            "_dose_row_key", "med_category", "med_dose", "med_dose_unit"
+        ).to_pandas()
+        _pd["weight_kg"] = None
+
+        _converted_pd, _ = convert_dose_units_by_med_category(
+            _pd, preferred_units=_preferred
+        )
+
+        _converted = pl.from_pandas(
+            _converted_pd[
+                [
+                    "_dose_row_key",
+                    "med_dose_converted",
+                    "med_dose_unit_converted",
+                    "_unit_class",
+                    "_convert_status",
+                ]
+            ]
+        ).with_columns(pl.col("_dose_row_key").cast(pl.Int64))
+        assert _converted.height == _n_in, (
+            f"the converter returned {_converted.height:,} rows for {_n_in:,} sent -- a "
+            "row was silently dropped or duplicated crossing the pandas boundary"
+        )
+
+        _out = (
+            _keyed.join(_converted, on="_dose_row_key", how="inner")
+            .sort("_dose_row_key")
+            .drop("_dose_row_key")
+        )
+        assert _out.height == _n_in, (
+            f"the join back onto the row key produced {_out.height:,} rows for {_n_in:,} "
+            "sent -- the row key did not round-trip 1:1"
+        )
+
+        _failed = _out.filter(pl.col("_convert_status") != "success")
+        if _failed.height > 0:
+            _breakdown = (
+                _failed.group_by(["med_category", "med_dose_unit", "_convert_status"])
+                .agg(n=pl.len())
+                .sort("n", descending=True)
+            )
+            print("UNIT CONVERSION FAILED for the following (med_category, med_dose_unit):")
+            print(_breakdown)
+            raise AssertionError(
+                f"{_failed.height:,} rows failed unit conversion -- see the breakdown "
+                "printed above. Never filtered out: a site whose units this converter "
+                "cannot read must see that, not get a quietly smaller table."
+            )
+
+        _bad_class = _out.filter(pl.col("_unit_class") != "amount")
+        assert _bad_class.height == 0, (
+            f"{_bad_class.height:,} rows classified _unit_class != 'amount' -- this "
+            "notebook opens only medication_admin_intermittent, so a 'rate' here means "
+            "the wrong table was read."
+        )
+
+        return _out
+
+    return (convert_doses_to_preferred_units,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Dose statistics, standardised to one unit per `med_category`
+
+        P18 (amended): the raw unit mix is not discarded, it moves to
+        `paralytic_dose_units.csv` -- a **counts-only** table, so charting
+        heterogeneity stays visible without reintroducing the split the conversion
+        replaces in `index_paralytic_dose.csv`.
+        """
+    )
+    return
+
+
+@app.cell
+def _(PREFERRED_DOSE_UNITS, convert_doses_to_preferred_units, index_paralytic, pl):
+    _raw_doses = index_paralytic.explode("doses").unnest("doses")
+
+    # The sanity check that the conversion actually happened, not a silent no-op:
+    # printed per (med_category, med_dose_unit) BEFORE conversion, and per
+    # med_category AFTER. Ketamine is the one case at this site where folding
+    # changes a published number materially -- see the report for the reading.
+    _before = (
+        _raw_doses.group_by(["med_category", "med_dose_unit"])
+        .agg(n=pl.len(), median_dose=pl.col("med_dose").median())
+        .sort(["med_category", "med_dose_unit"])
+    )
+    print("BEFORE conversion -- n and median dose per (med_category, med_dose_unit):")
+    print(_before)
+
+    dose_converted = convert_doses_to_preferred_units(_raw_doses, PREFERRED_DOSE_UNITS)
+
+    _after = (
+        dose_converted.group_by("med_category")
+        .agg(n=pl.len(), median_dose=pl.col("med_dose_converted").median())
+        .sort("med_category")
+    )
+    print("AFTER conversion -- n and median dose per med_category:")
+    print(_after)
+
+    _status_breakdown = (
+        dose_converted.group_by("_convert_status").agg(n=pl.len()).sort("n", descending=True)
+    )
+    print("_convert_status breakdown:")
+    print(_status_breakdown)
+
+    return (dose_converted,)
+
+
+@app.cell
+def _(SHARE_DIR, dose_converted, pl, publish):
     # interpolation="linear" on both quantiles, explicitly: polars' default is
     # "nearest", which at small n republishes a raw charted dose verbatim as the
     # statistic (n=3 -> p75 IS the largest of the three charted values). Linear
@@ -997,16 +1189,15 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
     # it -- the median of an odd n is unavoidably one of the charted values under
     # ANY interpolation scheme, since it has no neighbour to interpolate against.
     index_dose = (
-        index_paralytic.explode("doses")
-        .unnest("doses")
-        .group_by(["med_category", "med_dose_unit"])
+        dose_converted.group_by("med_category")
         .agg(
             n=pl.len(),
-            median_dose=pl.col("med_dose").median(),
-            p25_dose=pl.col("med_dose").quantile(0.25, interpolation="linear"),
-            p75_dose=pl.col("med_dose").quantile(0.75, interpolation="linear"),
+            median_dose=pl.col("med_dose_converted").median(),
+            p25_dose=pl.col("med_dose_converted").quantile(0.25, interpolation="linear"),
+            p75_dose=pl.col("med_dose_converted").quantile(0.75, interpolation="linear"),
+            med_dose_unit=pl.col("med_dose_unit_converted").first(),
         )
-        .sort(["med_category", "n"], descending=[False, True])
+        .sort("med_category")
     )
     publish(
         index_dose,
@@ -1014,6 +1205,23 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
         "index_paralytic_dose",
     )
     return (index_dose,)
+
+
+@app.cell
+def _(SHARE_DIR, dose_converted, pl, publish):
+    # Counts only -- no dose statistics. This is where the raw charting
+    # heterogeneity the conversion folds together is still published (P18).
+    paralytic_dose_units = (
+        dose_converted.group_by(["med_category", "med_dose_unit"])
+        .agg(n=pl.len())
+        .sort(["med_category", "n"], descending=[False, True])
+    )
+    publish(
+        paralytic_dose_units,
+        SHARE_DIR / "paralytic_dose_units.csv",
+        "paralytic_dose_units",
+    )
+    return (paralytic_dose_units,)
 
 
 @app.cell
