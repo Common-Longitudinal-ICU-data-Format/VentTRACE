@@ -480,16 +480,18 @@ def _(mo):
 
         Each administration is attached to its event, the event's first administration
         supplies `t_dttm`, and every other administration is recorded relative to it as an
-        `offset_minutes` inside `doses`. The three assertions below are P6's invariant
-        (`span_minutes <= 15`), uniqueness of the id, and `p_num` running contiguously from
-        1 within each block — the three ways this frame could be quietly wrong.
+        `offset_minutes` inside `doses`. The assertions below are the partition property
+        re-checked on the *rebuilt* frame (`sum(n_admins)` still equals the number of
+        administrations loaded), P6's invariant (`span_minutes <= 15`), uniqueness of the
+        id, every event having a patient, and `p_num` running contiguously from 1 within
+        each block — the ways this frame could be quietly wrong.
         """
     )
     return
 
 
 @app.cell
-def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, pl):
+def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, med_admin, pl):
     # Attach every administration to its index event, then aggregate.
     _members = (
         positioned.join(
@@ -545,6 +547,22 @@ def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, pl):
             "doses",
         )
         .sort(["encounter_block", "p_num"])
+    )
+
+    # The partition property again, and this time on the frame that is actually written.
+    # The identical assertion in the cell above checks the fold's own arithmetic, which is
+    # pure Python and already covered by tests/test_collapse_agent_events.py. This one
+    # checks the polars RECONSTRUCTION above it -- the join on encounter_block followed by
+    # the _pos range filter -- which is where an administration can silently be lost or
+    # counted twice. Nothing else in this cell would notice: the span check only bounds
+    # spans, is_unique only checks ids, and the p_num check below catches an event that
+    # vanished whole, not one that quietly lost half its rows.
+    _rebuilt = index_paralytic.get_column("n_admins").sum()
+    assert _rebuilt == med_admin.height, (
+        f"the reconstruction accounts for {_rebuilt:,} administrations but {med_admin.height:,} "
+        "were loaded. The fold itself balanced, so the loss or duplication is in the "
+        "positioned/fold join and the _pos range filter above -- every dose count, offset "
+        "and agent_label built from those rows is wrong by an unknown amount."
     )
 
     # P6's invariant, asserted rather than hoped for. A violation means the fold chained.
