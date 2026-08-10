@@ -1242,6 +1242,14 @@ def _(mo):
         Every administration in the window is a bar, not just the nearest per agent (P17):
         the redosing pattern is the thing the histogram exists to show, and deduplicating
         would delete it.
+
+        An agent with a small total renders near the baseline on the shared axis -- at
+        this site ketamine's peak bin is 3 against fentanyl's 316, so its real bars are a
+        few pixels tall next to a panel of otherwise-visible zero-diamonds. That is the
+        shared axis working as intended, not a missing agent, but a panel with no visible
+        bar communicates nothing by itself. Each panel's own corner carries its true `n`
+        and peak bin, read from this same published CSV, so the magnitude is on the page
+        even where the bars can't show it.
         """
     )
     return
@@ -1294,6 +1302,17 @@ def _(
         # The panel title is the identity channel -- colour carries none of it.
         _ax.set_title(_agent, fontsize=9, loc="left", color=_INK)
         _ax.tick_params(axis="y", labelsize=8, colors=_MUTED)
+
+        # On the shared y-axis a small-total agent's bars can be a few pixels tall next
+        # to fentanyl's or propofol's -- correct, but a panel that shows no visible bar
+        # communicates nothing on its own. This annotation carries the panel's true
+        # magnitude, read from the same published frame the bars are drawn from -- never
+        # recomputed -- so it cannot disagree with sedation_offset_distribution.csv.
+        _ax.text(
+            0.01, 0.90,
+            f"n = {_s['n_admin_windows'].sum():,}, peak = {_s['n_admin_windows'].max():,}",
+            transform=_ax.transAxes, ha="left", va="top", fontsize=8, color=_INK,
+        )
 
     _axes[-1].set_xticks(list(range(N_OFFSET_BINS)))
     _axes[-1].set_xticklabels(OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)

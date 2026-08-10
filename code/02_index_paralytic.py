@@ -1092,6 +1092,12 @@ def _(mo):
         a colored diamond on the baseline where it is a *published* zero -- `n_cross_agent`
         is zero in several bins at this site, which is the actual result, and the diamond
         is what lets a reader see that rather than mistake it for a gap in the data.
+
+        `n_cross_agent`'s own peak (5) is under 3% of `n_same_agent`'s (234), so on the
+        one shared axis the orange series renders as a near-baseline hairline everywhere
+        it is nonzero -- correct, but easy to misread as absent. The corner annotation
+        gives each series' true total and peak, read from this same published CSV, so
+        the small series' magnitude is on the page even where the bars can't show it.
         """
     )
     return
@@ -1118,6 +1124,22 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
             _ax.bar([_o + 0.2], [_row["n_cross_agent"]], width=0.4, color=_ORANGE)
         else:
             mark_zero(_ax, _o + 0.2, _ORANGE)
+
+    # Same-agent's peak dwarfs cross-agent's (234 vs 5): on this one shared axis the
+    # smaller series is a near-baseline hairline wherever it is nonzero. The corner
+    # annotation carries each series' true magnitude, read from the same published
+    # frame the bars are drawn from -- never recomputed -- so it cannot disagree with
+    # the CSV beside it.
+    _ax.text(
+        0.99, 0.98,
+        f"same agent:  n = {_dist['n_same_agent'].sum():,}, peak = {_dist['n_same_agent'].max():,}",
+        transform=_ax.transAxes, ha="right", va="top", fontsize=8, color=_BLUE,
+    )
+    _ax.text(
+        0.99, 0.94,
+        f"cross agent:  n = {_dist['n_cross_agent'].sum():,}, peak = {_dist['n_cross_agent'].max():,}",
+        transform=_ax.transAxes, ha="right", va="top", fontsize=8, color=_ORANGE,
+    )
 
     _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
     _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
