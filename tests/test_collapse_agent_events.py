@@ -1,22 +1,24 @@
-"""Pins the agent-event collapse in `code/05_method_pair.py` (D43).
+"""Pins the index-paralytic fold in `code/02_index_paralytic.py` (spec P6, P19).
 
-The PAIR scan counts *pairings*, so what it is handed decides what a pair means. Before
-the collapse existed the scan was handed raw administration rows, and a single rapid
-sequence induction charted as fentanyl / propofol / rocuronium plus a repeat push came
-back as several "intubations". `collapse_agent_events` folds administrations within
-`collapse_gap_minutes` of each other into one clinical agent event, separately within
-each drug class of each encounter, before the scan ever runs.
+`collapse_agent_events` is what turns paralytic administrations into index
+paralytics, and the index paralytic's first administration is `t` -- the clock
+that sub-analyses C, D and E all measure against. A fold bug therefore does not
+produce a slightly wrong count; it moves the study's origin.
 
-The one property worth a test of its own is that the window is **anchored on the event's
-first row, not chained off the previous one**. Chained, a maintenance infusion charted
-every ten minutes would grow into one event spanning the whole stay, and the second
-intubation of a re-intubated patient would vanish into it. Anchored, every event is
-bounded by the gap end to end. Case (d) below is the case that tells the two apart, and
-it is the only one a chained implementation fails.
+The one property worth a test of its own is that the window is **anchored on the
+event's first row, not chained off the previous one**. Chained, an agent redosed
+every ten minutes would grow into one event spanning the whole stay, and its `t`
+would sit hours from most of its own doses. Anchored, every event is bounded by
+the gap end to end. Case (d) below is the case that tells the two apart, and it
+is the only one a chained implementation fails.
 
-The function is lifted out of the notebook by AST rather than imported: `05_method_pair`
-is a marimo notebook whose module name is not a Python identifier, and importing it
-would run the whole pipeline against real PHI.
+This file previously pinned the same function in the deleted `05_method_pair.py`,
+where it folded sedatives and paralytics separately before a pairing scan. The
+function moved without changing; only its consumer did.
+
+The function is lifted out of the notebook by AST rather than imported:
+`02_index_paralytic` is a marimo notebook whose module name is not a Python
+identifier, and importing it would run the whole pipeline against real PHI.
 
 Run:  uv run pytest tests/test_collapse_agent_events.py -v
 """
@@ -30,7 +32,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-NOTEBOOK = Path(__file__).parent.parent / "code" / "05_method_pair.py"
+NOTEBOOK = Path(__file__).parent.parent / "code" / "02_index_paralytic.py"
 NOTEBOOK_TREE = ast.parse(NOTEBOOK.read_text())
 
 
@@ -138,13 +140,13 @@ def test_every_event_is_within_the_gap(times):
 def test_grouping_ignores_categories():
     """A repeat of one agent and a co-administration of two fold identically.
 
-    Which agents were involved is recorded by the caller in the D43.5 label; it must play
-    no part in the fold, or a co-administration would be scanned as two events and pair
-    twice.
+    Which agents were involved is recorded by the caller in `agent_label`; it must play no
+    part in the fold, or a co-administration would become two index paralytics and the
+    study would count one intubation twice.
     """
     times = [0, 2, 40]
-    same = _call(times, categories=["fentanyl", "fentanyl", "fentanyl"])
-    mixed = _call(times, categories=["fentanyl", "propofol", "midazolam"])
+    same = _call(times, categories=["rocuronium", "rocuronium", "rocuronium"])
+    mixed = _call(times, categories=["rocuronium", "vecuronium", "succinylcholine"])
     assert same == mixed == [[0, 1], [2]]
 
 
@@ -225,11 +227,11 @@ def test_collapse_merges_across_a_dst_fall_back(central_os_timezone):
         .get_column("m")
         .to_list()
     )
-    assert collapse_agent_events(minutes, ["fentanyl", "rocuronium"], GAP) == [[0, 1]]
+    assert collapse_agent_events(minutes, ["rocuronium", "vecuronium"], GAP) == [[0, 1]]
 
     # ... and the discarded idiom would have split them, which is the whole point.
     naive = [t.timestamp() / 60.0 for t in FALL_BACK]
-    assert collapse_agent_events(naive, ["fentanyl", "rocuronium"], GAP) == [[0], [1]]
+    assert collapse_agent_events(naive, ["rocuronium", "vecuronium"], GAP) == [[0], [1]]
 
 
 def test_notebook_calls_no_naive_timestamp():
