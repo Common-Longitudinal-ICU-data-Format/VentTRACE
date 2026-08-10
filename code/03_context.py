@@ -1137,8 +1137,8 @@ def _():
         frame whose max is in the hundreds sits well above bars of height 1..3, inverting
         the encoding it exists to make legible. A marker centered exactly at y=0 has zero
         data-height by construction, so it can never equal or exceed a bar of ANY positive
-        height, however small. `clip_on=False` keeps its upper half from being clipped by
-        the x-axis spine, since its center sits exactly on `ylim`'s bottom edge.
+        height, however small. Its center sits exactly on `ylim`'s bottom edge, so its
+        lower half falls outside the axes; `clip_on=False` is what keeps that half drawn.
         """
         ax.plot(
             [x], [0], marker="D", markersize=5, color=color,
