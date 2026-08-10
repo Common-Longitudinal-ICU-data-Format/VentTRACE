@@ -983,5 +983,395 @@ def _(PHI_DIR, index_paralytic):
     return
 
 
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+        ## C — the gap between index paralytics
+
+        The same construction as A, applied to index paralytics instead of raw
+        administrations: all unordered pairs within a block, the identical bin grid, the
+        identical overflow bin.
+
+        By construction C has **zero mass in every bin up to and including `(10,15]`**, and
+        the bound is strict rather than approximate. An anchor at `t` closes at `t + 15`
+        inclusive, so the next anchor is the first administration *strictly after* `t + 15`;
+        consecutive index paralytics are therefore always more than 15 minutes apart, and
+        every non-consecutive pair is wider still.
+
+        The assertion below is the cheapest possible test that P6 was implemented as
+        written. A non-zero count in those six bins is a bug in the fold, not a finding.
+        """
+    )
+    return
+
+
+@app.cell
+def _(all_pair_gaps, gap_bin_expr, index_paralytic, pl):
+    _EMPTY_BY_CONSTRUCTION = ["0", "(0,1]", "(1,2]", "(2,5]", "(5,10]", "(10,15]"]
+
+    index_pairs = all_pair_gaps(
+        index_paralytic.select("encounter_block", "t_dttm", "agent_label"),
+        time_col="t_dttm",
+        agent_col="agent_label",
+    ).with_columns(gap_bin_expr())
+
+    _violations = index_pairs.filter(pl.col("gap_bin").is_in(_EMPTY_BY_CONSTRUCTION))
+    assert _violations.height == 0, (
+        f"{_violations.height:,} pairs of index paralytics are 15 minutes apart or less. "
+        "The fold closes at t+15 inclusive, so the next anchor is strictly after it and "
+        "these bins cannot be reached. This is a bug in collapse_agent_events, not a finding."
+    )
+
+    print(f"index pairs constructed : {index_pairs.height:,}")
+    print("P6 floor holds: zero pairs at or below 15 minutes")
+    return (index_pairs,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### The inter-index gap histogram
+
+        `index_pairs` is counted into the identical 15-bin grid A uses, so the two
+        histograms are directly comparable bin-for-bin (Figure C.1 draws exactly this
+        comparison). Every bin is published here, including the empty ones -- an explicit
+        published zero is what lets the read-back check confirm the floor rather than
+        merely imply it from a missing row.
+        """
+    )
+    return
+
+
+@app.cell
+def _(GAP_BIN_LABELS, SHARE_DIR, index_pairs, pl, publish):
+    _counts = index_pairs.group_by("gap_bin").agg(n=pl.len())
+    index_gap_distribution = (
+        pl.DataFrame({"gap_bin": GAP_BIN_LABELS})
+        .with_row_index("bin_order")
+        .join(_counts, on="gap_bin", how="left")
+        .with_columns(pl.col("n").fill_null(0))
+        .sort("bin_order")
+    )
+    publish(
+        index_gap_distribution,
+        SHARE_DIR / "index_gap_distribution.csv",
+        ["n"],
+        "index_gap_distribution",
+    )
+    return (index_gap_distribution,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Index paralytics per block
+
+        A block with two or more index paralytics is a block where the paralytic was
+        re-dosed (or a different agent started) more than 15 minutes after the last one --
+        the structure C's gap histogram is measuring the spacing of. `index_per_block`
+        counts blocks by how many index paralytics they contain.
+        """
+    )
+    return
+
+
+@app.cell
+def _(SHARE_DIR, index_paralytic, pl, publish):
+    index_per_block = (
+        index_paralytic.group_by("encounter_block")
+        .agg(n_index=pl.len())
+        .group_by("n_index")
+        .agg(n_blocks=pl.len())
+        .sort("n_index")
+    )
+    publish(
+        index_per_block,
+        SHARE_DIR / "index_per_block.csv",
+        ["n_blocks"],
+        "index_per_block",
+    )
+    return (index_per_block,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### The index paralytic summary, by agent
+
+        One row per `agent_label` -- the sorted, `+`-joined set of agents folded into an
+        index event. At a site where every multi-administration index event is a
+        same-agent redose (no cross-agent co-administration survives the fold), this table
+        has exactly one row per agent actually charted; that is a site fact, not a defect
+        in the aggregation.
+        """
+    )
+    return
+
+
+@app.cell
+def _(SHARE_DIR, index_paralytic, pl, publish):
+    index_summary = (
+        index_paralytic.group_by("agent_label")
+        .agg(
+            n_index=pl.len(),
+            n_blocks=pl.col("encounter_block").n_unique(),
+            n_patients=pl.col("patient_id").n_unique(),
+            n_coadmin=pl.col("is_coadmin").sum(),
+            median_span_min=pl.col("span_minutes").median(),
+            max_span_min=pl.col("span_minutes").max(),
+        )
+        .sort("n_index", descending=True)
+    )
+    publish(
+        index_summary,
+        SHARE_DIR / "index_paralytic_summary.csv",
+        ["n_index", "n_blocks", "n_patients", "n_coadmin"],
+        "index_paralytic_summary",
+    )
+    return (index_summary,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Dose statistics, keyed on `(med_category, med_dose_unit)`
+
+        P18: no unit conversion, anywhere. Keying on the unit means a site charting the
+        same agent in both `mg` and `mg/kg` produces two rows a reader can see, rather than
+        one number that is silently wrong because two incompatible units were pooled.
+        """
+    )
+    return
+
+
+@app.cell
+def _(SHARE_DIR, index_paralytic, pl, publish):
+    index_dose = (
+        index_paralytic.explode("doses")
+        .unnest("doses")
+        .group_by(["med_category", "med_dose_unit"])
+        .agg(
+            n=pl.len(),
+            median_dose=pl.col("med_dose").median(),
+            p25_dose=pl.col("med_dose").quantile(0.25),
+            p75_dose=pl.col("med_dose").quantile(0.75),
+        )
+        .sort(["med_category", "n"], descending=[False, True])
+    )
+    publish(
+        index_dose,
+        SHARE_DIR / "index_paralytic_dose.csv",
+        ["n"],
+        "index_paralytic_dose",
+    )
+    return (index_dose,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+        ## Figures A.1 and C.1
+
+        Both are drawn **from the published CSVs and nothing else** (spec P21), so
+        suppression propagates automatically and a figure cannot disagree with the table
+        beside it. `coadmin_gap_distribution.csv` and `coadmin_gap_pooled.csv` partition
+        the bins by secondary-suppression mode (FULL / POOLED_ONLY -- see the note above
+        sub-analysis A's publishing cell); a bin in neither file (mode NONE) is dropped
+        from both figures, never merged into a neighbour, and the caption on each figure
+        states how many bins that was.
+        """
+    )
+    return
+
+
+@app.cell
+def _():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return (plt,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Figure A.1 — co-administration gaps, same/cross split where it is safe to show
+
+        The bar *shape* -- total pairs per bin -- comes from the union of
+        `coadmin_gap_distribution.csv`'s `n_pooled` and `coadmin_gap_pooled.csv`'s
+        `n_pooled`, so the long tail is visible even though most of it is pooled-only. The
+        same-agent / cross-agent split is overlaid only on the bins present in
+        `coadmin_gap_distribution.csv` (mode FULL): two colored bars. A pooled-only bin
+        (mode POOLED_ONLY) is drawn as one wide grey hatched bar instead -- its total pair
+        count is real and shown, but the split is withheld under the n>=10 rule, and a
+        hatched grey bar cannot be mistaken for a colored one. It is never drawn as zero:
+        the count happened, it just cannot be decomposed without risking
+        re-identification. A bin published in neither file (mode NONE) has no bar at all;
+        its tick stays on the axis so the missing bin cannot be misread as merged into a
+        neighbour.
+        """
+    )
+    return
+
+
+@app.cell
+def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, pl, plt):
+    # Fixed categorical color order (dataviz skill), never cycled: blue is always
+    # same-agent, orange is always cross-agent, everywhere the pair appears. Grey +
+    # 45-degree hatch marks "total known, split withheld" -- a texture, not a third hue,
+    # so it cannot be read as a third category on the same footing as the other two.
+    _BLUE = "#2a78d6"
+    _ORANGE = "#eb6834"
+    _GREY = "#c3c2b7"
+    _EDGE = "#52514e"
+
+    _full = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv")
+    _pooled = pl.read_csv(SHARE_DIR / "coadmin_gap_pooled.csv")
+
+    _n_pooled_only = _pooled.height
+    _n_none = len(GAP_BIN_LABELS) - _full.height - _pooled.height
+
+    _fig, _ax = plt.subplots(figsize=(11, 5))
+
+    # FULL bins: the same/cross split, two colored bars per bin.
+    _ax.bar(
+        [o - 0.2 for o in _full.get_column("bin_order")],
+        _full.get_column("n_same_agent"),
+        width=0.4, color=_BLUE, label="same agent (redose)",
+    )
+    _ax.bar(
+        [o + 0.2 for o in _full.get_column("bin_order")],
+        _full.get_column("n_cross_agent"),
+        width=0.4, color=_ORANGE, label="different agents (co-administration)",
+    )
+    # POOLED_ONLY bins: one wide hatched bar, total only, no split.
+    _ax.bar(
+        _pooled.get_column("bin_order"), _pooled.get_column("n_pooled"),
+        width=0.8, color=_GREY, edgecolor=_EDGE, hatch="///",
+        label="pooled total only — split withheld (n<10 rule)",
+    )
+
+    _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
+    _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
+    _ax.set_xlabel("gap between paralytic administrations")
+    _ax.set_ylabel("pairs")
+    _ax.set_yscale("log")
+    _ax.set_axisbelow(True)
+    _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+
+    _fold_x = GAP_BIN_LABELS.index("(10,15]") + 0.5
+    _ax.axvline(_fold_x, color="#0b0b0b", linestyle="--", linewidth=1)
+    _ax.text(
+        _fold_x + 0.1, _ax.get_ylim()[1] * 0.5,
+        "15 min\n(the fold)", fontsize=8, va="top", color="#0b0b0b",
+    )
+
+    _ax.legend()
+    _ax.set_title(
+        "A.1 — gaps between paralytic administrations, all pairs within an encounter\n"
+        "15 minutes is a clinical definition, not a measured optimum (spec P7)\n"
+        f"{_n_pooled_only} bin(s) pooled-only, split withheld; "
+        f"{_n_none} bin(s) withheld entirely and not shown"
+    )
+    _fig.tight_layout()
+    _fig.savefig(FIG_DIR / "A1_coadmin_gap_distribution.png", dpi=150)
+    plt.close(_fig)
+    print(f"A1_coadmin_gap_distribution.png -> {FIG_DIR}")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Figure C.1 — what the fold removed
+
+        A's total shape (the same union Figure A.1 uses) beside C's per-bin counts
+        (`index_gap_distribution.csv`), on the identical bin grid so the two histograms
+        line up bin for bin. The six leftmost bins are C's confirmation of the floor: zero
+        by construction, asserted above, and visibly zero here. A bin missing from either
+        series is a bin withheld under that table's own n>=10 rule -- dropped, not merged
+        into a neighbour, and never drawn as zero -- and the caption states how many that
+        was on each side.
+        """
+    )
+    return
+
+
+@app.cell
+def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, pl, plt):
+    # Blue stays "raw administrations" here too (same entity as A.1's bars); aqua is a
+    # new entity, index paralytics, and gets its own slot rather than reusing orange
+    # (which means "cross-agent" in A.1 and would misstate identity here).
+    _BLUE = "#2a78d6"
+    _AQUA = "#1baf7a"
+    _EDGE = "#0b0b0b"
+
+    _full = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv").select(
+        "bin_order", "gap_bin", "n_pooled"
+    )
+    _pooled = pl.read_csv(SHARE_DIR / "coadmin_gap_pooled.csv").select(
+        "bin_order", "gap_bin", "n_pooled"
+    )
+    _a_shape = pl.concat([_full, _pooled]).sort("bin_order")
+    _c = pl.read_csv(SHARE_DIR / "index_gap_distribution.csv").select(
+        "bin_order", "gap_bin", "n"
+    )
+
+    _n_a_missing = len(GAP_BIN_LABELS) - _a_shape.height
+    _n_c_missing = len(GAP_BIN_LABELS) - _c.height
+
+    _fig, _ax = plt.subplots(figsize=(11, 5))
+    _ax.bar(
+        [o - 0.2 for o in _a_shape.get_column("bin_order")],
+        _a_shape.get_column("n_pooled"),
+        width=0.4, color=_BLUE, edgecolor=_EDGE, linewidth=0.6,
+        label="A — raw administrations (pooled total)",
+    )
+    _ax.bar(
+        [o + 0.2 for o in _c.get_column("bin_order")],
+        _c.get_column("n"),
+        width=0.4, color=_AQUA, edgecolor=_EDGE, linewidth=0.6,
+        label="C — index paralytics",
+    )
+
+    _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
+    _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
+    _ax.set_xlabel("gap")
+    _ax.set_ylabel("pairs")
+    _ax.set_yscale("log")
+    _ax.set_axisbelow(True)
+    _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+
+    _fold_x = GAP_BIN_LABELS.index("(10,15]") + 0.5
+    _ax.axvline(_fold_x, color="#0b0b0b", linestyle="--", linewidth=1)
+    _ax.text(
+        _fold_x + 0.1, _ax.get_ylim()[1] * 0.5,
+        "15 min\n(the fold)", fontsize=8, va="top", color="#0b0b0b",
+    )
+
+    _ax.legend()
+    _ax.set_title(
+        "C.1 — what the fold removed\n"
+        "C is empty at and below 15 minutes by construction; this is the confirmation\n"
+        f"A: {_n_a_missing} bin(s) withheld entirely, not shown; "
+        f"C: {_n_c_missing} bin(s) withheld under the n>=10 rule, not shown"
+    )
+    _fig.tight_layout()
+    _fig.savefig(FIG_DIR / "C1_index_gap_distribution.png", dpi=150)
+    plt.close(_fig)
+    print(f"C1_index_gap_distribution.png -> {FIG_DIR}")
+    return
+
+
 if __name__ == "__main__":
     app.run()
