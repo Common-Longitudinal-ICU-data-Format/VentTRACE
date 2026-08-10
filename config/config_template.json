@@ -9,6 +9,7 @@
     "pair_gap_hours": 3,
     "infusion_prep_minutes": 60,
     "collapse_gap_minutes": 15,
+    "context_window_minutes": 60,
     "stitch_hours": 6,
     "trach_window_hours": 24,
     "min_age": 18,
