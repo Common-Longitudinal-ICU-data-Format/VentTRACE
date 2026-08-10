@@ -194,8 +194,11 @@ reader can judge it directly rather than take the number on trust.
 
 The fold produces **2,117 index paralytics** — **1,555 rocuronium** and **562 vecuronium** —
 across **1,547 encounter blocks**. Most blocks have exactly one (1,204 of 1,547 — 77.8%); 236
-have two; the tail runs out to 12 in a single block. Co-administration inside an index event is
-rare: only 42 of 2,117 (2.0%) fold more than one agent together.
+have two; the tail runs out to 12 in a single block. Co-administration inside an index event —
+folding *more than one agent* together — does not occur at this site: `agent_label` in
+`index_paralytic_summary.csv` carries only single-agent labels, zero of them cross-agent. What
+is not rare is the same-agent **redose**: 42 of 2,117 index paralytics (2.0%) fold more than one
+*administration* of the same agent together (`n_coadmin` in `index_paralytic_summary.csv`).
 
 Two facts are the design working, made visible in the published output rather than merely
 asserted:
@@ -204,10 +207,12 @@ asserted:
   the assertable invariant P6 bought by choosing anchor-and-close over transitive chaining: no
   index event, however many administrations it folds, can span more than the threshold that
   defines it.
-- Doses, keyed on the charted unit and never converted: rocuronium is charted almost entirely in
-  `mg` (n=1,582, median 50, IQR 50–100) with a handful in `mcg` (n=3, median 0.6) that a
-  converted, pooled statistic would have silently mixed with the `mg` doses. Vecuronium: `mg`
-  only, n=575, median 10 (IQR 6–10).
+- Doses, standardised with clifpy to one preferred unit per `med_category` and keyed on
+  `med_category` alone (P18, amended 2026-08-10): rocuronium converts to `mg` — n=1,585
+  (1,582 already charted in `mg`, 3 charted in `mcg` folded in by the conversion), median 50
+  (IQR 50–100). Vecuronium: `mg` only, n=575, median 10 (IQR 6–10). The raw unit mix that the
+  withdrawn version of P18 published as separate rows is now a counts-only table with no dose
+  statistics attached — `paralytic_dose_units.csv`.
 
 ### C — the gap between index paralytics
 
@@ -295,11 +300,16 @@ without. Of 2,117 index paralytics, **1,399 (66.1%) had at least one sedative ch
 window and **718 (33.9%) had none**. The most common charted sets: fentanyl+propofol (383),
 propofol alone (324), fentanyl alone (242), fentanyl+midazolam (202), midazolam alone (128).
 
-Dose statistics, keyed on `(med_category, med_dose_unit)` and never converted: fentanyl in `mcg`
-(n=1,514, median 50, IQR 50–100), midazolam in `mg` (n=610, median 2, IQR 2–2 — a strikingly
-fixed induction dose), propofol mostly in `mg` (n=1,427, median 20, IQR 10–40) with a small `mcg`
-tail (n=6). Ketamine splits across `mcg` (n=8) and `mg` (n=5), each too small to pool and each
-published as its own row rather than silently combined.
+Dose statistics, standardised with clifpy to one preferred unit per `med_category` and keyed on
+`med_category` alone (P18, amended 2026-08-10): fentanyl standardises to `mcg` (n=1,514, median
+50, IQR 50–100), midazolam to `mg` (n=610, median 2, IQR 2–2 — a strikingly fixed induction
+dose), propofol to `mg` (n=1,433 — 1,427 already charted in `mg`, 6 charted in `mcg` folded in by
+the conversion — median 20, IQR 10–40). Ketamine standardises to `mg` and pools both charted
+units into one row: n=13 (8 charted in `mcg`, 5 in `mg`), median 0.15, IQR 0.03–16.0. At n=13 the
+p25/median/p75 indices land exactly on charted observations rather than an interpolated value —
+see the quantile note in `02`/`03`. The raw unit mix that the withdrawn version of P18 published
+as separate rows is now a counts-only table with no dose statistics attached —
+`sedation_dose_units.csv`.
 
 **What E's counts count: pairs, not administrations.** A block can hold several index
 paralytics, and a single physical administration inside two overlapping ±60-minute windows
@@ -324,12 +334,20 @@ timestamps and, upstream of the drop points described above, real identifiers �
 `index_context.parquet`. Nothing in this directory is a deliverable. Copying a file out of it, by
 any means, is a data breach.
 
+**`output/logs/` also holds PHI-adjacent content and is not a deliverable either.**
+`run_all.sh` tees every run's stdout into `output/logs/run_<UTC timestamp>/`, and `02` prints the
+ten densest blocks' `encounter_block` ids to stdout as part of its memory-guard diagnostics
+(§4). `encounter_block` is not itself a patient identifier and is not stable across runs (§8),
+but it is an id nonetheless, and a log directory is not covered by `publish()`'s check the way
+`output/final_no_phi/` is. Treat it with the same handling as `output/intermediate_phi/` — it
+stays on site.
+
 **`output/final_no_phi/` is the only directory a site ever shares.** Everything in it is an
 aggregate: a count, a rate, a quantile, keyed on a bin or a category — never a row that describes
 one person.
 
-**`utils/suppress.py`'s `publish()` is the only door between them**, imported by `02` and `03`
-and nowhere else. It refuses to write (raises `AssertionError`, does not filter silently) a frame
+**`utils/suppress.py`'s `publish()` is the only door between them**, imported by `01`, `02` and
+`03` and nowhere else. It refuses to write (raises `AssertionError`, does not filter silently) a frame
 that carries either:
 
 - an **identifier column** — `patient_id`, `hospitalization_id`, `encounter_block`, `p_num`, or
@@ -376,7 +394,7 @@ is now the one thing `publish()` checks.
 | P15 | D and E share one window predicate (±`context_window_minutes`, 60), implemented once | `03` | |
 | P16 | sedative list: `midazolam`, `etomidate`, `ketamine`, `propofol`, `fentanyl` — a covariate, not a detector | `03` | etomidate absent at this site |
 | P17 | every sedative administration in the window is kept, not only the nearest per agent | `03` | 3,570 (index paralytic, administration) pairs |
-| P18 | `med_dose`/`med_dose_unit` are raw charted values, never converted; dose stats keyed on `(med_category, med_dose_unit)` | `02`, `03` | |
+| P18 | **amended 2026-08-10** — doses standardised with clifpy to one preferred unit per `med_category`; dose stats keyed on `med_category` alone; the raw unit mix is published separately, counts only | `02`, `03` | e.g. ketamine n=13 (was `mcg` n=8 / `mg` n=5 under the withdrawn rule) |
 | P19 | the timezone always comes from `config["timezone"]`; no code path consults the OS zone | everywhere | |
 | P20 | every `*_category` column lower-cased on load; every literal in the codebase written lower case | everywhere | |
 | P21 / P23 | the disclosure boundary is row-level vs. aggregate; `publish()` refuses an identifier or a datetime column; nothing else is filtered | `utils/suppress.py` | see §6 |

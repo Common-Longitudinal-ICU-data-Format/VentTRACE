@@ -76,7 +76,7 @@ code/
 utils/
   config.py               UNCHANGED
   suppress.py             NEW — the row-level prohibition, the single route
-                          into final_no_phi/, imported by 02 and 03 (P23)
+                          into final_no_phi/, imported by 01, 02 and 03 (P23)
 ```
 
 ```
@@ -309,7 +309,7 @@ Defined in §6.3–6.4. Published aggregates:
 
 | table | contents |
 |---|---|
-| `index_paralytic_summary.csv` | n index paralytics; n blocks; n patients; % `is_coadmin`; `n_admins` distribution; `span_minutes` p50/p90/max; counts by `agent_label` |
+| `index_paralytic_summary.csv` | one row per `agent_label`: n index paralytics, n blocks, n patients, `n_coadmin` (index events folding more than one administration of that label), `span_minutes` median and max |
 | `index_paralytic_dose.csv` | `med_category` → n, median, p25, p75, in the standardised unit (P18) |
 | `paralytic_dose_units.csv` | `med_category` × raw `med_dose_unit` → n administrations. Counts only — no dose statistics, so the table shows charting heterogeneity without reintroducing the split it replaced. |
 
@@ -364,6 +364,8 @@ Recorded per index paralytic:
 |---|---|
 | `imv_transition_summary.csv` | `imv_transition` × `no_transition_reason` → n; and `prior_device_category` → n among transitions |
 | `imv_offset_distribution.csv` | 5-minute bins across `[−60, +60]` → n |
+| `imv_prior_device.csv` | `prior_device_category` × `transition_opens_block` → n, among transitions |
+| `imv_transitions_in_window.csv` | `n_transitions_in_window` → n, contiguous from 1 to the observed maximum (the P14 de-bouncing evidence, one row per index paralytic that had a transition) |
 
 **Figure D.1** — histogram of `imv_offset_minutes`, 5-minute bins, zero line marked, drawn from `imv_offset_distribution.csv`.
 
@@ -390,7 +392,7 @@ Ties on \|offset\| for `nearest_sedative_med` break alphabetically by `med_categ
 
 | table | contents |
 |---|---|
-| `sedation_summary.csv` | `any_sedative` → n; `sedative_agents` set → n; `n_sedative_admins` distribution |
+| `sedation_summary.csv` | `any_sedative` × `agent_set` (the sorted, `+`-joined `sedative_agents`) → n, `median_n_admins` |
 | `sedation_offset_distribution.csv` | 5-minute bins across `[−60, +60]` × `med_category` → n |
 | `sedation_dose.csv` | `med_category` → n_admin_windows, median, p25, p75, in the standardised unit (P18) |
 | `sedation_dose_units.csv` | `med_category` × raw `med_dose_unit` → n administrations, counts only |
@@ -419,6 +421,8 @@ output/final_no_phi/              shareable aggregates — no row-level records 
   index_per_block.csv               C
   imv_transition_summary.csv        D
   imv_offset_distribution.csv       D
+  imv_prior_device.csv              D
+  imv_transitions_in_window.csv     D
   sedation_summary.csv              E
   sedation_offset_distribution.csv  E
   sedation_dose.csv                 E
