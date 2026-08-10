@@ -57,10 +57,10 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | P18 | **`med_dose` and `med_dose_unit` are the raw charted values. No unit conversion, anywhere.** Dose statistics are keyed on `(med_category, med_dose_unit)`. | Normalising would hide unit heterogeneity that is itself worth measuring, and it cannot be done correctly without a weight the study does not carry. Keying on the unit means a site charting propofol in both `mg` and `mg/kg` produces two rows a reader can see, rather than one number that is silently wrong. |
 | P19 | **The timezone always comes from `config["timezone"]`. No code path may consult the operating system's zone.** | Standing rule, carried forward intact because both of its failure modes are still live in this pipeline. **On the way in:** `.dt.tz_localize(None)` on a clifpy column drops the *attached* pytz LMT offset rather than the correct one and shifts every timestamp by about an hour without raising — fixed by `to_site_naive` (§4), pinned by `tests/test_clifpy_tz_boundary.py`. **On the way out:** `datetime.timestamp()` on a site-naive value re-attaches the *machine's* zone; on a host set to US/Central holding US/Eastern data, ten minutes across the November fall-back measures as seventy. A 60-minute artefact decides a 15-minute window outright — it splits one push of drug into two index paralytics, and the study's answer then changes with the machine. All minute arithmetic is done inside polars with `pl.col(c).dt.epoch("s") / 60.0`, which reads the stored wall-clock value and consults no zone at all. **One known exception remains, flagged rather than fixed:** `COHORT_RUN_ID` in `01_cohort.py` stamps `datetime.now()` in OS-local time. Nothing computes on it, but two sites' run ids are not comparable as timestamps. |
 | P20 | **Every `*_category` column is lower-cased on load and every literal in the codebase is written in lower case.** Load-time filters passed to `from_file` enumerate every casing variant. | Case is the one vocabulary difference that fails *silently*. A mismatched category value does not raise; it matches zero rows, and a filter matching zero rows looks exactly like a site where the thing never happens. A `from_file` filter runs before any normalisation we control, which is why the variants are enumerated at that one boundary and nowhere else. |
-| P21 | **Published cells below n = 10 are suppressed, and every figure is drawn from a published table.** | Carried forward. Drawing from the published table makes the suppression automatic instead of something reimplemented per plot, and removes the possibility of a figure disagreeing with the CSV beside it. A suppressed histogram bin is **dropped, not merged into its neighbour** — merging moves mass the reader cannot see move; dropping it and stating the dropped total in the caption keeps the omission visible. |
+| P21 | **The disclosure boundary is row-level versus aggregate, not cell size. An aggregate cell is published at its true value, including counts of 1 to 9.** Every figure is still drawn from a published table. | **Amended 2026-08-10 by the study lead, superseding the n ≥ 10 cell rule this decision originally carried forward.** A binned count is a property of a bin, not of a person: "6 propofol administrations were charted in mcg" names nobody, and the cohort it is drawn from is already defined by a published inclusion rule. The threshold was inherited from a superseded design in which tables were far narrower. What it bought — deniability for a single cell — it paid for in a machinery of secondary suppression (see P24, withdrawn) that consumed three review rounds, produced three distinct subtraction leaks of its own, and in closing the third still delivered only a *bound* on the withheld value rather than the deniability it advertised. **A rule that must be defended by a second rule that must be defended by a third is not protecting anything; it is generating work.** What actually protects the patient is the prohibition that has never moved: nothing row-level, no `patient_id`, no record that describes one person, ever leaves the site. That is P23's job now. Drawing every figure from the published table is retained on its own merit — it removes the possibility of a figure disagreeing with the CSV beside it. |
 | P22 | **The all-pairs table of sub-analysis A is never persisted at row level.** Only bin counts are written. | A block with 40 paralytic administrations contributes 780 pairs. The raw pair list is large, fully re-derivable, and has no consumer — and an artifact with no consumer invites drift. |
-| P23 | **The n ≥ 10 suppression rule is the one shared helper in the project.** It lives in `utils/suppress.py` and both `02` and `03` import it. | This is a deliberate exception to the local-duplication posture of §4, and the reason the exception is safe is that the failure modes point in opposite directions. Duplicating *analysis* logic risks correlated errors that look like agreement — the hazard the superseded design was built around, and which no longer exists here because there is nothing to agree with. Duplicating *suppression* logic risks one notebook publishing a cell the other would have withheld, which is a disclosure failure, not an analysis failure, and a disclosure failure must be impossible rather than merely unlikely. One implementation, one test, applied at every write. |
-| P24 | **Sub-analysis A's three bin tables are suppressed as one publication, not three independent files.** Every `gap_bin` is classified into exactly one of **FULL** (`n_cross_agent` and every `agent_pair` count are each 0 or ≥ 10 — the bin's full same/cross decomposition is published), **POOLED_ONLY** (`n_pooled` ≥ 10 but a component is not — only `n_pooled` is published, in a new `coadmin_gap_pooled.csv`, and the bin is withheld from the other two files entirely), or **NONE** (`n_pooled` itself is < 10 — nothing about the bin is published anywhere). The three files partition the bins by mode, asserted in `02`. This is a general defect class, not specific to sub-analysis A: **any two published files that share a key, where one publishes a total and the other publishes components of that same total, create a subtraction leak** — the fix is either to classify and partition (as above) or, where one column is redundant with tables published elsewhere, to drop it (second instance below). | Row-level suppression on `coadmin_gap_distribution.csv` and `coadmin_gap_by_pair.csv` applied *separately* left a subtraction leak: at `(5,10]`, `n_same_agent = 18` and `rocuronium+rocuronium = 12` were both published — individually legal, each ≥ 10 — while `vecuronium+vecuronium = 6` was suppressed as a lone row. The withheld value is `18 − 12 = 6`, recoverable from the two published files without ever seeing the suppressed row. Suppression evaluated per file is not suppression; two files that share a bin key are one publication, and the disclosure question has to be asked across the whole of it. `publish()` (P23) stays the row-level backstop under all three files — it does not weaken, and for a well-classified bin it never fires — but it cannot see across files, so the mode classification runs first and is what actually closes the leak.<br><br>**Second instance (dose table):** `paralytic_admin_summary.csv` published `n_administrations` — a per-`med_category` total — alongside `index_paralytic_dose.csv`'s per-`(med_category, med_dose_unit)` breakdown. At this site rocuronium has `n_administrations = 1585` and one published dose row, `rocuronium/mg, n = 1582`; the withheld `rocuronium/mcg` cell is recoverable as `1585 − 1582 = 3`, below `MIN_CELL`. (Vecuronium's residual is 0, so it did not leak today, but the mechanism does not depend on which agent trips it.) **Ruling: drop `n_administrations` from `paralytic_admin_summary.csv`**, rather than withhold rocuronium from the dose table. `n_administrations` was the only column in that file not already reproduced elsewhere — `n_blocks` and `n_patients` are byte-identical to `index_paralytic_summary.csv`, and the raw-count role it served is already covered by `index_paralytic_summary.csv`'s `n_index` together with `index_per_block.csv`. Withholding rocuronium from the dose table instead would have cost the median 50 mg dose for the agent covering 73% of administrations, to protect a count of 3. `02` carries a reconciliation cell mirroring the by-pair one: for every `med_category`, `index_paralytic_dose.csv`'s summed `n` must not land within 1..9 of any remaining published total in `paralytic_admin_summary.csv`. Vacuous today with the column gone — that is the point — but it fails loudly if a per-category total is ever added back to that file without re-deriving this analysis. |
+| P23 | **The row-level prohibition is the one shared helper in the project, and it is enforced mechanically at every write.** `utils/suppress.py` keeps its name and its role as the single route into `final_no_phi/`; what it enforces is now the P21 boundary. `publish()` refuses any frame carrying an identifier column — `patient_id`, `hospitalization_id`, `encounter_block`, `p_num`, or any `*_id` — and refuses a frame with no aggregate count column at all, since a table of pure identifiers-free row detail is still row detail. | This is a deliberate exception to the local-duplication posture of §4, and the reason the exception is safe is that the failure modes point in opposite directions. Duplicating *analysis* logic risks correlated errors that look like agreement — the hazard the superseded design was built around, and which no longer exists here because there is nothing to agree with. Duplicating the *disclosure* check risks one notebook writing a file the other would have refused, which is not an analysis failure and must be impossible rather than merely unlikely. One implementation, one test, applied at every write. The check is now a column-name guard rather than a cell-count filter, which makes it both cheaper and — unlike the threshold it replaces — impossible to defeat by arithmetic across two files. |
+| P24 | **WITHDRAWN 2026-08-10, together with the cell-size rule it existed to defend (P21).** Secondary suppression — classifying every `gap_bin` into FULL / POOLED_ONLY / NONE so that two files sharing a key could not be differenced to recover a withheld cell — is removed in full, along with `coadmin_gap_pooled.csv`, the per-agent dose-leak guard in `03`, and the dropping of `n_administrations` from `paralytic_admin_summary.csv` (restored). | The decision is kept in the record rather than deleted, because what it found is still true and is the reason P21 moved. Three separate subtraction leaks were discovered in this design, each by a different construction and none visible in the code: `n_same_agent` minus its published `agent_pair` components; `paralytic_admin_summary.csv`'s `n_administrations` minus `index_paralytic_dose.csv`'s per-unit rows; and an agent's summed offset bins minus its published dose row. Each was closed, and closing the third still left the withheld value bounded to five candidates rather than nine, because the suppression algorithm is itself published and a reader can exclude the counts it would never have chosen. **The generalisable finding: a suppression threshold applied to a set of tables that share keys is not a local property of any one table, and cannot be made one.** Withholding a cell in a table whose margins are published does not remove information, it relocates it — and the relocation is invisible to the person applying the rule. Having to reason about it at all was the cost; under P21 the cost is zero and the protection that matters (P23) is a column-name check that no arithmetic can defeat. |
 
 ------------------------------------------------------------------------
 
@@ -75,7 +75,8 @@ code/
                           → index_context.parquet
 utils/
   config.py               UNCHANGED
-  suppress.py             NEW — the n ≥ 10 rule, imported by 02 and 03 (P23)
+  suppress.py             NEW — the row-level prohibition, the single route
+                          into final_no_phi/, imported by 02 and 03 (P23)
 ```
 
 ```
@@ -100,7 +101,7 @@ utils/
         │  D  first non-IMV → IMV transition in t ± 60   (waterfall)
         │  E  sedatives in t ± 60, with dose and unit
         ▼
-   final_no_phi/ ................. aggregates + figures, n ≥ 10
+   final_no_phi/ ................. aggregates + figures, no row-level records
 ```
 
 The split falls where the **data sources change**, not where the sub-analyses happen to be numbered. Everything in `02` touches `medication_admin_intermittent` and nothing else, which makes sub-analyses A–C self-validating: a gap distribution needs no second table to be checked against, so a failure in D can never obscure whether the index set is right. `03` is the only notebook that joins the waterfall and the only one that loads a second medication list.
@@ -282,14 +283,13 @@ For every `encounter_block`, every **unordered pair** of administrations in the 
 gap_minutes = | epoch_minutes(i) − epoch_minutes(j) |     for all i < j
 ```
 
-Published four ways, split by the secondary-suppression bin mode of P24:
+Published three ways. Every bin appears in every table at its true count (P21); there is no bin-mode partition.
 
 | table | rows |
 |---|---|
-| `coadmin_gap_distribution.csv` | bin × `{pooled, same_agent, cross_agent}` → n, **FULL bins only** (P24) |
-| `coadmin_gap_by_pair.csv` | bin × unordered agent pair → n, **FULL bins only** (P24). The pair label is the two agents sorted alphabetically and joined with `+` — `rocuronium+vecuronium`, never `vecuronium+rocuronium` — so one pair is one row rather than two orderings of itself. Same-agent pairs appear as `rocuronium+rocuronium`. |
-| `coadmin_gap_pooled.csv` | bin → `n_pooled`, **POOLED_ONLY bins only** (P24): the total is safe to publish but its same/cross decomposition is not. |
-| `paralytic_admin_summary.csv` | agent × `mar_action_category` → n blocks, n patients. **No administration total is published here** (P24, second instance) — it was the one column in this file not reproduced elsewhere, and publishing it alongside `index_paralytic_dose.csv`'s per-unit breakdown was a subtraction leak. |
+| `coadmin_gap_distribution.csv` | bin × `{pooled, same_agent, cross_agent}` → n. Every bin on the grid, including bins with a count of zero. |
+| `coadmin_gap_by_pair.csv` | bin × unordered agent pair → n. The pair label is the two agents sorted alphabetically and joined with `+` — `rocuronium+vecuronium`, never `vecuronium+rocuronium` — so one pair is one row rather than two orderings of itself. Same-agent pairs appear as `rocuronium+rocuronium`. |
+| `paralytic_admin_summary.csv` | agent × `mar_action_category` → n administrations, n blocks, n patients. |
 
 The same/cross split is the point of the table. `rocuronium → rocuronium` at 3 minutes is a redose; `rocuronium → succinylcholine` at 3 minutes is a co-administration. The pooled histogram cannot distinguish them, and they justify the 15-minute boundary for different reasons (P7).
 
@@ -406,11 +406,10 @@ output/intermediate_phi/          row-level, never leaves the site
   index_paralytic.parquet         §6.4                          (02)
   index_context.parquet           index_paralytic + D + E cols  (03)
 
-output/final_no_phi/              shareable aggregates, n ≥ 10
+output/final_no_phi/              shareable aggregates — no row-level records (P21, P23)
   paralytic_admin_summary.csv       A
-  coadmin_gap_distribution.csv      A  (FULL bins only, P24)
-  coadmin_gap_by_pair.csv           A  (FULL bins only, P24)
-  coadmin_gap_pooled.csv            A  (POOLED_ONLY bins, P24)
+  coadmin_gap_distribution.csv      A
+  coadmin_gap_by_pair.csv           A
   index_paralytic_summary.csv       B
   index_paralytic_dose.csv          B
   index_gap_distribution.csv        C
@@ -423,13 +422,13 @@ output/final_no_phi/              shareable aggregates, n ≥ 10
   figures/  A.1  C.1  D.1  E.1  E.2
 ```
 
-**Rules**, all carried forward (P21):
+**Rules** (P21, P23):
 
-- No `patient_id`, no row-level records, no raw data files in `final_no_phi/`.
-- Every reported cell with n < 10 is suppressed.
-- Suppression is applied by `utils/suppress.py`, imported by both `02` and `03` (P23). It is the only shared code in the project.
-- Every figure is drawn from a published table, so suppression propagates to the plot automatically.
-- A suppressed histogram bin is dropped, not merged; the caption states the dropped total.
+- No `patient_id`, no `hospitalization_id`, no `encounter_block`, no `p_num`, no row-level records, no raw data files in `final_no_phi/`. This is the disclosure boundary and the only one.
+- **Aggregate counts are published at their true value, including counts below 10.** Nothing is withheld, so nothing is recoverable by differencing two published files — the failure mode that produced three separate leaks under the withdrawn rule (P24) cannot arise.
+- The boundary is enforced by `utils/suppress.py`, imported by both `02` and `03` (P23). It is the only shared code in the project, and it is the only route into `final_no_phi/`.
+- Every figure is drawn from a published table, so a figure cannot disagree with the CSV beside it.
+- A histogram bin with a count of zero is drawn and published as zero. Every bin on the grid appears in the table.
 - Every artifact carries `cohort_run_id`. `03` asserts its input's run id is single-valued and matches its own. Without that check, joining an index artifact from one extract to a waterfall from another produces a table that is silently wrong — the ids match, the rows are real, and they describe different patients. `encounter_block` is seeded from a row index and is **not stable across re-extracts**.
 
 ------------------------------------------------------------------------
@@ -474,10 +473,12 @@ retarget  tests/test_collapse_agent_events.py
               shortcut for the deleted 05. Repoint at 02's index builder,
               which is the same rule on a different agent list.
 
-retarget  tests/test_e7_suppression.py  →  tests/test_min_cell_suppression.py
-              Tier E.7 is gone. Repoint at utils/suppress.py (P23): cells
-              at n = 9, 10 and 11; a frame where every cell is suppressed;
-              and the dropped-total that captions report.
+retarget  tests/test_e7_suppression.py  →  tests/test_publish_guard.py
+              Tier E.7 is gone. Repoint at utils/suppress.py (P23): a frame
+              carrying patient_id / hospitalization_id / encounter_block /
+              p_num / any *_id is refused; a frame with no count column is
+              refused; a clean aggregate is written unchanged, including its
+              rows with counts of 1..9 and its rows with counts of 0.
 
 new       tests/test_pair_gaps.py
               all-pairs enumeration on a hand-built block; bin edge
