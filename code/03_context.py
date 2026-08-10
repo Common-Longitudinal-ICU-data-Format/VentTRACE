@@ -1122,6 +1122,15 @@ def _(mo):
         Every bin of the offset grid is emitted for every agent, including the empty ones: an
         explicit published zero is what lets a reader tell an empty bin from one with no
         observations at all.
+
+        `sedation_dose.csv` carries `n_in_preferred_unit`: how many administrations were
+        **already** charted in the agent's preferred unit, before conversion touched
+        anything. Where it sits materially below `n_admin_windows`, the published median
+        pools two unit populations rather than one, and the raw split in
+        `sedation_dose_units.csv` should be read before trusting the row -- ketamine is
+        the live instance of this at this site: 8 of its 13 administrations were charted
+        in mcg, and the combined median lands inside that artifact rather than near the
+        clinical dose range.
         """
     )
     return
@@ -1242,6 +1251,14 @@ def _(SHARE_DIR, pl, publish, sedation_dose_converted):
         sedation_dose_converted.group_by("med_category")
         .agg(
             n_admin_windows=pl.len(),
+            # How many administrations were ALREADY in the preferred unit, before
+            # conversion touched anything -- taken from the identical pre-conversion
+            # frame that feeds sedation_dose_units.csv, so the two files cannot
+            # disagree. Materially below n_admin_windows means the row's median pools
+            # two unit populations rather than one; see the markdown above.
+            n_in_preferred_unit=(
+                pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")
+            ).sum(),
             median_dose=pl.col("med_dose_converted").median(),
             p25_dose=pl.col("med_dose_converted").quantile(0.25, interpolation="linear"),
             p75_dose=pl.col("med_dose_converted").quantile(0.75, interpolation="linear"),

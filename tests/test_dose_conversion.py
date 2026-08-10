@@ -192,6 +192,55 @@ def test_the_row_key_round_trips_so_duplicate_rows_cannot_fan_out(label):
 
 
 @pytest.mark.parametrize("label", LABELS)
+def test_n_in_preferred_unit_counts_rows_already_in_the_preferred_unit(label):
+    """Pins the derivation both notebooks use for the `n_in_preferred_unit` column in
+    index_paralytic_dose.csv / sedation_dose.csv: a row-wise comparison of the RAW
+    `med_dose_unit` against `med_dose_unit_converted`, summed per med_category.
+
+    Ketamine at this site is the motivating case: 8 of 13 administrations were
+    charted in mcg and only 5 already in the preferred mg, so the published median
+    pools two unit populations rather than one. This frame mirrors that shape (2 raw
+    mg, 3 raw mcg, all converting to mg) and pins that the column reads 2, not 5 and
+    not 0 -- a reader must be able to see the split without opening the companion
+    counts-only table.
+    """
+    convert = CONVERTERS[label]
+    df = pl.DataFrame(
+        {
+            "med_category": ["ketamine"] * 5,
+            "med_dose": [50.0, 60.0, 30.0, 31.0, 40.0],
+            "med_dose_unit": ["mg", "mg", "mcg", "mcg", "mcg"],
+        }
+    )
+    out = convert(df, PREFERRED_UNITS)
+
+    n_in_preferred_unit = (
+        out.filter(pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")).height
+    )
+    assert n_in_preferred_unit == 2
+    assert out.height == 5  # n vs n_in_preferred_unit is the "5 of which 2" signal
+
+
+@pytest.mark.parametrize("label", LABELS)
+def test_n_in_preferred_unit_equals_n_when_every_row_is_already_the_preferred_unit(label):
+    """The agents unaffected by the contamination (rocuronium, propofol at this site):
+    n_in_preferred_unit must equal n exactly, not merely be close to it."""
+    convert = CONVERTERS[label]
+    df = pl.DataFrame(
+        {
+            "med_category": ["rocuronium", "rocuronium", "rocuronium"],
+            "med_dose": [50.0, 50.0, 100.0],
+            "med_dose_unit": ["mg", "mg", "mg"],
+        }
+    )
+    out = convert(df, PREFERRED_UNITS)
+    n_in_preferred_unit = (
+        out.filter(pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")).height
+    )
+    assert n_in_preferred_unit == out.height == 3
+
+
+@pytest.mark.parametrize("label", LABELS)
 def test_row_order_and_original_columns_are_preserved(label):
     """The returned frame lines back up with the input row for row -- necessary for
     every downstream group_by to attribute the right converted dose to the right

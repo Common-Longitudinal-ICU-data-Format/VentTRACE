@@ -1139,6 +1139,15 @@ def _(mo):
         `paralytic_dose_units.csv` -- a **counts-only** table, so charting
         heterogeneity stays visible without reintroducing the split the conversion
         replaces in `index_paralytic_dose.csv`.
+
+        `n_in_preferred_unit` is how many administrations were **already** charted in
+        the agent's preferred unit, before conversion touched anything. Where it sits
+        materially below `n`, the published median pools two unit populations rather
+        than one, and the raw split in `paralytic_dose_units.csv` should be read
+        before trusting the row -- ketamine's sedation dose table in `03_context.py`
+        is the current live instance of this at this site, where 8 of 13
+        administrations were charted in mcg and the combined median lands inside that
+        artifact rather than near the clinical dose range.
         """
     )
     return
@@ -1192,6 +1201,14 @@ def _(SHARE_DIR, dose_converted, pl, publish):
         dose_converted.group_by("med_category")
         .agg(
             n=pl.len(),
+            # How many administrations were ALREADY in the preferred unit, before
+            # conversion touched anything -- taken from the identical pre-conversion
+            # frame that feeds paralytic_dose_units.csv, so the two files cannot
+            # disagree. Materially below n means the row's median pools two unit
+            # populations rather than one; see the markdown above.
+            n_in_preferred_unit=(
+                pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")
+            ).sum(),
             median_dose=pl.col("med_dose_converted").median(),
             p25_dose=pl.col("med_dose_converted").quantile(0.25, interpolation="linear"),
             p75_dose=pl.col("med_dose_converted").quantile(0.75, interpolation="linear"),
