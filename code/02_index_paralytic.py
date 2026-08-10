@@ -454,22 +454,30 @@ def _(MAX_TOTAL_PAIRS, all_pair_gaps, gap_bin_expr, med_admin, pl):
 
 @app.cell
 def _(SHARE_DIR, med_admin, pl, publish):
+    # P24 defect class, second instance. n_administrations was the only column in this
+    # file not reproduced anywhere else -- n_blocks and n_patients are byte-identical to
+    # index_paralytic_summary.csv, and the raw-count role it served is already covered by
+    # index_paralytic_summary's n_index together with index_per_block.csv. Publishing it
+    # here let a reader recover a withheld dose-unit cell in index_paralytic_dose.csv by
+    # subtraction: rocuronium administrations (1585) minus rocuronium/mg doses (1582) = 3,
+    # exactly the withheld rocuronium/mcg count. Do not restore this column without
+    # re-deriving that leak analysis -- the reconciliation cell below exists to catch it
+    # mechanically if it comes back.
     admin_summary = (
         med_admin.group_by(["med_category", "mar_action_category"])
         .agg(
-            n_administrations=pl.len(),
             n_blocks=pl.col("encounter_block").n_unique(),
             n_patients=pl.col("patient_id").n_unique(),
         )
         .sort(["med_category", "mar_action_category"])
     )
-    publish(
+    admin_summary_published = publish(
         admin_summary,
         SHARE_DIR / "paralytic_admin_summary.csv",
-        ["n_administrations", "n_blocks", "n_patients"],
+        ["n_blocks", "n_patients"],
         "paralytic_admin_summary",
     )
-    return (admin_summary,)
+    return admin_summary, admin_summary_published
 
 
 @app.cell
@@ -1163,13 +1171,86 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
         )
         .sort(["med_category", "n"], descending=[False, True])
     )
-    publish(
+    index_dose_published = publish(
         index_dose,
         SHARE_DIR / "index_paralytic_dose.csv",
         ["n"],
         "index_paralytic_dose",
     )
-    return (index_dose,)
+    return index_dose, index_dose_published
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Reconciliation: no dose-table leak against the admin summary
+
+        The same defect class as A's reconciliation above (spec P24): one file publishing
+        a total whose components another file publishes separately lets a reader recover a
+        withheld component by subtraction. `n_administrations` was dropped from
+        `paralytic_admin_summary.csv` for exactly this reason -- it was the only column in
+        that file not already reproduced elsewhere, and it let a reader recover
+        rocuronium's withheld `mcg` dose-unit count as `1585 - 1582 = 3`. This cell checks
+        the general case mechanically: for every `med_category`, sum
+        `index_paralytic_dose.csv`'s published `n` and compare it against every remaining
+        numeric total in `paralytic_admin_summary.csv` for that category. With
+        `n_administrations` gone this is vacuous today -- there is nothing left to
+        subtract from -- which is the point: it fails loudly if that column, or any other
+        per-category total, is ever added back without re-deriving this analysis.
+        """
+    )
+    return
+
+
+@app.cell
+def _(admin_summary_published, index_dose_published, pl):
+    _dose_totals = index_dose_published.group_by("med_category").agg(n_dose=pl.col("n").sum())
+
+    _total_cols = [
+        c for c in admin_summary_published.columns
+        if c not in ("med_category", "mar_action_category")
+    ]
+    _admin_totals = admin_summary_published.group_by("med_category").agg(
+        [pl.col(c).sum().alias(c) for c in _total_cols]
+    )
+
+    dose_admin_reconciliation = (
+        _admin_totals.join(_dose_totals, on="med_category", how="left")
+        .with_columns(pl.col("n_dose").fill_null(0))
+        .unpivot(
+            index=["med_category", "n_dose"],
+            on=_total_cols,
+            variable_name="admin_total_column",
+            value_name="admin_total_value",
+        )
+        .with_columns(
+            residual=(
+                pl.col("admin_total_value").cast(pl.Int64) - pl.col("n_dose").cast(pl.Int64)
+            ).abs()
+        )
+    )
+    print(
+        "reconciliation -- index_paralytic_dose.csv vs. every remaining total in "
+        "paralytic_admin_summary.csv:"
+    )
+    print(dose_admin_reconciliation)
+
+    _leak = dose_admin_reconciliation.filter(
+        (pl.col("residual") > 0) & (pl.col("residual") < 10)
+    )
+    assert _leak.height == 0, (
+        f"{_leak.height} (med_category, admin_total_column) pair(s) land within 1..9 of "
+        "index_paralytic_dose.csv's per-category total -- a withheld dose-unit cell would "
+        "be recoverable by subtraction. This is the P24 defect class: withhold or "
+        "aggregate the offending paralytic_admin_summary.csv column rather than "
+        "publishing it alongside the dose table."
+    )
+    print(
+        "reconciliation OK: no published paralytic_admin_summary.csv total is within "
+        "1..9 of the dose total, for any med_category"
+    )
+    return (dose_admin_reconciliation,)
 
 
 @app.cell
