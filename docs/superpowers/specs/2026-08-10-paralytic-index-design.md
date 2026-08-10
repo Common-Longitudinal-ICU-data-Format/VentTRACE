@@ -60,6 +60,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | P21 | **Published cells below n = 10 are suppressed, and every figure is drawn from a published table.** | Carried forward. Drawing from the published table makes the suppression automatic instead of something reimplemented per plot, and removes the possibility of a figure disagreeing with the CSV beside it. A suppressed histogram bin is **dropped, not merged into its neighbour** — merging moves mass the reader cannot see move; dropping it and stating the dropped total in the caption keeps the omission visible. |
 | P22 | **The all-pairs table of sub-analysis A is never persisted at row level.** Only bin counts are written. | A block with 40 paralytic administrations contributes 780 pairs. The raw pair list is large, fully re-derivable, and has no consumer — and an artifact with no consumer invites drift. |
 | P23 | **The n ≥ 10 suppression rule is the one shared helper in the project.** It lives in `utils/suppress.py` and both `02` and `03` import it. | This is a deliberate exception to the local-duplication posture of §4, and the reason the exception is safe is that the failure modes point in opposite directions. Duplicating *analysis* logic risks correlated errors that look like agreement — the hazard the superseded design was built around, and which no longer exists here because there is nothing to agree with. Duplicating *suppression* logic risks one notebook publishing a cell the other would have withheld, which is a disclosure failure, not an analysis failure, and a disclosure failure must be impossible rather than merely unlikely. One implementation, one test, applied at every write. |
+| P24 | **Sub-analysis A's three bin tables are suppressed as one publication, not three independent files.** Every `gap_bin` is classified into exactly one of **FULL** (`n_cross_agent` and every `agent_pair` count are each 0 or ≥ 10 — the bin's full same/cross decomposition is published), **POOLED_ONLY** (`n_pooled` ≥ 10 but a component is not — only `n_pooled` is published, in a new `coadmin_gap_pooled.csv`, and the bin is withheld from the other two files entirely), or **NONE** (`n_pooled` itself is < 10 — nothing about the bin is published anywhere). The three files partition the bins by mode, asserted in `02`. | Row-level suppression on `coadmin_gap_distribution.csv` and `coadmin_gap_by_pair.csv` applied *separately* left a subtraction leak: at `(5,10]`, `n_same_agent = 18` and `rocuronium+rocuronium = 12` were both published — individually legal, each ≥ 10 — while `vecuronium+vecuronium = 6` was suppressed as a lone row. The withheld value is `18 − 12 = 6`, recoverable from the two published files without ever seeing the suppressed row. Suppression evaluated per file is not suppression; two files that share a bin key are one publication, and the disclosure question has to be asked across the whole of it. `publish()` (P23) stays the row-level backstop under all three files — it does not weaken, and for a well-classified bin it never fires — but it cannot see across files, so the mode classification runs first and is what actually closes the leak. |
 
 ------------------------------------------------------------------------
 
@@ -406,8 +407,9 @@ output/intermediate_phi/          row-level, never leaves the site
 
 output/final_no_phi/              shareable aggregates, n ≥ 10
   paralytic_admin_summary.csv       A
-  coadmin_gap_distribution.csv      A
-  coadmin_gap_by_pair.csv           A
+  coadmin_gap_distribution.csv      A  (FULL bins only, P24)
+  coadmin_gap_by_pair.csv           A  (FULL bins only, P24)
+  coadmin_gap_pooled.csv            A  (POOLED_ONLY bins, P24)
   index_paralytic_summary.csv       B
   index_paralytic_dose.csv          B
   index_gap_distribution.csv        C

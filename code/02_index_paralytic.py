@@ -17,9 +17,10 @@ def _():
     import marimo as mo
 
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from utils.suppress import publish
+    from utils.suppress import MIN_CELL, publish
 
     return (
+        MIN_CELL,
         MedicationAdminIntermittent,
         Path,
         json,
@@ -452,7 +453,7 @@ def _(MAX_TOTAL_PAIRS, all_pair_gaps, gap_bin_expr, med_admin, pl):
 
 
 @app.cell
-def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, med_admin, pl, publish):
+def _(SHARE_DIR, med_admin, pl, publish):
     admin_summary = (
         med_admin.group_by(["med_category", "mar_action_category"])
         .agg(
@@ -468,31 +469,156 @@ def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, med_admin, pl, publish):
         ["n_administrations", "n_blocks", "n_patients"],
         "paralytic_admin_summary",
     )
+    return (admin_summary,)
 
-    # Pooled, same-agent and cross-agent as three columns on one row per bin, so a reader
-    # sees the split without joining two tables. Reindexed onto the full bin list so an
-    # empty bin is published as a zero rather than being absent -- "this never happened"
-    # and "this is missing" are different statements (§8).
-    _counts = (
-        coadmin_pairs.group_by("gap_bin")
-        .agg(
-            n_pooled=pl.len(),
-            n_same_agent=pl.col("is_same_agent").sum(),
-            n_cross_agent=(~pl.col("is_same_agent")).sum(),
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+        ### Secondary suppression across the three A tables
+
+        `coadmin_gap_distribution.csv` publishes `n_same_agent` per bin; `coadmin_gap_by_pair.csv`
+        publishes the per-`agent_pair` components that sum to it. Row-level suppression applied to
+        each file separately is not enough when two files share a bin key: publishing `n_same_agent`
+        whole while withholding one `agent_pair` row lets a reader recover the withheld value by
+        subtraction. At this site, `(5,10]` published `n_same_agent = 18` and
+        `rocuronium+rocuronium = 12` in the same run; the withheld `vecuronium+vecuronium = 6` is
+        `18 − 12`, no different from publishing it outright.
+
+        Every bin is classified into exactly one of three modes **before anything is written**:
+
+        * **FULL** — `n_cross_agent` and every individual `agent_pair` count in the bin are each
+          exactly 0 or at least `MIN_CELL`. No subtraction across the two files can then land on a
+          value in 1..9. Published in both `coadmin_gap_distribution.csv` and
+          `coadmin_gap_by_pair.csv`.
+        * **POOLED_ONLY** — `n_pooled` itself clears `MIN_CELL`, but at least one component does
+          not. Published as `n_pooled` alone, in a new `coadmin_gap_pooled.csv`, and withheld from
+          the other two files entirely — with no decomposition published for the bin, nothing about
+          it is recoverable.
+        * **NONE** — `n_pooled` itself is in 1..9. Nothing about the bin is published anywhere.
+
+        The three published files must **partition** the bins by mode: a bin cannot carry a
+        decomposition in one file and also appear pooled-only in another. That partition is asserted
+        below rather than left to a later reconciliation to catch.
+        """
+    )
+    return
+
+
+@app.cell
+def _(MIN_CELL):
+    def classify_bin_mode(n_pooled, n_cross_agent, pair_counts, min_cell=MIN_CELL):
+        """Classify one gap_bin into FULL / POOLED_ONLY / NONE for secondary suppression.
+
+        `n_pooled` is the bin's total pair count; `n_cross_agent` is the aggregate
+        cross-agent count published in `coadmin_gap_distribution.csv`; `pair_counts` is
+        every individual `agent_pair` count (same-agent and cross-agent alike) that would
+        be published for this bin in `coadmin_gap_by_pair.csv`.
+
+        FULL requires every one of those components to be exactly 0 or >= `min_cell` --
+        not just `n_pooled`. A bin can clear the pooled total and still leak a withheld
+        component by subtraction if only ONE component is checked (the defect this
+        function exists to close): `n_same_agent` published whole alongside one
+        `agent_pair` row lets a reader recover the other by `n_same_agent - published`.
+
+        Order of checks matters only for NONE, which is decided on `n_pooled` alone --
+        a bin with `n_pooled` in 1..9 cannot be POOLED_ONLY (nothing would satisfy
+        `n_pooled >= min_cell`) and every one of its components is necessarily smaller
+        than `n_pooled`, so checking components first would reach the same answer by a
+        longer path.
+        """
+        if 0 < n_pooled < min_cell:
+            return "NONE"
+        _components = [n_cross_agent, *pair_counts]
+        if all(_c == 0 or _c >= min_cell for _c in _components):
+            return "FULL"
+        return "POOLED_ONLY"
+
+    return (classify_bin_mode,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Classifying every bin
+
+        One pass per bin: the pooled total, the cross-agent aggregate, and the list of
+        individual `agent_pair` counts are computed directly from `coadmin_pairs` --
+        unsuppressed -- and handed to `classify_bin_mode`. The result is printed in full
+        here, in the run log only; nothing on this page is written to `final_no_phi`.
+        """
+    )
+    return
+
+
+@app.cell
+def _(GAP_BIN_LABELS, classify_bin_mode, coadmin_pairs, pl):
+    _pair_counts_by_bin = coadmin_pairs.group_by(["gap_bin", "agent_pair"]).agg(n=pl.len())
+
+    _rows = []
+    for _order, _bin in enumerate(GAP_BIN_LABELS):
+        _bin_pairs = coadmin_pairs.filter(pl.col("gap_bin") == _bin)
+        _n_pooled = _bin_pairs.height
+        _n_cross = int((~_bin_pairs.get_column("is_same_agent")).sum()) if _n_pooled else 0
+        _n_same = _n_pooled - _n_cross
+        _counts = _pair_counts_by_bin.filter(pl.col("gap_bin") == _bin).get_column("n").to_list()
+        _rows.append(
+            {
+                "bin_order": _order,
+                "gap_bin": _bin,
+                "n_pooled": _n_pooled,
+                "n_same_agent": _n_same,
+                "n_cross_agent": _n_cross,
+                "mode": classify_bin_mode(_n_pooled, _n_cross, _counts),
+            }
+        )
+
+    bin_modes = pl.DataFrame(_rows)
+    print("bin mode classification (unsuppressed -- run log only, never written):")
+    print(bin_modes)
+
+    print("\nsub-15-minute mass, the boundary evidence (unsuppressed, run log only):")
+    print(
+        bin_modes.filter(
+            pl.col("gap_bin").is_in(["0", "(0,1]", "(1,2]", "(2,5]", "(5,10]", "(10,15]"])
         )
     )
+    return (bin_modes,)
+
+
+@app.cell
+def _(GAP_BIN_LABELS, SHARE_DIR, bin_modes, coadmin_pairs, pl, publish):
+    _full_bins = bin_modes.filter(pl.col("mode") == "FULL").get_column("gap_bin").to_list()
+    _pooled_only_bins = bin_modes.filter(pl.col("mode") == "POOLED_ONLY").get_column("gap_bin").to_list()
+    _none_bins = bin_modes.filter(pl.col("mode") == "NONE").get_column("gap_bin").to_list()
+
+    # The three published files must partition the bins by mode. A bin classified into
+    # more than one mode is the exact disclosure failure secondary suppression exists to
+    # prevent, so this fails loudly here rather than waiting for the reconciliation cell
+    # below to catch it.
+    assert not (set(_full_bins) & set(_pooled_only_bins)), (
+        "a bin is classified both FULL and POOLED_ONLY -- it would appear decomposed in "
+        "coadmin_gap_distribution.csv/coadmin_gap_by_pair.csv AND pooled in "
+        "coadmin_gap_pooled.csv"
+    )
+    assert not (set(_full_bins) & set(_none_bins)), "a bin is classified both FULL and NONE"
+    assert not (set(_pooled_only_bins) & set(_none_bins)), (
+        "a bin is classified both POOLED_ONLY and NONE"
+    )
+    assert set(_full_bins) | set(_pooled_only_bins) | set(_none_bins) == set(GAP_BIN_LABELS), (
+        "every gap_bin must land in exactly one of FULL / POOLED_ONLY / NONE"
+    )
+
+    # FULL bins carry the same/cross decomposition, exactly as before -- restricted to
+    # the bins cleared for it.
     gap_distribution = (
-        pl.DataFrame({"gap_bin": GAP_BIN_LABELS})
-        .with_row_index("bin_order")
-        .join(_counts, on="gap_bin", how="left")
-        .with_columns(
-            pl.col("n_pooled").fill_null(0),
-            pl.col("n_same_agent").fill_null(0),
-            pl.col("n_cross_agent").fill_null(0),
-        )
+        bin_modes.filter(pl.col("mode") == "FULL")
+        .select("bin_order", "gap_bin", "n_pooled", "n_same_agent", "n_cross_agent")
         .sort("bin_order")
     )
-    publish(
+    gap_distribution_published = publish(
         gap_distribution,
         SHARE_DIR / "coadmin_gap_distribution.csv",
         ["n_pooled", "n_same_agent", "n_cross_agent"],
@@ -500,7 +626,8 @@ def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, med_admin, pl, publish):
     )
 
     gap_by_pair = (
-        coadmin_pairs.group_by(["agent_pair", "gap_bin"])
+        coadmin_pairs.filter(pl.col("gap_bin").is_in(_full_bins))
+        .group_by(["agent_pair", "gap_bin"])
         .agg(n=pl.len())
         .join(
             pl.DataFrame({"gap_bin": GAP_BIN_LABELS}).with_row_index("bin_order"),
@@ -509,20 +636,68 @@ def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, med_admin, pl, publish):
         )
         .sort(["agent_pair", "bin_order"])
     )
-    publish(
+    gap_by_pair_published = publish(
         gap_by_pair,
         SHARE_DIR / "coadmin_gap_by_pair.csv",
         ["n"],
         "coadmin_gap_by_pair",
     )
 
-    print("\nsub-15-minute mass, the boundary evidence:")
-    print(
-        gap_distribution.filter(
-            pl.col("gap_bin").is_in(["0", "(0,1]", "(1,2]", "(2,5]", "(5,10]", "(10,15]"])
-        )
+    # POOLED_ONLY bins carry n_pooled alone; no decomposition is published anywhere for
+    # them, in either of the two files above.
+    gap_pooled = (
+        bin_modes.filter(pl.col("mode") == "POOLED_ONLY")
+        .select("bin_order", "gap_bin", "n_pooled")
+        .sort("bin_order")
     )
-    return (gap_distribution,)
+    gap_pooled_published = publish(
+        gap_pooled,
+        SHARE_DIR / "coadmin_gap_pooled.csv",
+        ["n_pooled"],
+        "coadmin_gap_pooled",
+    )
+
+    return gap_by_pair_published, gap_distribution_published, gap_pooled_published
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Reconciliation: proving the leak is closed
+
+        For every bin published in `coadmin_gap_distribution.csv`, the `agent_pair` rows
+        published for that same bin in `coadmin_gap_by_pair.csv` must sum to **exactly**
+        `n_same_agent + n_cross_agent`. A non-zero residual means a withheld component is
+        recoverable from the two published files by subtraction -- the defect that
+        motivated secondary suppression. Checked mechanically, on the frames `publish()`
+        actually wrote, and printed so it is visible in the run log.
+        """
+    )
+    return
+
+
+@app.cell
+def _(gap_by_pair_published, gap_distribution_published, pl):
+    _pair_totals = gap_by_pair_published.group_by("gap_bin").agg(n_from_pairs=pl.col("n").sum())
+
+    reconciliation = (
+        gap_distribution_published.select("gap_bin", "n_same_agent", "n_cross_agent")
+        .with_columns(n_expected=pl.col("n_same_agent") + pl.col("n_cross_agent"))
+        .join(_pair_totals, on="gap_bin", how="left")
+        .with_columns(pl.col("n_from_pairs").fill_null(0))
+        .with_columns(residual=pl.col("n_expected") - pl.col("n_from_pairs"))
+    )
+    print("reconciliation -- published distribution vs. published by-pair components:")
+    print(reconciliation)
+
+    assert (reconciliation.get_column("residual") == 0).all(), (
+        "a bin in coadmin_gap_distribution.csv does not reconcile exactly against its "
+        "agent_pair rows in coadmin_gap_by_pair.csv -- a withheld component is "
+        "recoverable by subtraction"
+    )
+    print("reconciliation OK: zero residual on every published bin")
+    return (reconciliation,)
 
 
 @app.cell
