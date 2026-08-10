@@ -212,9 +212,11 @@ def _(mo):
         connected.
 
         **No de-bouncing (P14).** The hourly scaffold means a brief non-IMV blip
-        manufactures a spurious transition. `n_transitions_in_window` is published so the
-        size of that effect is measurable, but no suppression rule is applied — it would be
-        a second threshold with no evidence behind it.
+        manufactures a spurious transition. `n_transitions_in_window` is published — as
+        `imv_transitions_in_window.csv` — so the size of that effect is measurable from the
+        released output rather than merely asserted here, but no suppression rule is applied
+        to it: that would be a second threshold with no evidence behind it. The published
+        distribution is the evidence a later reader would need in order to argue for one.
         """
     )
     return
@@ -466,17 +468,37 @@ def _(mo):
         `index_paralytic_summary.csv` publishes `n_index` per `agent_label`, so the **total**
         number of index paralytics is already effectively public. Every table below
         partitions either that total (`imv_transition_summary.csv`) or the transition count
-        inside it (`imv_prior_device.csv`, `imv_offset_distribution.csv`). When a partition
-        of a public total has exactly **one** row withheld under the n≥10 rule, that row's
-        value is recoverable as *total minus the published rows* — publishing it whole and
-        withholding it are the same act.
+        inside it (`imv_prior_device.csv`, `imv_offset_distribution.csv`,
+        `imv_transitions_in_window.csv`). When a partition of a public total has exactly
+        **one** row withheld under the n≥10 rule, that row's value is recoverable as *total
+        minus the published rows* — publishing it whole and withholding it are the same act.
 
         `withhold_second_row` therefore checks, after row-level suppression, whether exactly
-        one row was withheld, and if so withholds a **second** — the smallest surviving row
-        with a non-zero count — so the residual can no longer be attributed to a single
-        cell. A published **zero** is never chosen as that second row: withholding a zero
-        removes nothing from the residual and would leave the leak open while looking
-        closed.
+        one row was withheld, and if so withholds a **second**. Which second row is not a
+        matter of taste — the arithmetic fixes the direction, and it runs opposite to
+        intuition:
+
+        ```
+        withheld cell   v,  1 <= v <= 9     (it was suppressed)
+        second row      w,  w >= 10         (it survived suppression)
+        reader sees     r = public total - published = v + w
+
+        reader solves   v = r - w  subject to  w >= 10   =>   v <= r - 10
+        so v is fully ambiguous across 1..9  only when  r >= 19
+        ```
+
+        Withholding the *smallest* surviving row minimises `w`, therefore minimises `r`, and
+        at `w = 10, v = 1` the residual is 11 — which pins `v = 1` exactly. That destroys a
+        row and protects nothing. Because `v` can be as small as 1, guaranteeing `r ≥ 19`
+        requires `w ≥ 18`, i.e. `2 × MIN_CELL − 2`.
+
+        The victim is therefore the **smallest surviving row that reaches 18** — the
+        threshold buys the guarantee, and among the rows clearing it the smallest costs the
+        reader least. A published **zero** is never chosen: withholding a zero leaves the
+        residual unchanged, so it would look like protection while leaving the leak exactly
+        as open. If **no** surviving row reaches 18 the guarantee is unattainable and the
+        whole table is withheld — a partial residual would lose rows *and* still narrow the
+        withheld cell.
 
         This is the third instance of the P24 defect class in this pipeline. It is written
         as a few explicit lines per table rather than a framework, because each table's
@@ -488,18 +510,53 @@ def _(mo):
 
 
 @app.cell
-def _(pl, small_cell_mask):
-    def withhold_second_row(df, count_cols, label):
+def _(MIN_CELL, pl, small_cell_mask):
+    def withhold_second_row(df, count_cols, label, min_cell=MIN_CELL):
         """Close the single-withheld-row leak in a partition of a public total.
 
         Returns `df` with one extra row removed when -- and only when -- row-level
-        suppression would withhold exactly one row. The extra row is the smallest
-        SURVIVING row with a non-zero primary count: a zero row contributes nothing to the
-        residual, so withholding one would look like protection while leaving the withheld
-        value recoverable exactly as before.
+        suppression would withhold exactly one row. `count_cols[0]` is the PARTITIONING
+        column: the one whose values sum to the public total. The other count columns
+        still drive suppression, but only the first can be recovered by subtraction, so
+        only the first is used to choose the victim.
 
-        Prints what it did either way; nothing about suppression is allowed to be silent.
+        WHY THE SECOND ROW MUST BE A LARGE ONE, NOT A SMALL ONE. The arithmetic decides
+        the direction, and it runs the opposite way to intuition:
+
+            one row is withheld at value v, and 1 <= v <= 9    (it was suppressed)
+            we additionally withhold a row at value w, and w >= 10  (it survived)
+            the reader computes the residual  r = public total - published = v + w
+
+            the reader then solves  v = r - w  subject to  w >= 10,
+            which bounds  v <= r - 10.  So the candidate set for v is [1, min(9, r-10)],
+            and v is FULLY ambiguous across 1..9 only when  r >= 19.
+
+        Withholding the SMALLEST surviving row minimises w, therefore minimises r, and at
+        w = 10, v = 1 the residual is 11, which forces v = 1 uniquely -- a row is destroyed
+        and nothing whatever is protected. Since v can be as small as 1, guaranteeing
+        r >= 19 requires  w >= 19 - 1 = 18 = 2 * min_cell - 2.
+
+        So the victim is the SMALLEST surviving row whose partitioning count is at least
+        `2 * min_cell - 2`. Smallest-above-the-threshold rather than simply largest: the
+        threshold is what buys the guarantee, and among the rows that clear it the smallest
+        is the one whose loss costs the reader least. Do not "simplify" this back to
+        `.sort(count_cols[0]).head(1)`; that is the defect this docstring exists to prevent.
+
+        A published ZERO is never chosen: withholding a zero leaves r unchanged, so it
+        would look like protection while leaving v recoverable exactly as before. The
+        w >= 18 threshold already excludes zeros; the rule is stated because it is the
+        reason the threshold may not be relaxed to "any surviving row".
+
+        DEGENERATE CASE: if no surviving row reaches 2 * min_cell - 2, the guarantee is
+        unattainable and the WHOLE TABLE is withheld (an empty frame with the schema
+        intact). Publishing a partial residual would be the worst of both worlds -- rows
+        lost AND v still narrowed to a small set. An empty table is the rule working.
+
+        Prints what it did in every branch; nothing about suppression is allowed to be
+        silent.
         """
+        _min_second = 2 * min_cell - 2
+
         _mask = small_cell_mask(df, count_cols)
         _n_withheld = int(_mask.sum())
         if _n_withheld != 1:
@@ -508,24 +565,29 @@ def _(pl, small_cell_mask):
                 "rule; no second withholding needed"
             )
             return df
+
         _victim = (
             df.with_row_index("_r")
             .filter(~_mask)
-            .filter(pl.col(count_cols[0]) > 0)
+            .filter(pl.col(count_cols[0]) >= _min_second)
             .sort(count_cols[0])
             .head(1)
         )
         if _victim.height == 0:
             print(
-                f"  [{label}] partition check: exactly one row withheld, but no non-zero row "
-                "survives to withhold alongside it -- nothing further to do"
+                f"  [{label}] partition check: exactly ONE row withheld by the row-level rule, "
+                f"and NO surviving row reaches {_min_second} on {count_cols[0]!r}. No second "
+                "withholding can make the residual ambiguous across the full 1..9 range, so "
+                "the WHOLE TABLE is withheld rather than published with a residual that "
+                "narrows the withheld cell."
             )
-            return df
+            return df.clear()
+
         print(
             f"  [{label}] partition check: exactly ONE row withheld by the row-level rule, so "
             "its count is recoverable as (public total - published rows). Withholding a "
-            "second row -- the smallest surviving non-zero one -- so the residual cannot be "
-            "attributed to a single cell:"
+            f"second row -- the smallest surviving row with {count_cols[0]} >= {_min_second} "
+            "-- so the residual is at least 19 and the withheld cell could be any of 1..9:"
         )
         print(_victim.drop("_r"))
         return df.with_row_index("_r").filter(pl.col("_r") != _victim.item(0, "_r")).drop("_r")
@@ -708,6 +770,62 @@ def _(
         "imv_offset_distribution",
     )
     return (offset_distribution,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### `imv_transitions_in_window.csv` — how many transitions the window contained
+
+        This is the table P14 rests on. Declining to de-bounce is only defensible if the
+        size of the effect being declined is **measurable from the released output**, and
+        `n_transitions_in_window` is that measurement: how many distinct non-IMV → IMV
+        transitions fell inside ±60 minutes of the index paralytic, for the index paralytics
+        that had at least one. A count of 1 is an unambiguous airway event. A count of 2 or
+        more is either a genuine extubation-and-reintubation inside the hour or the hourly
+        scaffold blipping off IMV and back — this table does not distinguish them, and does
+        not try to; it bounds how much room there is for the ambiguity to matter.
+
+        The rows run contiguously from 1 to the observed maximum so that a value that never
+        occurred is published as an explicit **zero** rather than being absent. It is a
+        fourth partition of the 484 transitions, so it takes the same `withhold_second_row`
+        check as the other three.
+        """
+    )
+    return
+
+
+@app.cell
+def _(SHARE_DIR, context_d, pl, publish, withhold_second_row):
+    _observed = (
+        context_d.filter(pl.col("imv_transition"))
+        .group_by("n_transitions_in_window")
+        .agg(n=pl.len())
+    )
+    # Contiguous from 1 to the observed maximum: a value that never occurred is published
+    # as an explicit zero rather than being absent from the table.
+    _max_in_window = int(
+        context_d.filter(pl.col("imv_transition")).get_column("n_transitions_in_window").max()
+    )
+    transitions_in_window = (
+        pl.DataFrame({"n_transitions_in_window": list(range(1, _max_in_window + 1))})
+        .with_columns(pl.col("n_transitions_in_window").cast(pl.Int32))
+        .join(_observed, on="n_transitions_in_window", how="left")
+        .with_columns(pl.col("n").fill_null(0))
+        .sort("n_transitions_in_window")
+    )
+    print("imv_transitions_in_window, unsuppressed (run log only, never written):")
+    print(transitions_in_window)
+
+    # A fourth partition of the transition count, so the same single-withheld-row check.
+    publish(
+        withhold_second_row(transitions_in_window, ["n"], "imv_transitions_in_window"),
+        SHARE_DIR / "imv_transitions_in_window.csv",
+        ["n"],
+        "imv_transitions_in_window",
+    )
+    return (transitions_in_window,)
 
 
 if __name__ == "__main__":
