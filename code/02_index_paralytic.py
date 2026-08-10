@@ -17,10 +17,9 @@ def _():
     import marimo as mo
 
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from utils.suppress import MIN_CELL, publish
+    from utils.suppress import publish
 
     return (
-        MIN_CELL,
         MedicationAdminIntermittent,
         Path,
         json,
@@ -454,124 +453,39 @@ def _(MAX_TOTAL_PAIRS, all_pair_gaps, gap_bin_expr, med_admin, pl):
 
 @app.cell
 def _(SHARE_DIR, med_admin, pl, publish):
-    # P24 defect class, second instance. n_administrations was the only column in this
-    # file not reproduced anywhere else -- n_blocks and n_patients are byte-identical to
-    # index_paralytic_summary.csv, and the raw-count role it served is already covered by
-    # index_paralytic_summary's n_index together with index_per_block.csv. Publishing it
-    # here let a reader recover a withheld dose-unit cell in index_paralytic_dose.csv by
-    # subtraction: rocuronium administrations (1585) minus rocuronium/mg doses (1582) = 3,
-    # exactly the withheld rocuronium/mcg count. Do not restore this column without
-    # re-deriving that leak analysis -- the reconciliation cell below exists to catch it
-    # mechanically if it comes back.
+    # n_administrations was dropped by 42cc70f to close a subtraction leak against
+    # index_paralytic_dose.csv under the old n>=10 cell rule. P24-withdrawn restores it:
+    # under P21 an aggregate count is published at its true value regardless of size, so
+    # there is no residual left to be recoverable by subtraction.
     admin_summary = (
         med_admin.group_by(["med_category", "mar_action_category"])
         .agg(
+            n_administrations=pl.len(),
             n_blocks=pl.col("encounter_block").n_unique(),
             n_patients=pl.col("patient_id").n_unique(),
         )
         .sort(["med_category", "mar_action_category"])
     )
-    admin_summary_published = publish(
+    publish(
         admin_summary,
         SHARE_DIR / "paralytic_admin_summary.csv",
-        ["n_blocks", "n_patients"],
         "paralytic_admin_summary",
     )
-    return admin_summary, admin_summary_published
+    return (admin_summary,)
 
 
 @app.cell
-def _(mo):
-    mo.md(
-        r"""
-        ### Secondary suppression across the three A tables
-
-        `coadmin_gap_distribution.csv` publishes `n_same_agent` per bin; `coadmin_gap_by_pair.csv`
-        publishes the per-`agent_pair` components that sum to it. Row-level suppression applied to
-        each file separately is not enough when two files share a bin key: publishing `n_same_agent`
-        whole while withholding one `agent_pair` row lets a reader recover the withheld value by
-        subtraction. At this site, `(5,10]` published `n_same_agent = 18` and
-        `rocuronium+rocuronium = 12` in the same run; the withheld `vecuronium+vecuronium = 6` is
-        `18 − 12`, no different from publishing it outright.
-
-        Every bin is classified into exactly one of three modes **before anything is written**:
-
-        * **FULL** — `n_cross_agent` and every individual `agent_pair` count in the bin are each
-          exactly 0 or at least `MIN_CELL`. No subtraction across the two files can then land on a
-          value in 1..9. Published in both `coadmin_gap_distribution.csv` and
-          `coadmin_gap_by_pair.csv`.
-        * **POOLED_ONLY** — `n_pooled` itself clears `MIN_CELL`, but at least one component does
-          not. Published as `n_pooled` alone, in a new `coadmin_gap_pooled.csv`, and withheld from
-          the other two files entirely — with no decomposition published for the bin, nothing about
-          it is recoverable.
-        * **NONE** — `n_pooled` itself is in 1..9. Nothing about the bin is published anywhere.
-
-        The three published files must **partition** the bins by mode: a bin cannot carry a
-        decomposition in one file and also appear pooled-only in another. That partition is asserted
-        below rather than left to a later reconciliation to catch.
-        """
-    )
-    return
-
-
-@app.cell
-def _(MIN_CELL):
-    def classify_bin_mode(n_pooled, n_cross_agent, pair_counts, min_cell=MIN_CELL):
-        """Classify one gap_bin into FULL / POOLED_ONLY / NONE for secondary suppression.
-
-        `n_pooled` is the bin's total pair count; `n_cross_agent` is the aggregate
-        cross-agent count published in `coadmin_gap_distribution.csv`; `pair_counts` is
-        every individual `agent_pair` count (same-agent and cross-agent alike) that would
-        be published for this bin in `coadmin_gap_by_pair.csv`.
-
-        FULL requires every one of those components to be exactly 0 or >= `min_cell` --
-        not just `n_pooled`. A bin can clear the pooled total and still leak a withheld
-        component by subtraction if only ONE component is checked (the defect this
-        function exists to close): `n_same_agent` published whole alongside one
-        `agent_pair` row lets a reader recover the other by `n_same_agent - published`.
-
-        Order of checks matters only for NONE, which is decided on `n_pooled` alone --
-        a bin with `n_pooled` in 1..9 cannot be POOLED_ONLY (nothing would satisfy
-        `n_pooled >= min_cell`) and every one of its components is necessarily smaller
-        than `n_pooled`, so checking components first would reach the same answer by a
-        longer path.
-        """
-        if 0 < n_pooled < min_cell:
-            return "NONE"
-        _components = [n_cross_agent, *pair_counts]
-        if all(_c == 0 or _c >= min_cell for _c in _components):
-            return "FULL"
-        return "POOLED_ONLY"
-
-    return (classify_bin_mode,)
-
-
-@app.cell
-def _(mo):
-    mo.md(
-        """
-        ### Classifying every bin
-
-        One pass per bin: the pooled total, the cross-agent aggregate, and the list of
-        individual `agent_pair` counts are computed directly from `coadmin_pairs` --
-        unsuppressed -- and handed to `classify_bin_mode`. The result is printed in full
-        here, in the run log only; nothing on this page is written to `final_no_phi`.
-        """
-    )
-    return
-
-
-@app.cell
-def _(GAP_BIN_LABELS, classify_bin_mode, coadmin_pairs, pl):
-    _pair_counts_by_bin = coadmin_pairs.group_by(["gap_bin", "agent_pair"]).agg(n=pl.len())
-
+def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, pl, publish):
+    # Every bin, at its true count (P21) -- there is no bin-mode partition. The zero bins
+    # are published explicitly rather than left absent, exactly as the rest of the
+    # pipeline publishes zeros: "this never happened" and "this is missing" are different
+    # statements.
     _rows = []
     for _order, _bin in enumerate(GAP_BIN_LABELS):
         _bin_pairs = coadmin_pairs.filter(pl.col("gap_bin") == _bin)
         _n_pooled = _bin_pairs.height
         _n_cross = int((~_bin_pairs.get_column("is_same_agent")).sum()) if _n_pooled else 0
         _n_same = _n_pooled - _n_cross
-        _counts = _pair_counts_by_bin.filter(pl.col("gap_bin") == _bin).get_column("n").to_list()
         _rows.append(
             {
                 "bin_order": _order,
@@ -579,63 +493,19 @@ def _(GAP_BIN_LABELS, classify_bin_mode, coadmin_pairs, pl):
                 "n_pooled": _n_pooled,
                 "n_same_agent": _n_same,
                 "n_cross_agent": _n_cross,
-                "mode": classify_bin_mode(_n_pooled, _n_cross, _counts),
             }
         )
 
-    bin_modes = pl.DataFrame(_rows)
-    print("bin mode classification (unsuppressed -- run log only, never written):")
-    print(bin_modes)
-
-    print("\nsub-15-minute mass, the boundary evidence (unsuppressed, run log only):")
-    print(
-        bin_modes.filter(
-            pl.col("gap_bin").is_in(["0", "(0,1]", "(1,2]", "(2,5]", "(5,10]", "(10,15]"])
-        )
-    )
-    return (bin_modes,)
-
-
-@app.cell
-def _(GAP_BIN_LABELS, SHARE_DIR, bin_modes, coadmin_pairs, pl, publish):
-    _full_bins = bin_modes.filter(pl.col("mode") == "FULL").get_column("gap_bin").to_list()
-    _pooled_only_bins = bin_modes.filter(pl.col("mode") == "POOLED_ONLY").get_column("gap_bin").to_list()
-    _none_bins = bin_modes.filter(pl.col("mode") == "NONE").get_column("gap_bin").to_list()
-
-    # The three published files must partition the bins by mode. A bin classified into
-    # more than one mode is the exact disclosure failure secondary suppression exists to
-    # prevent, so this fails loudly here rather than waiting for the reconciliation cell
-    # below to catch it.
-    assert not (set(_full_bins) & set(_pooled_only_bins)), (
-        "a bin is classified both FULL and POOLED_ONLY -- it would appear decomposed in "
-        "coadmin_gap_distribution.csv/coadmin_gap_by_pair.csv AND pooled in "
-        "coadmin_gap_pooled.csv"
-    )
-    assert not (set(_full_bins) & set(_none_bins)), "a bin is classified both FULL and NONE"
-    assert not (set(_pooled_only_bins) & set(_none_bins)), (
-        "a bin is classified both POOLED_ONLY and NONE"
-    )
-    assert set(_full_bins) | set(_pooled_only_bins) | set(_none_bins) == set(GAP_BIN_LABELS), (
-        "every gap_bin must land in exactly one of FULL / POOLED_ONLY / NONE"
-    )
-
-    # FULL bins carry the same/cross decomposition, exactly as before -- restricted to
-    # the bins cleared for it.
-    gap_distribution = (
-        bin_modes.filter(pl.col("mode") == "FULL")
-        .select("bin_order", "gap_bin", "n_pooled", "n_same_agent", "n_cross_agent")
-        .sort("bin_order")
-    )
+    gap_distribution = pl.DataFrame(_rows)
     gap_distribution_published = publish(
         gap_distribution,
         SHARE_DIR / "coadmin_gap_distribution.csv",
-        ["n_pooled", "n_same_agent", "n_cross_agent"],
         "coadmin_gap_distribution",
     )
 
+    # Every observed agent_pair, in every bin it appears in, at its true count.
     gap_by_pair = (
-        coadmin_pairs.filter(pl.col("gap_bin").is_in(_full_bins))
-        .group_by(["agent_pair", "gap_bin"])
+        coadmin_pairs.group_by(["agent_pair", "gap_bin"])
         .agg(n=pl.len())
         .join(
             pl.DataFrame({"gap_bin": GAP_BIN_LABELS}).with_row_index("bin_order"),
@@ -647,65 +517,10 @@ def _(GAP_BIN_LABELS, SHARE_DIR, bin_modes, coadmin_pairs, pl, publish):
     gap_by_pair_published = publish(
         gap_by_pair,
         SHARE_DIR / "coadmin_gap_by_pair.csv",
-        ["n"],
         "coadmin_gap_by_pair",
     )
 
-    # POOLED_ONLY bins carry n_pooled alone; no decomposition is published anywhere for
-    # them, in either of the two files above.
-    gap_pooled = (
-        bin_modes.filter(pl.col("mode") == "POOLED_ONLY")
-        .select("bin_order", "gap_bin", "n_pooled")
-        .sort("bin_order")
-    )
-    gap_pooled_published = publish(
-        gap_pooled,
-        SHARE_DIR / "coadmin_gap_pooled.csv",
-        ["n_pooled"],
-        "coadmin_gap_pooled",
-    )
-
-    return gap_by_pair_published, gap_distribution_published, gap_pooled_published
-
-
-@app.cell
-def _(mo):
-    mo.md(
-        """
-        ### Reconciliation: proving the leak is closed
-
-        For every bin published in `coadmin_gap_distribution.csv`, the `agent_pair` rows
-        published for that same bin in `coadmin_gap_by_pair.csv` must sum to **exactly**
-        `n_same_agent + n_cross_agent`. A non-zero residual means a withheld component is
-        recoverable from the two published files by subtraction -- the defect that
-        motivated secondary suppression. Checked mechanically, on the frames `publish()`
-        actually wrote, and printed so it is visible in the run log.
-        """
-    )
-    return
-
-
-@app.cell
-def _(gap_by_pair_published, gap_distribution_published, pl):
-    _pair_totals = gap_by_pair_published.group_by("gap_bin").agg(n_from_pairs=pl.col("n").sum())
-
-    reconciliation = (
-        gap_distribution_published.select("gap_bin", "n_same_agent", "n_cross_agent")
-        .with_columns(n_expected=pl.col("n_same_agent") + pl.col("n_cross_agent"))
-        .join(_pair_totals, on="gap_bin", how="left")
-        .with_columns(pl.col("n_from_pairs").fill_null(0))
-        .with_columns(residual=pl.col("n_expected") - pl.col("n_from_pairs"))
-    )
-    print("reconciliation -- published distribution vs. published by-pair components:")
-    print(reconciliation)
-
-    assert (reconciliation.get_column("residual") == 0).all(), (
-        "a bin in coadmin_gap_distribution.csv does not reconcile exactly against its "
-        "agent_pair rows in coadmin_gap_by_pair.csv -- a withheld component is "
-        "recoverable by subtraction"
-    )
-    print("reconciliation OK: zero residual on every published bin")
-    return (reconciliation,)
+    return gap_by_pair_published, gap_distribution_published
 
 
 @app.cell
@@ -1065,7 +880,6 @@ def _(GAP_BIN_LABELS, SHARE_DIR, index_pairs, pl, publish):
     publish(
         index_gap_distribution,
         SHARE_DIR / "index_gap_distribution.csv",
-        ["n"],
         "index_gap_distribution",
     )
     return (index_gap_distribution,)
@@ -1098,7 +912,6 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
     publish(
         index_per_block,
         SHARE_DIR / "index_per_block.csv",
-        ["n_blocks"],
         "index_per_block",
     )
     return (index_per_block,)
@@ -1137,7 +950,6 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
     publish(
         index_summary,
         SHARE_DIR / "index_paralytic_summary.csv",
-        ["n_index", "n_blocks", "n_patients", "n_coadmin"],
         "index_paralytic_summary",
     )
     return (index_summary,)
@@ -1174,7 +986,6 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
     index_dose_published = publish(
         index_dose,
         SHARE_DIR / "index_paralytic_dose.csv",
-        ["n"],
         "index_paralytic_dose",
     )
     return index_dose, index_dose_published
@@ -1183,89 +994,13 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
 @app.cell
 def _(mo):
     mo.md(
-        """
-        ### Reconciliation: no dose-table leak against the admin summary
-
-        The same defect class as A's reconciliation above (spec P24): one file publishing
-        a total whose components another file publishes separately lets a reader recover a
-        withheld component by subtraction. `n_administrations` was dropped from
-        `paralytic_admin_summary.csv` for exactly this reason -- it was the only column in
-        that file not already reproduced elsewhere, and it let a reader recover
-        rocuronium's withheld `mcg` dose-unit count as `1585 - 1582 = 3`. This cell checks
-        the general case mechanically: for every `med_category`, sum
-        `index_paralytic_dose.csv`'s published `n` and compare it against every remaining
-        numeric total in `paralytic_admin_summary.csv` for that category. With
-        `n_administrations` gone this is vacuous today -- there is nothing left to
-        subtract from -- which is the point: it fails loudly if that column, or any other
-        per-category total, is ever added back without re-deriving this analysis.
-        """
-    )
-    return
-
-
-@app.cell
-def _(admin_summary_published, index_dose_published, pl):
-    _dose_totals = index_dose_published.group_by("med_category").agg(n_dose=pl.col("n").sum())
-
-    _total_cols = [
-        c for c in admin_summary_published.columns
-        if c not in ("med_category", "mar_action_category")
-    ]
-    _admin_totals = admin_summary_published.group_by("med_category").agg(
-        [pl.col(c).sum().alias(c) for c in _total_cols]
-    )
-
-    dose_admin_reconciliation = (
-        _admin_totals.join(_dose_totals, on="med_category", how="left")
-        .with_columns(pl.col("n_dose").fill_null(0))
-        .unpivot(
-            index=["med_category", "n_dose"],
-            on=_total_cols,
-            variable_name="admin_total_column",
-            value_name="admin_total_value",
-        )
-        .with_columns(
-            residual=(
-                pl.col("admin_total_value").cast(pl.Int64) - pl.col("n_dose").cast(pl.Int64)
-            ).abs()
-        )
-    )
-    print(
-        "reconciliation -- index_paralytic_dose.csv vs. every remaining total in "
-        "paralytic_admin_summary.csv:"
-    )
-    print(dose_admin_reconciliation)
-
-    _leak = dose_admin_reconciliation.filter(
-        (pl.col("residual") > 0) & (pl.col("residual") < 10)
-    )
-    assert _leak.height == 0, (
-        f"{_leak.height} (med_category, admin_total_column) pair(s) land within 1..9 of "
-        "index_paralytic_dose.csv's per-category total -- a withheld dose-unit cell would "
-        "be recoverable by subtraction. This is the P24 defect class: withhold or "
-        "aggregate the offending paralytic_admin_summary.csv column rather than "
-        "publishing it alongside the dose table."
-    )
-    print(
-        "reconciliation OK: no published paralytic_admin_summary.csv total is within "
-        "1..9 of the dose total, for any med_category"
-    )
-    return (dose_admin_reconciliation,)
-
-
-@app.cell
-def _(mo):
-    mo.md(
         r"""
         ## Figures A.1 and C.1
 
-        Both are drawn **from the published CSVs and nothing else** (spec P21), so
-        suppression propagates automatically and a figure cannot disagree with the table
-        beside it. `coadmin_gap_distribution.csv` and `coadmin_gap_pooled.csv` partition
-        the bins by secondary-suppression mode (FULL / POOLED_ONLY -- see the note above
-        sub-analysis A's publishing cell); a bin in neither file (mode NONE) is dropped
-        from both figures, never merged into a neighbour, and the caption on each figure
-        states how many bins that was.
+        Both are drawn **from the published CSVs and nothing else** (spec P21), so a
+        figure cannot disagree with the table beside it. Every bin is published at its
+        true count, so there is no withheld state to encode -- the only thing a figure
+        must still make legible is a *measured* zero.
         """
     )
     return
@@ -1285,23 +1020,15 @@ def _():
 def _(mo):
     mo.md(
         """
-        ### Marking a published zero and a withheld bin so neither is invisible
+        ### Marking a published zero so it is not invisible
 
-        A count is zero exactly when polars computed zero; a count is *absent* exactly
-        when the row never cleared the n>=10 rule (`utils/suppress.py` publishes a zero
-        deliberately -- "this never happened" must never look like "this is missing"). A
-        bar's height cannot show that difference: a zero-height bar and a bar that was
-        never drawn look identical, and on a log axis a zero-height bar cannot be drawn at
-        all. Both figures below therefore plot two extra glyphs instead of relying on bar
-        height alone, and use a linear y-axis rather than log -- with roughly half the
-        cells in these tables exactly zero, a log axis cannot place zero on it in the
-        first place.
-
-        A small **diamond sitting just above the baseline, in the series' own color**,
-        marks a published, exactly-zero count. A **cross drawn below the x-axis**, in
-        axes-fraction space rather than data space so its vertical position can never be
-        read as a small data value, marks a bin (or a series within a bin) that is
-        withheld entirely -- nothing about it is published anywhere.
+        A count is zero exactly when polars computed zero. A bar's height cannot show
+        that on its own: a zero-height bar is indistinguishable from a gap in the axis,
+        and on a log axis a zero-height bar cannot be drawn at all. Both figures below
+        therefore plot a small **diamond just above the baseline, in the series' own
+        color**, for a published, exactly-zero count, and use a linear y-axis rather than
+        log -- with roughly half the cells in these tables exactly zero, a log axis cannot
+        place zero on it in the first place.
         """
     )
     return
@@ -1321,73 +1048,40 @@ def _(plt):
             linestyle="None", zorder=5,
         )
 
-    def mark_withheld(ax, x, color):
-        """Nothing published for this bin/series: a cross drawn BELOW the x-axis.
-
-        Uses the axes' x-data / y-axes-fraction transform, so the vertical position is
-        fixed relative to the axes box, not the data scale -- it carries no magnitude and
-        cannot be misread as a small measured value.
-        """
-        ax.plot(
-            [x], [-0.22], marker="x", markersize=8, markeredgewidth=2, color=color,
-            linestyle="None", transform=ax.get_xaxis_transform(), clip_on=False, zorder=5,
-        )
-
-    return mark_withheld, mark_zero
+    return (mark_zero,)
 
 
 @app.cell
 def _(mo):
     mo.md(
         """
-        ### Figure A.1 — co-administration gaps, three states per bin
+        ### Figure A.1 — co-administration gaps, same agent vs. cross agent
 
-        The bar *shape* -- total pairs per bin -- comes from the union of
-        `coadmin_gap_distribution.csv`'s `n_pooled` and `coadmin_gap_pooled.csv`'s
-        `n_pooled`. The same-agent / cross-agent split is overlaid only on the bins
-        present in `coadmin_gap_distribution.csv` (mode FULL): a colored bar where that
-        series' count is positive, a colored diamond on the baseline where it is a
-        *published* zero -- `n_cross_agent` is zero in every FULL bin at this site, which
-        is the actual result, and the diamond is what lets a reader see that rather than
-        mistake it for a gap in the data. A pooled-only bin (mode POOLED_ONLY) is one wide
-        grey hatched bar: its total is real and shown, but the split is withheld under the
-        n>=10 rule -- unchanged from before. A bin published in neither file (mode NONE)
-        gets a withheld cross below the axis, in both series' colors, since nothing about
-        either series is known there.
+        Every bin, at its true count. A colored bar where that series' count is positive,
+        a colored diamond on the baseline where it is a *published* zero -- `n_cross_agent`
+        is zero in several bins at this site, which is the actual result, and the diamond
+        is what lets a reader see that rather than mistake it for a gap in the data.
         """
     )
     return
 
 
 @app.cell
-def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
+def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     # Fixed categorical color order (dataviz skill), never cycled: blue is always
-    # same-agent, orange is always cross-agent, everywhere the pair appears. Grey +
-    # 45-degree hatch marks "total known, split withheld" -- a texture, not a third hue,
-    # so it cannot be read as a third category on the same footing as the other two.
+    # same-agent, orange is always cross-agent, everywhere the pair appears.
     _BLUE = "#2a78d6"
     _ORANGE = "#eb6834"
-    _GREY = "#c3c2b7"
-    _EDGE = "#52514e"
 
-    _full = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv")
-    _pooled = pl.read_csv(SHARE_DIR / "coadmin_gap_pooled.csv")
-    _full_bins = set(_full.get_column("gap_bin").to_list())
-    _pooled_bins = set(_pooled.get_column("gap_bin").to_list())
-    _none_bins = [b for b in GAP_BIN_LABELS if b not in _full_bins and b not in _pooled_bins]
-
-    _n_pooled_only = _pooled.height
-    _n_none = len(_none_bins)
+    _dist = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv")
     _y_ref = max(
-        int(_full.get_column("n_same_agent").max() or 0),
-        int(_full.get_column("n_cross_agent").max() or 0),
-        int(_pooled.get_column("n_pooled").max() or 0),
+        int(_dist.get_column("n_same_agent").max() or 0),
+        int(_dist.get_column("n_cross_agent").max() or 0),
     )
 
     _fig, _ax = plt.subplots(figsize=(11, 6.5))
 
-    # FULL bins: a bar for a positive count, a baseline diamond for a published zero.
-    for _row in _full.iter_rows(named=True):
+    for _row in _dist.iter_rows(named=True):
         _o = _row["bin_order"]
         if _row["n_same_agent"] > 0:
             _ax.bar([_o - 0.2], [_row["n_same_agent"]], width=0.4, color=_BLUE)
@@ -1397,20 +1091,6 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
             _ax.bar([_o + 0.2], [_row["n_cross_agent"]], width=0.4, color=_ORANGE)
         else:
             mark_zero(_ax, _o + 0.2, _y_ref, _ORANGE)
-
-    # POOLED_ONLY bins: one wide hatched bar, total only, no split. n_pooled >= MIN_CELL
-    # by construction (classify_bin_mode), so this bar is never zero-height.
-    _ax.bar(
-        _pooled.get_column("bin_order"), _pooled.get_column("n_pooled"),
-        width=0.8, color=_GREY, edgecolor=_EDGE, hatch="///",
-    )
-
-    # NONE bins: nothing published for either series -- a withheld cross per series,
-    # below the axis, in each series' own color.
-    for _b in _none_bins:
-        _o = GAP_BIN_LABELS.index(_b)
-        mark_withheld(_ax, _o - 0.15, _BLUE)
-        mark_withheld(_ax, _o + 0.15, _ORANGE)
 
     _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
     _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
@@ -1430,18 +1110,13 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
     _handles = [
         _ax.plot([], [], color=_BLUE, lw=6, label="same agent (redose)")[0],
         _ax.plot([], [], color=_ORANGE, lw=6, label="different agents (co-administration)")[0],
-        _ax.plot([], [], color=_GREY, lw=6, label="pooled total only — split withheld (n<10 rule)")[0],
         _ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
                  label="published zero (measured, exactly 0)")[0],
-        _ax.plot([], [], marker="x", markersize=8, markeredgewidth=2, color="0.3",
-                 linestyle="None", label="withheld entirely (n<10 rule; drawn below axis)")[0],
     ]
     _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
     _ax.set_title(
         "A.1 — gaps between paralytic administrations, all pairs within an encounter\n"
-        "15 minutes is a clinical definition, not a measured optimum (spec P7)\n"
-        f"{_n_pooled_only} bin(s) pooled-only, split withheld; "
-        f"{_n_none} bin(s) withheld entirely"
+        "15 minutes is a clinical definition, not a measured optimum (spec P7)"
     )
     _fig.tight_layout()
     _fig.subplots_adjust(bottom=0.38)
@@ -1455,23 +1130,22 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
 def _(mo):
     mo.md(
         """
-        ### Figure C.1 — what the fold removed, three states per side
+        ### Figure C.1 — what the fold removed
 
-        A's total shape (the same union Figure A.1 uses) beside C's per-bin counts
-        (`index_gap_distribution.csv`), on the identical bin grid. Each side gets the same
-        treatment as A.1: a bar where that series has a real positive count, a colored
-        diamond on the baseline where it has a *published* zero, and a colored cross below
-        the axis where it has nothing published for that bin at all. The six leftmost bins
-        are C's confirmation of the 15-minute floor -- with this encoding they show six
-        aqua diamonds sitting on the baseline, an affirmative "measured, and it is zero,"
-        never a blank space indistinguishable from a suppressed row.
+        A's total shape (`coadmin_gap_distribution.csv`'s `n_pooled`) beside C's per-bin
+        counts (`index_gap_distribution.csv`), on the identical bin grid. Each side gets
+        the same treatment as A.1: a bar where that series has a real positive count, a
+        colored diamond on the baseline where it has a *published* zero. The six leftmost
+        bins are C's confirmation of the 15-minute floor -- with this encoding they show
+        six aqua diamonds sitting on the baseline, an affirmative "measured, and it is
+        zero."
         """
     )
     return
 
 
 @app.cell
-def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
+def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     # Blue stays "raw administrations" here too (same entity as A.1's bars); aqua is a
     # new entity, index paralytics, and gets its own slot rather than reusing orange
     # (which means "cross-agent" in A.1 and would misstate identity here).
@@ -1479,34 +1153,23 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
     _AQUA = "#1baf7a"
     _EDGE = "#0b0b0b"
 
-    _full = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv").select(
+    _a = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv").select(
         "bin_order", "gap_bin", "n_pooled"
     )
-    _pooled = pl.read_csv(SHARE_DIR / "coadmin_gap_pooled.csv").select(
-        "bin_order", "gap_bin", "n_pooled"
-    )
-    _a_shape = pl.concat([_full, _pooled]).sort("bin_order")
     _c = pl.read_csv(SHARE_DIR / "index_gap_distribution.csv").select(
         "bin_order", "gap_bin", "n"
     )
 
-    _a_bins = set(_a_shape.get_column("gap_bin").to_list())
-    _c_bins = set(_c.get_column("gap_bin").to_list())
-    _n_a_missing = len(GAP_BIN_LABELS) - len(_a_bins)
-    _n_c_missing = len(GAP_BIN_LABELS) - len(_c_bins)
-    _y_ref = max(int(_a_shape.get_column("n_pooled").max() or 0), int(_c.get_column("n").max() or 0))
+    _y_ref = max(int(_a.get_column("n_pooled").max() or 0), int(_c.get_column("n").max() or 0))
 
     _fig, _ax = plt.subplots(figsize=(11, 6.5))
 
-    for _row in _a_shape.iter_rows(named=True):
+    for _row in _a.iter_rows(named=True):
         _o = _row["bin_order"]
         if _row["n_pooled"] > 0:
             _ax.bar([_o - 0.2], [_row["n_pooled"]], width=0.4, color=_BLUE)
         else:
             mark_zero(_ax, _o - 0.2, _y_ref, _BLUE)
-    for _b in GAP_BIN_LABELS:
-        if _b not in _a_bins:
-            mark_withheld(_ax, GAP_BIN_LABELS.index(_b) - 0.2, _BLUE)
 
     for _row in _c.iter_rows(named=True):
         _o = _row["bin_order"]
@@ -1514,9 +1177,6 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
             _ax.bar([_o + 0.2], [_row["n"]], width=0.4, color=_AQUA, edgecolor=_EDGE, linewidth=0.6)
         else:
             mark_zero(_ax, _o + 0.2, _y_ref, _AQUA)
-    for _b in GAP_BIN_LABELS:
-        if _b not in _c_bins:
-            mark_withheld(_ax, GAP_BIN_LABELS.index(_b) + 0.2, _AQUA)
 
     _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
     _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
@@ -1538,15 +1198,11 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
         _ax.plot([], [], color=_AQUA, lw=6, label="C — index paralytics")[0],
         _ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
                  label="published zero (measured, exactly 0)")[0],
-        _ax.plot([], [], marker="x", markersize=8, markeredgewidth=2, color="0.3",
-                 linestyle="None", label="withheld entirely (n<10 rule; drawn below axis)")[0],
     ]
     _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
     _ax.set_title(
         "C.1 — what the fold removed\n"
-        "C is empty at and below 15 minutes by construction; this is the confirmation\n"
-        f"A: {_n_a_missing} bin(s) withheld entirely; "
-        f"C: {_n_c_missing} bin(s) withheld under the n>=10 rule"
+        "C is empty at and below 15 minutes by construction; this is the confirmation"
     )
     _fig.tight_layout()
     _fig.subplots_adjust(bottom=0.38)

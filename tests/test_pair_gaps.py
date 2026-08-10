@@ -58,7 +58,6 @@ _NS = {
 gap_bin_expr = _load_from_notebook("gap_bin_expr", _NS)
 epoch_minutes = _load_from_notebook("epoch_minutes", {"pl": pl})
 all_pair_gaps = _load_from_notebook("all_pair_gaps", {"pl": pl, "epoch_minutes": epoch_minutes})
-classify_bin_mode = _load_from_notebook("classify_bin_mode", {"MIN_CELL": 10})
 
 BASE = datetime.datetime(2024, 3, 1, 12, 0)
 
@@ -182,38 +181,3 @@ def test_a_single_administration_yields_no_pairs():
 def test_empty_input_yields_an_empty_frame_not_an_error():
     empty = _admins([]).cast({"encounter_block": pl.Int64})
     assert all_pair_gaps(empty).height == 0
-
-
-# ------------------------------------------------------ secondary suppression modes
-
-
-def test_all_zero_bin_is_full():
-    """Nothing happened in the bin -- zero identifies nobody, so it is publishable in
-    both decomposed tables."""
-    assert classify_bin_mode(0, 0, []) == "FULL"
-
-
-def test_small_pooled_total_is_none():
-    """`n_pooled` itself in 1..9 means the bin cannot even be pooled-only -- nothing
-    about it is published anywhere."""
-    assert classify_bin_mode(6, 0, [6]) == "NONE"
-
-
-def test_large_pooled_total_with_one_small_component_is_pooled_only():
-    """This is the exact (5,10] leak: n_pooled=18 clears MIN_CELL, but
-    vecuronium+vecuronium=6 does not. Publishing n_pooled alone is safe; publishing the
-    same/cross split is not, because rocuronium+rocuronium=12 published beside
-    n_same_agent=18 recovers the withheld 6 by subtraction."""
-    assert classify_bin_mode(18, 0, [12, 6]) == "POOLED_ONLY"
-
-
-def test_every_component_at_or_above_min_cell_is_full():
-    assert classify_bin_mode(45, 0, [29, 16]) == "FULL"
-
-
-def test_a_small_cross_agent_aggregate_forces_pooled_only_even_if_all_pairs_are_large():
-    """`n_cross_agent` is itself a published component (in coadmin_gap_distribution.csv)
-    distinct from the individual agent_pair rows, and must independently clear
-    MIN_CELL -- it is not enough for every agent_pair count to be large if their
-    cross-agent aggregate is not."""
-    assert classify_bin_mode(15, 5, [10, 5]) == "POOLED_ONLY"

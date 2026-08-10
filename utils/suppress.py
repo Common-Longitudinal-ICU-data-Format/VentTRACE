@@ -1,53 +1,69 @@
-"""The n >= 10 minimum cell rule, applied to everything written to final_no_phi.
+"""The row-level disclosure boundary, applied to everything written to final_no_phi.
 
 The ONLY shared module in this project. Spec P23 records why this one is shared
-when nothing else is: a suppression bug is a disclosure failure, not an analysis
-failure, and it has to be impossible rather than merely unlikely.
+when nothing else is: a disclosure bug is a different kind of failure than an
+analysis bug, and it has to be impossible rather than merely unlikely.
 
-The rule (spec §8):
-  * a published count of 1..9 is suppressed
-  * suppression drops the WHOLE ROW, not the cell -- a blanked cell in a table
-    whose margins are published is often recoverable by subtraction
-  * a count of exactly ZERO is published -- it identifies nobody, and dropping it
-    would turn "this never happened" into "this is missing"
-  * nothing is ever silent: what was dropped is printed
+The rule (spec P21, P23):
+  * the disclosure boundary is row-level versus aggregate, not cell size -- an
+    aggregate count is published at its true value, including counts of 1 to 9.
+    A binned count is a property of a bin, not of a person.
+  * what may never leave the site is a row that describes one person: an
+    identifier column, or a table of pure row detail with the identifiers
+    stripped (still row detail, just anonymised detail).
+  * nothing is filtered, nothing is silent: every write is printed.
+
+The n>=10 minimum-cell rule this module used to enforce is retired (P21, P24
+withdrawn). It bought deniability for a single cell and paid for it in a
+machinery of secondary suppression that produced its own leaks and, even once
+those were closed, delivered only a bound on the withheld value rather than the
+deniability it advertised. A rule that must be defended by a second rule that
+must be defended by a third is not protecting anything. What protects the
+patient is the prohibition below, which has never moved: nothing row-level, no
+`patient_id`, no record that describes one person, ever leaves the site.
 """
 
 import polars as pl
 
-MIN_CELL = 10
+_EXPLICIT_ID_COLUMNS = {"patient_id", "hospitalization_id", "encounter_block", "p_num"}
+_ID_EXCEPTIONS = {"cohort_run_id"}  # a provenance stamp, not an identifier
 
 
-def small_cell_mask(df, count_cols, min_cell=MIN_CELL):
-    """True for rows that must not be published."""
-    for col in count_cols:
-        assert col in df.columns, f"count column {col!r} is not in the frame"
-    mask = pl.lit(False)
-    for col in count_cols:
-        mask = mask | ((pl.col(col) > 0) & (pl.col(col) < min_cell))
-    return df.select(mask.alias("_m")).get_column("_m")
-
-
-def apply_min_cell(df, count_cols, label, min_cell=MIN_CELL):
-    """Split a frame into (publishable, suppressed). Neither is written here."""
-    mask = small_cell_mask(df, count_cols, min_cell)
-    return df.filter(~mask), df.filter(mask)
-
-
-def publish(df, path, count_cols, label, min_cell=MIN_CELL):
-    """Suppress, write the survivors to `path` as CSV, report the loss, return them.
+def publish(df, path, label):
+    """Write `df` to `path` as CSV, report what was written, and return it unchanged.
 
     Every write to final_no_phi goes through this function. Writing a CSV to that
     directory by any other route is a bug.
+
+    Refuses (raises AssertionError) rather than writes when:
+      * the frame carries an identifier column -- any of `patient_id`,
+        `hospitalization_id`, `encounter_block`, `p_num`, or any column whose name
+        ends in `_id`. `cohort_run_id` is a provenance stamp, not an identifier,
+        and is exempted.
+      * the frame has no aggregate count column at all -- no column named `n` or
+        starting with `n_`. A table of pure row detail with the ids stripped is
+        still row detail.
+
+    Nothing is filtered: a row with n = 3 is written, a row with n = 0 is written.
     """
-    kept, dropped = apply_min_cell(df, count_cols, label, min_cell)
-    if dropped.height:
-        total = sum(dropped.get_column(c).sum() for c in count_cols)
-        print(
-            f"  [{label}] {dropped.height} row(s) suppressed under the n>={min_cell} "
-            f"rule on {count_cols}; {total} observation(s) withheld"
-        )
-        print(dropped)
-    kept.write_csv(path)
-    print(f"  [{label}] {kept.height} row(s) -> {path}")
-    return kept
+    id_cols = sorted(
+        c
+        for c in df.columns
+        if c not in _ID_EXCEPTIONS
+        and (c in _EXPLICIT_ID_COLUMNS or c.endswith("_id"))
+    )
+    assert not id_cols, (
+        f"[{label}] refusing to publish: frame carries identifier column(s) "
+        f"{id_cols} -- nothing row-level may leave the site (spec P21/P23)"
+    )
+
+    has_count_col = any(c == "n" or c.startswith("n_") for c in df.columns)
+    assert has_count_col, (
+        f"[{label}] refusing to publish: frame has no aggregate count column "
+        "(no column named 'n' or starting with 'n_') -- a table of pure row "
+        "detail with the ids stripped is still row detail (spec P21/P23)"
+    )
+
+    df.write_csv(path)
+    print(f"  [{label}] {df.height} row(s) -> {path}")
+    return df
