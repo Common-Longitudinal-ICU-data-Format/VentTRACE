@@ -135,9 +135,9 @@ def _(
     TRACH_WINDOW_HOURS,
 ):
     # Every parameter that affects a result is echoed before anything runs (spec §4).
-    # window_hours and episode_gap_hours are NOT echoed here: 01 no longer consumes
-    # either. Both moved to 02 with t0 (D34, D36), and echoing a parameter this notebook
-    # cannot act on is the "silent default" confusion §4 exists to prevent.
+    # collapse_gap_minutes and context_window_minutes are NOT echoed here: they belong to
+    # 02 and 03, and echoing a parameter this notebook cannot act on is the "silent
+    # default" confusion §4 exists to prevent.
     import datetime as _dt
 
     COHORT_RUN_ID = _dt.datetime.now().replace(microsecond=0).isoformat()
@@ -664,8 +664,11 @@ def _(mo):
         ## Waterfall and t0
 
         `bfill=False` — forward-fill only. Backfilling could propagate a device backwards
-        in time and manufacture an IMV row earlier than the first real charting, sliding
-        t0 and with it every ±`window_hours` detection window downstream.
+        in time and manufacture an IMV row earlier than the first real charting. Under the
+        superseded design that slid t0 itself; under the paralytic anchor it instead
+        manufactures a *device transition* — `03` would read a non-IMV→IMV change that the
+        chart never recorded, inside the ±`context_window_minutes` window around the index
+        paralytic. The hazard moved; it did not go away.
 
         The waterfall runs per `hospitalization_id`, but rows are then mapped to
         `encounter_block` and ordered **within the block**, which is what makes stitching
