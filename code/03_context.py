@@ -536,7 +536,13 @@ def _(SHARE_DIR, context_d, pl, publish):
             .otherwise(pl.col("_reason")),
         )
         .select("imv_transition", "no_transition_reason", "n", "n_blocks")
-        .sort("n", descending=True)
+        # Tiebreak so the row order is byte-identical across runs: polars' sort is
+        # unstable and two reasons with equal n would otherwise swap between runs.
+        .sort(
+            ["n", "imv_transition", "no_transition_reason"],
+            descending=[True, False, False],
+            nulls_last=True,
+        )
     )
     publish(
         transition_summary,
@@ -570,7 +576,11 @@ def _(SHARE_DIR, context_d, pl, publish):
         )
         .group_by(["prior_device_category", "transition_opens_block"])
         .agg(n=pl.len())
-        .sort("n", descending=True)
+        # Tiebreak for byte-identical row order across runs; polars' sort is unstable.
+        .sort(
+            ["n", "prior_device_category", "transition_opens_block"],
+            descending=[True, False, False],
+        )
     )
     publish(
         prior_device,
@@ -1219,7 +1229,12 @@ def _(
         )
         .group_by(["any_sedative", "agent_set"])
         .agg(n=pl.len(), median_n_admins=pl.col("n_sedative_admins").median())
-        .sort("n", descending=True)
+        # Tiebreak for byte-identical row order across runs. This table has many ties --
+        # eleven of its fourteen agent_set rows have n below 10 -- so without it the
+        # published CSV genuinely reorders between runs, which was observed.
+        .sort(
+            ["n", "any_sedative", "agent_set"], descending=[True, False, False]
+        )
     )
     publish(
         sedation_summary,

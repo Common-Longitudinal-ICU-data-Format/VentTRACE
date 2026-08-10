@@ -1017,7 +1017,11 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
             median_span_min=pl.col("span_minutes").median(),
             max_span_min=pl.col("span_minutes").max(),
         )
-        .sort("n_index", descending=True)
+        # agent_label is the tiebreak, not decoration: polars' sort is unstable, so two
+        # agents with equal n_index would swap places between runs and the published CSV
+        # would stop being byte-identical (spec §6.4). Every published table sorted on a
+        # non-unique key carries a tiebreak for this reason.
+        .sort(["n_index", "agent_label"], descending=[True, False])
     )
     publish(
         index_summary,
