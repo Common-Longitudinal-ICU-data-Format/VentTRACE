@@ -332,6 +332,203 @@ def _(
 def _(mo):
     mo.md(
         r"""
+        ## A — the co-administration gap distribution
+
+        Every **unordered pair** of paralytic administrations inside an `encounter_block`,
+        same-agent pairs included (P9). This is the evidence for the fifteen-minute
+        boundary, and it is computed here — before the fold — so that it depends on
+        nothing the fold decides.
+
+        The same/cross split is the point of the table. `rocuronium → rocuronium` at three
+        minutes is a **redose**; `rocuronium → succinylcholine` at three minutes is a
+        **co-administration**. The pooled histogram cannot tell them apart, and they
+        justify the boundary for different reasons.
+
+        The 7-day cap is a **bin, not a filter** (P10). A filter would make the histogram's
+        own denominator depend on the cap, so two sites with different long-stay mixes
+        would not be comparable even on the short bins.
+        """
+    )
+    return
+
+
+@app.cell
+def _(GAP_CUT_BREAKS, GAP_CUT_LABELS, pl):
+    def gap_bin_expr(col="gap_minutes"):
+        """Assign a gap in minutes to one of the 15 named bins.
+
+        Every interval is left-open and right-closed -- (a, b] -- so a gap of exactly 15
+        minutes lands in `(10,15]` and 15.0001 lands in `(15,30]`. That edge is the line
+        the fold is drawn at, and putting a value on the wrong side of it would make
+        Figure A.1 disagree with the boundary it is evidence for.
+
+        An exact zero is carved out of the first cut bin and given its own label: two
+        agents charted on the same minute is the single most informative value in this
+        distribution and pooling it with "under a minute" would hide it.
+        """
+        return (
+            pl.when(pl.col(col) == 0)
+            .then(pl.lit("0"))
+            .otherwise(
+                pl.col(col).cut(GAP_CUT_BREAKS, labels=GAP_CUT_LABELS).cast(pl.String)
+            )
+            .alias("gap_bin")
+        )
+
+    return (gap_bin_expr,)
+
+
+@app.cell
+def _(epoch_minutes, pl):
+    def all_pair_gaps(df, time_col="admin_dttm", agent_col="med_category"):
+        """Every unordered pair within each encounter_block. O(n^2) per block, by design.
+
+        Adjacent-only pairing would miss `roc 12:00 ... vec 12:10` whenever anything is
+        charted between them, and the sub-15-minute mass is exactly where the threshold
+        decision lives (P9).
+
+        The join is on `encounter_block` and nothing else, so a pair can never span two
+        blocks. `_i < _i_r` takes each unordered pair once. The agent label is the two
+        agents sorted alphabetically and joined with `+`, so one pair is one row rather
+        than two orderings of itself.
+
+        Returns encounter_block, gap_minutes, agent_pair, is_same_agent.
+        """
+        indexed = (
+            df.sort(["encounter_block", time_col, agent_col])
+            .with_row_index("_i")
+            .select(
+                "encounter_block",
+                "_i",
+                _t=epoch_minutes(time_col),
+                _a=pl.col(agent_col),
+            )
+        )
+        return (
+            indexed.join(indexed, on="encounter_block", how="inner", suffix="_r")
+            .filter(pl.col("_i") < pl.col("_i_r"))
+            .select(
+                "encounter_block",
+                gap_minutes=(pl.col("_t_r") - pl.col("_t")).abs().round(3),
+                agent_pair=pl.concat_str(
+                    pl.min_horizontal("_a", "_a_r"),
+                    pl.lit("+"),
+                    pl.max_horizontal("_a", "_a_r"),
+                ),
+                is_same_agent=pl.col("_a") == pl.col("_a_r"),
+            )
+        )
+
+    return (all_pair_gaps,)
+
+
+@app.cell
+def _(MAX_TOTAL_PAIRS, all_pair_gaps, gap_bin_expr, med_admin, pl):
+    _per_block = med_admin.group_by("encounter_block").agg(n=pl.len())
+    _expected = (_per_block.get_column("n") * (_per_block.get_column("n") - 1) // 2).sum()
+
+    print(f"administrations per block: max {_per_block.get_column('n').max():,}, "
+          f"median {_per_block.get_column('n').median()}")
+    print("ten densest blocks:")
+    print(_per_block.sort("n", descending=True).head(10))
+    print(f"pairs to enumerate       : {_expected:,}")
+
+    # A MEMORY ceiling, not a clinical one. A site that trips this has charting unlike
+    # anything this design was checked against; read the densest blocks above and decide
+    # deliberately rather than raising the constant.
+    assert _expected <= MAX_TOTAL_PAIRS, (
+        f"{_expected:,} pairs exceeds MAX_TOTAL_PAIRS ({MAX_TOTAL_PAIRS:,}). This is a "
+        "memory guard, not a study parameter -- inspect the densest blocks printed above "
+        "before changing it."
+    )
+
+    coadmin_pairs = all_pair_gaps(med_admin).with_columns(gap_bin_expr())
+    assert coadmin_pairs.height == _expected, (
+        f"enumerated {coadmin_pairs.height:,} pairs but expected {_expected:,} -- the join "
+        "either crossed an encounter_block boundary or double-counted an unordered pair"
+    )
+    assert coadmin_pairs.get_column("gap_bin").null_count() == 0, "a gap fell outside every bin"
+    return (coadmin_pairs,)
+
+
+@app.cell
+def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, med_admin, pl, publish):
+    admin_summary = (
+        med_admin.group_by(["med_category", "mar_action_category"])
+        .agg(
+            n_administrations=pl.len(),
+            n_blocks=pl.col("encounter_block").n_unique(),
+            n_patients=pl.col("patient_id").n_unique(),
+        )
+        .sort(["med_category", "mar_action_category"])
+    )
+    publish(
+        admin_summary,
+        SHARE_DIR / "paralytic_admin_summary.csv",
+        ["n_administrations", "n_blocks", "n_patients"],
+        "paralytic_admin_summary",
+    )
+
+    # Pooled, same-agent and cross-agent as three columns on one row per bin, so a reader
+    # sees the split without joining two tables. Reindexed onto the full bin list so an
+    # empty bin is published as a zero rather than being absent -- "this never happened"
+    # and "this is missing" are different statements (§8).
+    _counts = (
+        coadmin_pairs.group_by("gap_bin")
+        .agg(
+            n_pooled=pl.len(),
+            n_same_agent=pl.col("is_same_agent").sum(),
+            n_cross_agent=(~pl.col("is_same_agent")).sum(),
+        )
+    )
+    gap_distribution = (
+        pl.DataFrame({"gap_bin": GAP_BIN_LABELS})
+        .with_row_index("bin_order")
+        .join(_counts, on="gap_bin", how="left")
+        .with_columns(
+            pl.col("n_pooled").fill_null(0),
+            pl.col("n_same_agent").fill_null(0),
+            pl.col("n_cross_agent").fill_null(0),
+        )
+        .sort("bin_order")
+    )
+    publish(
+        gap_distribution,
+        SHARE_DIR / "coadmin_gap_distribution.csv",
+        ["n_pooled", "n_same_agent", "n_cross_agent"],
+        "coadmin_gap_distribution",
+    )
+
+    gap_by_pair = (
+        coadmin_pairs.group_by(["agent_pair", "gap_bin"])
+        .agg(n=pl.len())
+        .join(
+            pl.DataFrame({"gap_bin": GAP_BIN_LABELS}).with_row_index("bin_order"),
+            on="gap_bin",
+            how="left",
+        )
+        .sort(["agent_pair", "bin_order"])
+    )
+    publish(
+        gap_by_pair,
+        SHARE_DIR / "coadmin_gap_by_pair.csv",
+        ["n"],
+        "coadmin_gap_by_pair",
+    )
+
+    print("\nsub-15-minute mass, the boundary evidence:")
+    print(
+        gap_distribution.filter(
+            pl.col("gap_bin").is_in(["0", "(0,1]", "(1,2]", "(2,5]", "(5,10]", "(10,15]"])
+        )
+    )
+    return (gap_distribution,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
         ## B — the fold: anchor and close at 15 minutes
 
         ```
