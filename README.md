@@ -47,8 +47,8 @@ See the [clifpy user guide](https://common-longitudinal-icu-data-format.github.i
 > [!WARNING]
 > **Never upload patient-level data to Box.** Only **aggregate** results may be placed in
 > [`output/final_no_phi/`](output/README.md) and shared with the project PI / consortium:
-> - No `patient_id` or any row-level / individual patient records.
-> - Minimum cell size **n ≥ 10** for every reported statistic (prevents re-identification).
+> - No `patient_id` or any row-level / individual patient records — no identifier column, no
+>   raw timestamp, nothing that describes one person.
 > - No raw `.csv` / `.parquet` data files.
 >
 > See [`output/README.md`](output/README.md) for the file-naming convention and

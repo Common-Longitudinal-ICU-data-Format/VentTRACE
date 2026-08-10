@@ -47,6 +47,6 @@ Point `data_directory` at your CLIF tables when you're ready to run on real data
 
 4. **Analysis** (`04`, skeleton)
    - The main analysis. Write **aggregate** results to
-     [`output/final_no_phi/`](../output/README.md) — no row-level data, every reported statistic
-     n ≥ 10 (see the data-security rules in [`output/README.md`](../output/README.md) and
-     [`../guides/primer.md`](../guides/primer.md)).
+     [`output/final_no_phi/`](../output/README.md) — no row-level data: no `patient_id`, no
+     `hospitalization_id`, no identifier column, no raw timestamp (see the data-security rules
+     in [`output/README.md`](../output/README.md) and [`../guides/primer.md`](../guides/primer.md)).

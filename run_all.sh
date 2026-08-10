@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run the VentTRACE pipeline, in order, logging each step.
 #
-#   ./run_all.sh            # 01 .. 07
-#   ./run_all.sh 05 06 07   # only those steps
+#   ./run_all.sh            # 01 .. 03
+#   ./run_all.sh 02 03      # only those steps
 #
 # Always launches from the repo root: config's output_directory is "./output",
 # a path relative to the working directory, so where you start decides where
@@ -16,8 +16,7 @@ cd "$(dirname "$0")"
   exit 1
 }
 
-STEPS=(01_cohort 02_index_imv 03_method_sedative 04_method_paralytic \
-       05_method_pair 06_reference_cpt 07_agreement)
+STEPS=(01_cohort 02_index_paralytic 03_context)
 
 if [ $# -gt 0 ]; then
   picked=()
