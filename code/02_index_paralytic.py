@@ -1204,27 +1204,82 @@ def _():
 def _(mo):
     mo.md(
         """
-        ### Figure A.1 — co-administration gaps, same/cross split where it is safe to show
+        ### Marking a published zero and a withheld bin so neither is invisible
 
-        The bar *shape* -- total pairs per bin -- comes from the union of
-        `coadmin_gap_distribution.csv`'s `n_pooled` and `coadmin_gap_pooled.csv`'s
-        `n_pooled`, so the long tail is visible even though most of it is pooled-only. The
-        same-agent / cross-agent split is overlaid only on the bins present in
-        `coadmin_gap_distribution.csv` (mode FULL): two colored bars. A pooled-only bin
-        (mode POOLED_ONLY) is drawn as one wide grey hatched bar instead -- its total pair
-        count is real and shown, but the split is withheld under the n>=10 rule, and a
-        hatched grey bar cannot be mistaken for a colored one. It is never drawn as zero:
-        the count happened, it just cannot be decomposed without risking
-        re-identification. A bin published in neither file (mode NONE) has no bar at all;
-        its tick stays on the axis so the missing bin cannot be misread as merged into a
-        neighbour.
+        A count is zero exactly when polars computed zero; a count is *absent* exactly
+        when the row never cleared the n>=10 rule (`utils/suppress.py` publishes a zero
+        deliberately -- "this never happened" must never look like "this is missing"). A
+        bar's height cannot show that difference: a zero-height bar and a bar that was
+        never drawn look identical, and on a log axis a zero-height bar cannot be drawn at
+        all. Both figures below therefore plot two extra glyphs instead of relying on bar
+        height alone, and use a linear y-axis rather than log -- with roughly half the
+        cells in these tables exactly zero, a log axis cannot place zero on it in the
+        first place.
+
+        A small **diamond sitting just above the baseline, in the series' own color**,
+        marks a published, exactly-zero count. A **cross drawn below the x-axis**, in
+        axes-fraction space rather than data space so its vertical position can never be
+        read as a small data value, marks a bin (or a series within a bin) that is
+        withheld entirely -- nothing about it is published anywhere.
         """
     )
     return
 
 
 @app.cell
-def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, pl, plt):
+def _(plt):
+    def mark_zero(ax, x, y_ref, color):
+        """A published, exactly-zero value: a diamond just above the baseline.
+
+        Placed at a small fixed fraction of the axis range rather than at y=0 itself, so
+        it is not clipped by the x-axis spine, and shaped as a marker rather than a bar
+        so it can never be mistaken for a bar of real (if tiny) height.
+        """
+        ax.plot(
+            [x], [y_ref * 0.02], marker="D", markersize=7, color=color,
+            linestyle="None", zorder=5,
+        )
+
+    def mark_withheld(ax, x, color):
+        """Nothing published for this bin/series: a cross drawn BELOW the x-axis.
+
+        Uses the axes' x-data / y-axes-fraction transform, so the vertical position is
+        fixed relative to the axes box, not the data scale -- it carries no magnitude and
+        cannot be misread as a small measured value.
+        """
+        ax.plot(
+            [x], [-0.22], marker="x", markersize=8, markeredgewidth=2, color=color,
+            linestyle="None", transform=ax.get_xaxis_transform(), clip_on=False, zorder=5,
+        )
+
+    return mark_withheld, mark_zero
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Figure A.1 — co-administration gaps, three states per bin
+
+        The bar *shape* -- total pairs per bin -- comes from the union of
+        `coadmin_gap_distribution.csv`'s `n_pooled` and `coadmin_gap_pooled.csv`'s
+        `n_pooled`. The same-agent / cross-agent split is overlaid only on the bins
+        present in `coadmin_gap_distribution.csv` (mode FULL): a colored bar where that
+        series' count is positive, a colored diamond on the baseline where it is a
+        *published* zero -- `n_cross_agent` is zero in every FULL bin at this site, which
+        is the actual result, and the diamond is what lets a reader see that rather than
+        mistake it for a gap in the data. A pooled-only bin (mode POOLED_ONLY) is one wide
+        grey hatched bar: its total is real and shown, but the split is withheld under the
+        n>=10 rule -- unchanged from before. A bin published in neither file (mode NONE)
+        gets a withheld cross below the axis, in both series' colors, since nothing about
+        either series is known there.
+        """
+    )
+    return
+
+
+@app.cell
+def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
     # Fixed categorical color order (dataviz skill), never cycled: blue is always
     # same-agent, orange is always cross-agent, everywhere the pair appears. Grey +
     # 45-degree hatch marks "total known, split withheld" -- a texture, not a third hue,
@@ -1236,53 +1291,79 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, pl, plt):
 
     _full = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv")
     _pooled = pl.read_csv(SHARE_DIR / "coadmin_gap_pooled.csv")
+    _full_bins = set(_full.get_column("gap_bin").to_list())
+    _pooled_bins = set(_pooled.get_column("gap_bin").to_list())
+    _none_bins = [b for b in GAP_BIN_LABELS if b not in _full_bins and b not in _pooled_bins]
 
     _n_pooled_only = _pooled.height
-    _n_none = len(GAP_BIN_LABELS) - _full.height - _pooled.height
-
-    _fig, _ax = plt.subplots(figsize=(11, 5))
-
-    # FULL bins: the same/cross split, two colored bars per bin.
-    _ax.bar(
-        [o - 0.2 for o in _full.get_column("bin_order")],
-        _full.get_column("n_same_agent"),
-        width=0.4, color=_BLUE, label="same agent (redose)",
+    _n_none = len(_none_bins)
+    _y_ref = max(
+        int(_full.get_column("n_same_agent").max() or 0),
+        int(_full.get_column("n_cross_agent").max() or 0),
+        int(_pooled.get_column("n_pooled").max() or 0),
     )
-    _ax.bar(
-        [o + 0.2 for o in _full.get_column("bin_order")],
-        _full.get_column("n_cross_agent"),
-        width=0.4, color=_ORANGE, label="different agents (co-administration)",
-    )
-    # POOLED_ONLY bins: one wide hatched bar, total only, no split.
+
+    _fig, _ax = plt.subplots(figsize=(11, 6.5))
+
+    # FULL bins: a bar for a positive count, a baseline diamond for a published zero.
+    for _row in _full.iter_rows(named=True):
+        _o = _row["bin_order"]
+        if _row["n_same_agent"] > 0:
+            _ax.bar([_o - 0.2], [_row["n_same_agent"]], width=0.4, color=_BLUE)
+        else:
+            mark_zero(_ax, _o - 0.2, _y_ref, _BLUE)
+        if _row["n_cross_agent"] > 0:
+            _ax.bar([_o + 0.2], [_row["n_cross_agent"]], width=0.4, color=_ORANGE)
+        else:
+            mark_zero(_ax, _o + 0.2, _y_ref, _ORANGE)
+
+    # POOLED_ONLY bins: one wide hatched bar, total only, no split. n_pooled >= MIN_CELL
+    # by construction (classify_bin_mode), so this bar is never zero-height.
     _ax.bar(
         _pooled.get_column("bin_order"), _pooled.get_column("n_pooled"),
         width=0.8, color=_GREY, edgecolor=_EDGE, hatch="///",
-        label="pooled total only — split withheld (n<10 rule)",
     )
+
+    # NONE bins: nothing published for either series -- a withheld cross per series,
+    # below the axis, in each series' own color.
+    for _b in _none_bins:
+        _o = GAP_BIN_LABELS.index(_b)
+        mark_withheld(_ax, _o - 0.15, _BLUE)
+        mark_withheld(_ax, _o + 0.15, _ORANGE)
 
     _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
     _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
     _ax.set_xlabel("gap between paralytic administrations")
     _ax.set_ylabel("pairs")
-    _ax.set_yscale("log")
+    _ax.set_ylim(bottom=0)
     _ax.set_axisbelow(True)
     _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
 
     _fold_x = GAP_BIN_LABELS.index("(10,15]") + 0.5
     _ax.axvline(_fold_x, color="#0b0b0b", linestyle="--", linewidth=1)
     _ax.text(
-        _fold_x + 0.1, _ax.get_ylim()[1] * 0.5,
+        _fold_x + 0.1, _ax.get_ylim()[1] * 0.92,
         "15 min\n(the fold)", fontsize=8, va="top", color="#0b0b0b",
     )
 
-    _ax.legend()
+    _handles = [
+        _ax.plot([], [], color=_BLUE, lw=6, label="same agent (redose)")[0],
+        _ax.plot([], [], color=_ORANGE, lw=6, label="different agents (co-administration)")[0],
+        _ax.plot([], [], color=_GREY, lw=6, label="pooled total only — split withheld (n<10 rule)")[0],
+        _ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
+                 label="published zero (measured, exactly 0)")[0],
+        _ax.plot([], [], marker="x", markersize=8, markeredgewidth=2, color="0.3",
+                 linestyle="None", label="withheld entirely (n<10 rule; drawn below axis)")[0],
+    ]
+    _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
     _ax.set_title(
         "A.1 — gaps between paralytic administrations, all pairs within an encounter\n"
         "15 minutes is a clinical definition, not a measured optimum (spec P7)\n"
         f"{_n_pooled_only} bin(s) pooled-only, split withheld; "
-        f"{_n_none} bin(s) withheld entirely and not shown"
+        f"{_n_none} bin(s) withheld entirely"
     )
     _fig.tight_layout()
+    _fig.subplots_adjust(bottom=0.38)
     _fig.savefig(FIG_DIR / "A1_coadmin_gap_distribution.png", dpi=150)
     plt.close(_fig)
     print(f"A1_coadmin_gap_distribution.png -> {FIG_DIR}")
@@ -1293,22 +1374,23 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, pl, plt):
 def _(mo):
     mo.md(
         """
-        ### Figure C.1 — what the fold removed
+        ### Figure C.1 — what the fold removed, three states per side
 
         A's total shape (the same union Figure A.1 uses) beside C's per-bin counts
-        (`index_gap_distribution.csv`), on the identical bin grid so the two histograms
-        line up bin for bin. The six leftmost bins are C's confirmation of the floor: zero
-        by construction, asserted above, and visibly zero here. A bin missing from either
-        series is a bin withheld under that table's own n>=10 rule -- dropped, not merged
-        into a neighbour, and never drawn as zero -- and the caption states how many that
-        was on each side.
+        (`index_gap_distribution.csv`), on the identical bin grid. Each side gets the same
+        treatment as A.1: a bar where that series has a real positive count, a colored
+        diamond on the baseline where it has a *published* zero, and a colored cross below
+        the axis where it has nothing published for that bin at all. The six leftmost bins
+        are C's confirmation of the 15-minute floor -- with this encoding they show six
+        aqua diamonds sitting on the baseline, an affirmative "measured, and it is zero,"
+        never a blank space indistinguishable from a suppressed row.
         """
     )
     return
 
 
 @app.cell
-def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, pl, plt):
+def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_withheld, mark_zero, pl, plt):
     # Blue stays "raw administrations" here too (same entity as A.1's bars); aqua is a
     # new entity, index paralytics, and gets its own slot rather than reusing orange
     # (which means "cross-agent" in A.1 and would misstate identity here).
@@ -1327,46 +1409,66 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, pl, plt):
         "bin_order", "gap_bin", "n"
     )
 
-    _n_a_missing = len(GAP_BIN_LABELS) - _a_shape.height
-    _n_c_missing = len(GAP_BIN_LABELS) - _c.height
+    _a_bins = set(_a_shape.get_column("gap_bin").to_list())
+    _c_bins = set(_c.get_column("gap_bin").to_list())
+    _n_a_missing = len(GAP_BIN_LABELS) - len(_a_bins)
+    _n_c_missing = len(GAP_BIN_LABELS) - len(_c_bins)
+    _y_ref = max(int(_a_shape.get_column("n_pooled").max() or 0), int(_c.get_column("n").max() or 0))
 
-    _fig, _ax = plt.subplots(figsize=(11, 5))
-    _ax.bar(
-        [o - 0.2 for o in _a_shape.get_column("bin_order")],
-        _a_shape.get_column("n_pooled"),
-        width=0.4, color=_BLUE, edgecolor=_EDGE, linewidth=0.6,
-        label="A — raw administrations (pooled total)",
-    )
-    _ax.bar(
-        [o + 0.2 for o in _c.get_column("bin_order")],
-        _c.get_column("n"),
-        width=0.4, color=_AQUA, edgecolor=_EDGE, linewidth=0.6,
-        label="C — index paralytics",
-    )
+    _fig, _ax = plt.subplots(figsize=(11, 6.5))
+
+    for _row in _a_shape.iter_rows(named=True):
+        _o = _row["bin_order"]
+        if _row["n_pooled"] > 0:
+            _ax.bar([_o - 0.2], [_row["n_pooled"]], width=0.4, color=_BLUE)
+        else:
+            mark_zero(_ax, _o - 0.2, _y_ref, _BLUE)
+    for _b in GAP_BIN_LABELS:
+        if _b not in _a_bins:
+            mark_withheld(_ax, GAP_BIN_LABELS.index(_b) - 0.2, _BLUE)
+
+    for _row in _c.iter_rows(named=True):
+        _o = _row["bin_order"]
+        if _row["n"] > 0:
+            _ax.bar([_o + 0.2], [_row["n"]], width=0.4, color=_AQUA, edgecolor=_EDGE, linewidth=0.6)
+        else:
+            mark_zero(_ax, _o + 0.2, _y_ref, _AQUA)
+    for _b in GAP_BIN_LABELS:
+        if _b not in _c_bins:
+            mark_withheld(_ax, GAP_BIN_LABELS.index(_b) + 0.2, _AQUA)
 
     _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
     _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
     _ax.set_xlabel("gap")
     _ax.set_ylabel("pairs")
-    _ax.set_yscale("log")
+    _ax.set_ylim(bottom=0)
     _ax.set_axisbelow(True)
     _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
 
     _fold_x = GAP_BIN_LABELS.index("(10,15]") + 0.5
     _ax.axvline(_fold_x, color="#0b0b0b", linestyle="--", linewidth=1)
     _ax.text(
-        _fold_x + 0.1, _ax.get_ylim()[1] * 0.5,
+        _fold_x + 0.1, _ax.get_ylim()[1] * 0.92,
         "15 min\n(the fold)", fontsize=8, va="top", color="#0b0b0b",
     )
 
-    _ax.legend()
+    _handles = [
+        _ax.plot([], [], color=_BLUE, lw=6, label="A — raw administrations (pooled total)")[0],
+        _ax.plot([], [], color=_AQUA, lw=6, label="C — index paralytics")[0],
+        _ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
+                 label="published zero (measured, exactly 0)")[0],
+        _ax.plot([], [], marker="x", markersize=8, markeredgewidth=2, color="0.3",
+                 linestyle="None", label="withheld entirely (n<10 rule; drawn below axis)")[0],
+    ]
+    _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
     _ax.set_title(
         "C.1 — what the fold removed\n"
         "C is empty at and below 15 minutes by construction; this is the confirmation\n"
-        f"A: {_n_a_missing} bin(s) withheld entirely, not shown; "
-        f"C: {_n_c_missing} bin(s) withheld under the n>=10 rule, not shown"
+        f"A: {_n_a_missing} bin(s) withheld entirely; "
+        f"C: {_n_c_missing} bin(s) withheld under the n>=10 rule"
     )
     _fig.tight_layout()
+    _fig.subplots_adjust(bottom=0.38)
     _fig.savefig(FIG_DIR / "C1_index_gap_distribution.png", dpi=150)
     plt.close(_fig)
     print(f"C1_index_gap_distribution.png -> {FIG_DIR}")
