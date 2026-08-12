@@ -20,6 +20,7 @@ import datetime
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 NOTEBOOK = Path(__file__).parent.parent / "code" / "04_covariates.py"
 NOTEBOOK_TREE = ast.parse(NOTEBOOK.read_text())
@@ -139,3 +140,41 @@ def test_survivor_is_not_dead_by_any_route():
     assert got["hospital_mortality"] is False
     assert got["icu_mortality"] is False
     assert got["icu_mortality_undeterminable"] is False
+
+
+def test_icu_mortality_implies_hospital_mortality_or_raises():
+    """The subset invariant, asserted on resolve_mortality's own output rather than
+    assumed from the input: it holds only if every ADT icu interval sits inside its
+    owning hospitalization's [admission_dttm, discharge_dttm] window. Here the icu
+    interval pokes out past discharge_dttm, so a death timed inside it lands outside
+    the stay -- icu_mortality True, hospital_mortality False -- and resolve_mortality
+    refuses to publish that rather than let ICU mortality exceed hospital mortality."""
+    outside_the_stay = DISCH + datetime.timedelta(days=5)
+    with pytest.raises(AssertionError, match="icu_mortality True but hospital_mortality False"):
+        resolve_mortality(
+            _block(
+                outside_the_stay,
+                "home",
+                icu_in=DISCH + datetime.timedelta(days=4),
+                icu_out=DISCH + datetime.timedelta(days=6),
+            )
+        )
+
+
+def test_icu_mortality_and_undeterminable_are_disjoint_or_raises():
+    """Same root cause as the test above, different symptom: discharge_category alone
+    makes the block hospital_mortality True (so the subset check passes), but the death
+    time still lands inside an icu interval that pokes out past discharge_dttm. That
+    death time is both 'inside an icu interval' (icu_mortality) and 'not inside the
+    stay' (icu_mortality_undeterminable) at once, which should be impossible by
+    construction and resolve_mortality refuses to publish."""
+    outside_the_stay = DISCH + datetime.timedelta(days=5)
+    with pytest.raises(AssertionError, match="icu_mortality_undeterminable"):
+        resolve_mortality(
+            _block(
+                outside_the_stay,
+                "expired",
+                icu_in=DISCH + datetime.timedelta(days=4),
+                icu_out=DISCH + datetime.timedelta(days=6),
+            )
+        )

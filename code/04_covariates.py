@@ -371,6 +371,22 @@ def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_na
         .join(bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner")
     )
 
+    # 01's cohort inclusion step already requires >=1 ADT row in {ed, icu} for every
+    # block in the cohort (see consort_cohort.csv). So a block with ZERO adt rows here
+    # is not a site fact -- it is this notebook's load or filter dropping rows. Checked
+    # before the icu subset, and before block_outcomes fills a missing los_icu_days with
+    # 0.0, because that fill is only correct once a missing block is ruled out.
+    _blocks_in_bridge = set(bridge.get_column("encounter_block").unique().to_list())
+    _blocks_in_adt = set(adt.get_column("encounter_block").unique().to_list())
+    _missing_from_adt = _blocks_in_bridge - _blocks_in_adt
+    assert not _missing_from_adt, (
+        f"{len(_missing_from_adt):,} encounter_block(s) present in bridge have no ADT "
+        "row at all in this notebook's load, but 01_cohort.py's inclusion criteria "
+        "guarantee every cohort block has >=1 ADT row in {ed, icu} -- this is an ADT "
+        "load or filter failure here in 04, not a site where the block never moved. "
+        f"first few: {sorted(_missing_from_adt)[:10]}"
+    )
+
     adt_icu = adt.filter(pl.col("location_category") == "icu")
 
     print(f"adt rows loaded : {adt.height:,}")
@@ -398,9 +414,15 @@ def _(pl):
                                        no death time, so no ICU attribution either way
 
         The bound on death_dttm is the whole point (see the module docstring of
-        tests/test_mortality_bound.py). The three flags are mutually consistent by
-        construction: icu_mortality and icu_mortality_undeterminable are both subsets of
-        hospital_mortality and are disjoint from each other.
+        tests/test_mortality_bound.py). The three flags are INTENDED to be mutually
+        consistent -- icu_mortality and icu_mortality_undeterminable both subsets of
+        hospital_mortality, and disjoint from each other -- but that consistency is not
+        free. It relies on every ADT icu interval sitting inside its owning
+        hospitalization's [admission_dttm, discharge_dttm] window, which this function has
+        no way to check (it never sees a hospitalization/icu-interval pairing, only the
+        already-joined death/interval columns). So the invariant is asserted on the
+        OUTPUT instead of assumed from the input: it needs no assumption about the ADT
+        extract and is the property that actually matters for publication.
         """
         _death_in_stay = (
             pl.col("death_dttm").is_not_null()
@@ -413,7 +435,7 @@ def _(pl):
             & (pl.col("death_dttm") >= pl.col("icu_in_dttm"))
             & (pl.col("death_dttm") <= pl.col("icu_out_dttm"))
         )
-        return (
+        _out = (
             df.group_by("encounter_block")
             .agg(
                 _death_in_stay.any().alias("_death_dated_in_stay"),
@@ -437,6 +459,34 @@ def _(pl):
             .drop("_death_dated_in_stay", "_expired_category")
             .sort("encounter_block")
         )
+
+        # icu_mortality subset of hospital_mortality: a violation means some ADT icu
+        # interval extends outside its own hospitalization's admission/discharge window,
+        # so a death timed inside the icu interval landed outside _death_in_stay.
+        _icu_not_hospital = _out.filter(
+            pl.col("icu_mortality") & ~pl.col("hospital_mortality")
+        )
+        assert _icu_not_hospital.is_empty(), (
+            f"{_icu_not_hospital.height:,} block(s) have icu_mortality True but "
+            "hospital_mortality False -- an ADT icu interval must extend outside its "
+            "owning hospitalization's [admission_dttm, discharge_dttm] window. Check "
+            f"the ADT extract for: {_icu_not_hospital.get_column('encounter_block').to_list()[:10]}"
+        )
+
+        # icu_mortality and icu_mortality_undeterminable disjoint: a violation means a
+        # block both had a death time landing inside an icu interval (icu_mortality) and
+        # was flagged as having no usable death time (icu_mortality_undeterminable) --
+        # only possible if the two death-time checks disagree, which again traces back to
+        # an icu interval outside the hospitalization window rather than a logic bug here.
+        _both = _out.filter(pl.col("icu_mortality") & pl.col("icu_mortality_undeterminable"))
+        assert _both.is_empty(), (
+            f"{_both.height:,} block(s) have both icu_mortality and "
+            "icu_mortality_undeterminable True, which should be impossible by "
+            "construction -- check the ADT extract for an icu interval outside its "
+            f"owning hospitalization's window: {_both.get_column('encounter_block').to_list()[:10]}"
+        )
+
+        return _out
 
     return (resolve_mortality,)
 
