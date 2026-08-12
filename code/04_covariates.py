@@ -258,5 +258,366 @@ def _(PHI_DIR, pl):
     return evidence_tier, index_context, spine
 
 
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## Attribute resolution
+
+        A block stitches up to four hospitalizations, so an attribute recorded *per
+        hospitalization* is undefined until we say which one. Every such case resolves to
+        **the hospitalization containing `t₀`** — the one the index paralytic was actually
+        charted under (spec §3.2). The alternative, the block's first hospitalization, was
+        rejected because an ED presentation and the inpatient admission that follows can
+        carry different recorded ages and different diagnosis lists, and the paralytic
+        belongs to exactly one of them.
+
+        LOS is **summed over the block's member hospitalizations**, not measured as the
+        block's span (P38): the span would count the stitch gaps, during which the patient
+        was not in the hospital.
+
+        Mortality is bounded (P37). `death_dttm` is patient-level in CLIF and can be
+        registry-sourced, so unbounded it fires for a patient discharged alive who died at
+        home months later.
+        """
+    )
+    return
+
+
+@app.cell
+def _(PHI_DIR, pl):
+    cohort_index = pl.read_parquet(PHI_DIR / "cohort_index.parquet")
+
+    bridge = (
+        cohort_index.select(["encounter_block", "patient_id", "list_hospitalization_id"])
+        .explode("list_hospitalization_id")
+        .rename({"list_hospitalization_id": "hospitalization_id"})
+    )
+    bridge_hosp_ids = bridge.get_column("hospitalization_id").unique().to_list()
+
+    # Many-to-one, asserted rather than assumed. A duplicated key fans out every row on
+    # the joins below, and the fan-out is self-consistent -- every downstream count would
+    # still agree with itself while being wrong. Same assertion, same reason, as `02`.
+    assert bridge.get_column("hospitalization_id").is_unique().all(), (
+        "a hospitalization_id appears in more than one encounter_block"
+    )
+
+    print(f"encounter blocks   : {cohort_index.height:,}")
+    print(f"hospitalization ids: {len(bridge_hosp_ids):,}")
+    return bridge, bridge_hosp_ids, cohort_index
+
+
+@app.cell
+def _(
+    DATA_DIR,
+    FILETYPE,
+    Hospitalization,
+    TIMEZONE,
+    bridge,
+    bridge_hosp_ids,
+    pl,
+    to_site_naive,
+):
+    _hosp_table = Hospitalization.from_file(
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=[
+            "hospitalization_id",
+            "patient_id",
+            "admission_dttm",
+            "discharge_dttm",
+            "age_at_admission",
+            "discharge_category",
+        ],
+        filters={"hospitalization_id": bridge_hosp_ids},
+    )
+    _hosp_pd = _hosp_table.df.copy()
+    for _c in ("admission_dttm", "discharge_dttm"):
+        _hosp_pd[_c] = to_site_naive(_hosp_pd[_c])
+
+    hospitalization = (
+        pl.from_pandas(_hosp_pd)
+        .with_columns(pl.col("discharge_category").str.to_lowercase())
+        .join(bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner")
+    )
+
+    print(f"hospitalizations loaded : {hospitalization.height:,}")
+    print(hospitalization.group_by("discharge_category").agg(n=pl.len()).sort("n", descending=True))
+    return (hospitalization,)
+
+
+@app.cell
+def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_naive):
+    # P20. The casing variants are enumerated at the from_file boundary because that
+    # filter runs before any normalisation we control, and a filter matching zero rows
+    # looks exactly like a site where the thing never happens.
+    _ICU_VARIANTS = ["icu", "ICU", "Icu"]
+
+    _adt_table = Adt.from_file(
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=["hospitalization_id", "location_category", "in_dttm", "out_dttm"],
+        filters={"hospitalization_id": bridge_hosp_ids},
+    )
+    _adt_pd = _adt_table.df.copy()
+    for _c in ("in_dttm", "out_dttm"):
+        _adt_pd[_c] = to_site_naive(_adt_pd[_c])
+
+    adt = (
+        pl.from_pandas(_adt_pd)
+        .with_columns(pl.col("location_category").str.to_lowercase())
+        .join(bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner")
+    )
+
+    adt_icu = adt.filter(pl.col("location_category") == "icu")
+
+    print(f"adt rows loaded : {adt.height:,}")
+    print(f"  icu rows      : {adt_icu.height:,}")
+    print(adt.group_by("location_category").agg(n=pl.len()).sort("n", descending=True).head(10))
+    return adt, adt_icu
+
+
+@app.cell
+def _(pl):
+    def resolve_mortality(df):
+        """P37's mortality rules, over a frame of block x hospitalization x icu-interval.
+
+        Expects: encounter_block, admission_dttm, discharge_dttm, discharge_category,
+        death_dttm, icu_in_dttm, icu_out_dttm. Rows repeat per icu interval; a block with
+        no icu row carries nulls in the two icu columns.
+
+        Returns one row per encounter_block with three booleans:
+
+          hospital_mortality           death_dttm inside a member hospitalization's
+                                       admission -> discharge interval, OR
+                                       discharge_category == 'expired'
+          icu_mortality                death_dttm inside an ADT icu interval
+          icu_mortality_undeterminable dead, but flagged by discharge_category alone --
+                                       no death time, so no ICU attribution either way
+
+        The bound on death_dttm is the whole point (see the module docstring of
+        tests/test_mortality_bound.py). The three flags are mutually consistent by
+        construction: icu_mortality and icu_mortality_undeterminable are both subsets of
+        hospital_mortality and are disjoint from each other.
+        """
+        _death_in_stay = (
+            pl.col("death_dttm").is_not_null()
+            & (pl.col("death_dttm") >= pl.col("admission_dttm"))
+            & (pl.col("death_dttm") <= pl.col("discharge_dttm"))
+        )
+        _death_in_icu = (
+            pl.col("death_dttm").is_not_null()
+            & pl.col("icu_in_dttm").is_not_null()
+            & (pl.col("death_dttm") >= pl.col("icu_in_dttm"))
+            & (pl.col("death_dttm") <= pl.col("icu_out_dttm"))
+        )
+        return (
+            df.group_by("encounter_block")
+            .agg(
+                _death_in_stay.any().alias("_death_dated_in_stay"),
+                (pl.col("discharge_category") == "expired").any().alias("_expired_category"),
+                _death_in_icu.any().alias("icu_mortality"),
+            )
+            .with_columns(
+                (pl.col("_death_dated_in_stay") | pl.col("_expired_category")).alias(
+                    "hospital_mortality"
+                )
+            )
+            .with_columns(
+                # Dead, but with no usable death time: the ICU question cannot be
+                # answered for this block in either direction. Published as its own
+                # count rather than absorbed into a numerator.
+                (
+                    pl.col("hospital_mortality")
+                    & ~pl.col("_death_dated_in_stay")
+                ).alias("icu_mortality_undeterminable")
+            )
+            .drop("_death_dated_in_stay", "_expired_category")
+            .sort("encounter_block")
+        )
+
+    return (resolve_mortality,)
+
+
+@app.cell
+def _(DATA_DIR, FILETYPE, Patient, TIMEZONE, cohort_index, pl, to_site_naive):
+    # REQUIRED table (spec §4). Absent, this fails loudly rather than publishing a
+    # Table 1 with no demographics -- race and ethnicity are the specific rows the
+    # senior-author review asked for.
+    _patient_ids = cohort_index.get_column("patient_id").unique().to_list()
+
+    _pat_table = Patient.from_file(
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=[
+            "patient_id",
+            "sex_category",
+            "race_category",
+            "ethnicity_category",
+            "death_dttm",
+        ],
+        filters={"patient_id": _patient_ids},
+    )
+    _pat_pd = _pat_table.df.copy()
+    _pat_pd["death_dttm"] = to_site_naive(_pat_pd["death_dttm"])
+
+    patient = pl.from_pandas(_pat_pd).with_columns(
+        pl.col("sex_category").str.to_lowercase(),
+        pl.col("race_category").str.to_lowercase(),
+        pl.col("ethnicity_category").str.to_lowercase(),
+    )
+
+    assert patient.get_column("patient_id").is_unique().all(), (
+        "patient_id is not unique in the patient table"
+    )
+    print(f"patients loaded : {patient.height:,}")
+    print(f"  with death_dttm : {patient.get_column('death_dttm').is_not_null().sum():,}")
+    return (patient,)
+
+
+@app.cell
+def _(adt_icu, epoch_minutes, hospitalization, patient, pl, resolve_mortality):
+    # LOS: summed over member hospitalizations, never the block's span (P38). The span
+    # would count the stitch gaps, during which the patient was not in the hospital.
+    los_hospital = (
+        hospitalization.with_columns(
+            (
+                (epoch_minutes("discharge_dttm") - epoch_minutes("admission_dttm")) / 1440.0
+            ).alias("_days")
+        )
+        .group_by("encounter_block")
+        .agg(pl.col("_days").sum().round(3).alias("los_hospital_days"))
+    )
+
+    los_icu = (
+        adt_icu.with_columns(
+            ((epoch_minutes("out_dttm") - epoch_minutes("in_dttm")) / 1440.0).alias("_days")
+        )
+        .group_by("encounter_block")
+        .agg(pl.col("_days").sum().round(3).alias("los_icu_days"))
+    )
+
+    # One row per (block, hospitalization, icu interval) for resolve_mortality. The
+    # cross-product is bounded: at most 4 hospitalizations times the block's icu rows.
+    _mortality_input = (
+        hospitalization.join(
+            patient.select("patient_id", "death_dttm"), on="patient_id", how="left"
+        )
+        .join(
+            adt_icu.select(
+                "encounter_block",
+                pl.col("in_dttm").alias("icu_in_dttm"),
+                pl.col("out_dttm").alias("icu_out_dttm"),
+            ),
+            on="encounter_block",
+            how="left",
+        )
+        .select(
+            "encounter_block",
+            "admission_dttm",
+            "discharge_dttm",
+            "discharge_category",
+            "death_dttm",
+            "icu_in_dttm",
+            "icu_out_dttm",
+        )
+    )
+
+    block_outcomes = (
+        resolve_mortality(_mortality_input)
+        .join(los_hospital, on="encounter_block", how="left")
+        .join(los_icu, on="encounter_block", how="left")
+        # A block with no ADT icu row spent no time in an ICU. That is a measured zero,
+        # not a missing value, and filling it keeps the median from being computed on a
+        # denominator that silently drops non-ICU blocks.
+        .with_columns(pl.col("los_icu_days").fill_null(0.0))
+        .sort("encounter_block")
+    )
+
+    print(f"blocks with outcomes : {block_outcomes.height:,}")
+    print(f"  hospital mortality : {block_outcomes.get_column('hospital_mortality').sum():,}")
+    print(f"  icu mortality      : {block_outcomes.get_column('icu_mortality').sum():,}")
+    print(
+        "  icu undeterminable : "
+        f"{block_outcomes.get_column('icu_mortality_undeterminable').sum():,}"
+    )
+    return block_outcomes, los_hospital, los_icu
+
+
+@app.cell
+def _(adt, block_outcomes, hospitalization, patient, pl, spine):
+    # The hospitalization containing t0 (spec §3.2). An interval join, not a "first
+    # hospitalization" shortcut: the ED presentation and the inpatient admission carry
+    # different ages and different diagnosis lists, and the paralytic belongs to one.
+    _hosp_at_t0 = (
+        spine.select("index_paralytic_id", "encounter_block", "t_dttm")
+        .join(hospitalization, on="encounter_block", how="left")
+        .filter(
+            (pl.col("t_dttm") >= pl.col("admission_dttm"))
+            & (pl.col("t_dttm") <= pl.col("discharge_dttm"))
+        )
+        # A t0 landing in two member hospitalizations would mean overlapping stays, which
+        # the stitcher should have merged. Take the earliest admission deterministically
+        # and assert the tie is rare enough to be visible.
+        .sort(["index_paralytic_id", "admission_dttm", "hospitalization_id"])
+        .group_by("index_paralytic_id", maintain_order=True)
+        .first()
+        .select(
+            "index_paralytic_id",
+            "hospitalization_id",
+            "age_at_admission",
+            # Carried onto the frame because Table 1 reports the discharge disposition
+            # breakdown; resolved to the hospitalization containing t0 like every other
+            # per-hospitalization attribute (spec §3.2).
+            "discharge_category",
+        )
+    )
+
+    _location_at_t0 = (
+        spine.select("index_paralytic_id", "encounter_block", "t_dttm")
+        .join(adt, on="encounter_block", how="left")
+        .filter(
+            (pl.col("t_dttm") >= pl.col("in_dttm")) & (pl.col("t_dttm") < pl.col("out_dttm"))
+        )
+        .sort(["index_paralytic_id", "in_dttm", "location_category"])
+        .group_by("index_paralytic_id", maintain_order=True)
+        .first()
+        .select(
+            "index_paralytic_id",
+            pl.when(pl.col("location_category").is_in(["ed", "icu"]))
+            .then(pl.col("location_category"))
+            .otherwise(pl.lit("other"))
+            .alias("location_at_index"),
+        )
+    )
+
+    spine_resolved = (
+        spine.join(_hosp_at_t0, on="index_paralytic_id", how="left")
+        .join(_location_at_t0, on="index_paralytic_id", how="left")
+        .join(
+            patient.select(
+                "patient_id", "sex_category", "race_category", "ethnicity_category"
+            ),
+            on="patient_id",
+            how="left",
+        )
+        .join(block_outcomes, on="encounter_block", how="left")
+        # No ADT row covers t0 -- a real charting gap, and a distinct value from `other`,
+        # which means "in a location that is neither ED nor ICU".
+        .with_columns(pl.col("location_at_index").fill_null("unknown"))
+    )
+
+    assert spine_resolved.height == spine.height, "attribute resolution changed the row count"
+
+    _unresolved = spine_resolved.get_column("hospitalization_id").null_count()
+    print(f"events resolved            : {spine_resolved.height:,}")
+    print(f"  t0 outside every stay    : {_unresolved:,}")
+    print(spine_resolved.group_by("location_at_index").agg(n=pl.len()).sort("n", descending=True))
+    return (spine_resolved,)
+
+
 if __name__ == "__main__":
     app.run()
