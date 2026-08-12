@@ -200,13 +200,23 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
     EVENT = "index event"
     BLOCK = "encounter block; repeated for each index event in the index-level table"
 
-    def table1_rows(df, race_levels, ethnicity_levels, sex_levels, discharge_levels):
-        """The full row inventory (spec §6), evaluated over whichever unit `df` carries."""
+    def table1_rows(df, race_levels, ethnicity_levels, sex_levels, discharge_levels, table_unit):
+        """The full row inventory (spec §6), evaluated over whichever unit `df` carries.
+
+        `table_unit` is the unit of THIS table's rows -- "encounter block" for the
+        p_num = 1 view, "index event" for the full view. It is a parameter rather than a
+        constant because `n_rows` counts exactly those rows, so hard-coding it labels the
+        block table's 1,547 as index events. That is the one failure the `unit` column
+        exists to prevent, so getting it wrong on the row that reports the table's own
+        size would undermine every other row's label.
+        """
         rows = []
 
-        rows.append({"statistic": "n_rows", "rule": "rows in this table's unit", "unit": EVENT, "value": float(df.height)})
-        rows.append({"statistic": "n_blocks", "rule": "distinct encounter_block", "unit": BLOCK, "value": float(df.get_column("encounter_block").n_unique())})
-        rows.append({"statistic": "n_patients", "rule": "distinct patient_id", "unit": BLOCK, "value": float(df.get_column("patient_id").n_unique())})
+        rows.append({"statistic": "n_rows", "rule": "rows in this table's unit", "unit": table_unit, "value": float(df.height)})
+        rows.append({"statistic": "n_blocks", "rule": "distinct encounter_block", "unit": "encounter block", "value": float(df.get_column("encounter_block").n_unique())})
+        # Patient granularity, not block: a patient can span more than one block, so this
+        # is neither a block count nor repeated per index event.
+        rows.append({"statistic": "n_patients", "rule": "distinct patient_id", "unit": "patient", "value": float(df.get_column("patient_id").n_unique())})
 
         rows += continuous_rows(df, "age_at_admission", "hospitalization containing t0", EVENT)
         rows += categorical_rows(df, "sex_category", "patient.sex_category, lower-cased", EVENT, sex_levels)
@@ -260,10 +270,13 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
         index_covariates.get_column("discharge_category").drop_nulls().unique().to_list()
     )
 
+    _TABLE_UNIT = {"block": "encounter block", "index": "index event"}
+
     def build_table1(df, label):
-        _overall = pl.DataFrame(table1_rows(df, _race, _eth, _sex, _disch)).rename(
-            {"value": "overall"}
-        )
+        _unit = _TABLE_UNIT[label]
+        _overall = pl.DataFrame(
+            table1_rows(df, _race, _eth, _sex, _disch, _unit)
+        ).rename({"value": "overall"})
         # `statistic` is the join key for every stratum column below, so a duplicate in
         # it fans the join out and corrupts the table rather than raising. Checked here,
         # with the offending names in the message, because the height assertion further
@@ -282,9 +295,9 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
         out = _overall
         for _stratum in STRATA:
             _sub = df.filter(pl.col("agent_stratum") == _stratum)
-            _col = pl.DataFrame(table1_rows(_sub, _race, _eth, _sex, _disch)).select(
-                "statistic", pl.col("value").alias(_stratum)
-            )
+            _col = pl.DataFrame(
+                table1_rows(_sub, _race, _eth, _sex, _disch, _unit)
+            ).select("statistic", pl.col("value").alias(_stratum))
             assert _col.height == out.height, (
                 f"stratum {_stratum} produced {_col.height} rows against the overall "
                 f"column's {out.height} -- the row inventory is not stratum-invariant"
