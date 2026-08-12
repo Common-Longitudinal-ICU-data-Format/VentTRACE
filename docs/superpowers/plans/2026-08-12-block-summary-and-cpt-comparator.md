@@ -2193,10 +2193,21 @@ def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, mark_zero, pl, plt):
             _x = _j + (_i - 1) * _width
             if _v is None:
                 # Source table absent at this site: null, not zero. Drawn as an open
-                # marker ABOVE the baseline so it cannot be confused with the filled
-                # diamond that means "measured, exactly 0".
-                _ax.plot([_x], [0], marker="o", markersize=7, markerfacecolor="none",
-                         color=_color, linestyle="None", clip_on=False)
+                # marker ABOVE the baseline so it differs from the filled diamond that
+                # means "measured, exactly 0" in POSITION as well as in shape -- shape
+                # alone is a thin distinction to hang a structural-versus-clinical
+                # reading on.
+                #
+                # The offset is in AXES coordinates via `get_xaxis_transform()` (x stays
+                # in data coordinates, y becomes a 0-1 axes fraction), never a fraction
+                # of the data range. A marker offset by a fraction of the frame's max is
+                # the exact bug `mark_zero`'s docstring in `02_index_paralytic.py`
+                # warns about: it stops being small relative to real bars as soon as
+                # small bars exist. An axes-fraction offset is derived from no data at
+                # all and so cannot drift with the frame.
+                _ax.plot([_x], [0.03], marker="o", markersize=7, markerfacecolor="none",
+                         color=_color, linestyle="None", clip_on=False,
+                         transform=_ax.get_xaxis_transform())
             elif _v > 0:
                 _ax.bar([_x], [_v], width=_width, color=_color)
             else:
@@ -2238,8 +2249,18 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     for _i, _row in enumerate(_cov.iter_rows(named=True)):
         _color = "#1baf7a" if _row["available"] else "#b0aca2"
         _ax.barh([_i], [_row["pct_blocks_covered"]], color=_color, height=0.6)
+        # Three states here too, for the same reason T.1 has three. A zero-length bar
+        # renders as nothing, so "table absent" and "table present but no analytic block
+        # has a row in it" would otherwise be told apart only by what is NOT drawn --
+        # and this is the one figure whose entire job is separating a structural zero
+        # from a clinical one.
         if not _row["available"]:
             _ax.text(1, _i, "table absent at this site", va="center", fontsize=8, color="#0b0b0b")
+        elif _row["pct_blocks_covered"] == 0:
+            _ax.text(
+                1, _i, "table present, no rows for these blocks",
+                va="center", fontsize=8, color="#0b0b0b",
+            )
 
     _ax.set_yticks(list(range(_cov.height)))
     _ax.set_yticklabels(_cov.get_column("source").to_list(), fontsize=9)
