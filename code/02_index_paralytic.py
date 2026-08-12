@@ -154,6 +154,23 @@ def _(Path, json):
 
 
 @app.cell
+def _(pl):
+    def rate_unit_expr(column):
+        """True for medication units expressed per unit of time."""
+        time_units = (
+            "s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
+            "h|hr|hrs|hour|hours|d|day|days"
+        )
+        return (
+            pl.col(column)
+            .str.contains(rf"(?:/|\bper\s+)(?:{time_units})$")
+            .fill_null(False)
+        )
+
+    return (rate_unit_expr,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -287,6 +304,7 @@ def _(
     bridge,
     bridge_hosp_ids,
     pl,
+    rate_unit_expr,
     to_site_naive,
 ):
     # Filtered on hospitalization_id at load, but deliberately NOT on med_category. The
@@ -329,15 +347,17 @@ def _(
     # on the pre-filter frame is the only way a vocabulary mismatch can be told apart from
     # genuine absence (spec §4).
     _paralytic_all = med_all.filter(pl.col("med_category").is_in(PARALYTICS))
+    _rate_rows = _paralytic_all.filter(rate_unit_expr("med_dose_unit"))
+    _amount_paralytic_all = _paralytic_all.filter(~rate_unit_expr("med_dose_unit"))
     _seen = _paralytic_all.group_by(["med_category", "mar_action_category"]).agg(n=pl.len())
     _missing = sorted(
         set(PARALYTICS) - set(_paralytic_all.get_column("med_category").unique())
     )
     _dropped_by_action_filter = (
-        _paralytic_all.group_by("med_category")
+        _amount_paralytic_all.group_by("med_category")
         .agg(n_total=pl.len())
         .join(
-            _paralytic_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
+            _amount_paralytic_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
             .group_by("med_category")
             .agg(n_kept=pl.len()),
             on="med_category",
@@ -349,7 +369,7 @@ def _(
     )
 
     med_admin = (
-        _paralytic_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
+        _amount_paralytic_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
         .join(bridge, on="hospitalization_id", how="inner")
         .drop("hospitalization_id")  # the bridge ends here -- everything below is per block
     )
@@ -361,6 +381,13 @@ def _(
     _found = med_admin.group_by(["med_category", "mar_action_category"]).agg(n=pl.len())
 
     print(f"intermittent rows loaded : {med_all.height:,}")
+    print(f"rate-unit rows skipped   : {_rate_rows.height:,}")
+    if _rate_rows.height:
+        print(
+            _rate_rows.group_by(["med_category", "med_dose_unit"])
+            .agg(n=pl.len())
+            .sort("n", descending=True)
+        )
     print(f"paralytic administrations: {med_admin.height:,}")
     print(f"  over encounter blocks  : {med_admin.get_column('encounter_block').n_unique():,}")
     print(f"  over patients          : {med_admin.get_column('patient_id').n_unique():,}")
@@ -368,7 +395,7 @@ def _(
     print(_seen.sort("n", descending=True))
     print("\nrows dropped by the mar_action_category filter, per agent:")
     print(_dropped_by_action_filter)
-    print("\nvalue_counts, by (med_category, mar_action_category), AFTER the action filter:")
+    print("\nvalue_counts, by (med_category, mar_action_category), AFTER rate/action filters:")
     print(_found.sort("n", descending=True))
     if _missing:
         print(f"\nNOT PRESENT AT THIS SITE: {', '.join(_missing)}")

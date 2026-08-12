@@ -142,6 +142,23 @@ def _(Path, json):
 
 
 @app.cell
+def _(pl):
+    def rate_unit_expr(column):
+        """True for medication units expressed per unit of time."""
+        time_units = (
+            "s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
+            "h|hr|hrs|hour|hours|d|day|days"
+        )
+        return (
+            pl.col(column)
+            .str.contains(rf"(?:/|\bper\s+)(?:{time_units})$")
+            .fill_null(False)
+        )
+
+    return (rate_unit_expr,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -723,9 +740,10 @@ def _(mo):
         The **identical** window predicate as D (P15), applied to
         `medication_admin_intermittent` over the five induction agents.
 
-        **Every** administration in the window is kept, not just the nearest per agent
-        (P17). The superseded design deduplicated by `med_category` because it was building
-        a rank ladder, where one patient redosed six times would have dominated a
+        **Every amount-based** administration in the window is kept, not just the nearest
+        per agent (P17). Rate-unit rows are skipped because this table represents discrete
+        pushes, not infusions. The superseded design deduplicated by `med_category` because
+        it was building a rank ladder, where one patient redosed six times would have dominated a
         distribution of ranks. This study publishes an offset *histogram*, where every
         administration is a legitimate observation of when sedation was charted —
         deduplicating would delete the redosing pattern the histogram exists to show.
@@ -781,6 +799,7 @@ def _(
     epoch_minutes,
     in_window_expr,
     pl,
+    rate_unit_expr,
     to_site_naive,
 ):
     # The bridge again -- 03 reaches the medication table by hospitalization_id and drops
@@ -830,13 +849,15 @@ def _(
     # on the pre-filter frame is the only way a vocabulary mismatch can be told apart from
     # genuine absence (spec §4).
     _sedative_all = _sed_lower.filter(pl.col("med_category").is_in(SEDATIVES))
+    _rate_rows = _sedative_all.filter(rate_unit_expr("med_dose_unit"))
+    _amount_sedative_all = _sedative_all.filter(~rate_unit_expr("med_dose_unit"))
     _seen = _sedative_all.group_by(["med_category", "mar_action_category"]).agg(n=pl.len())
     _missing = sorted(set(SEDATIVES) - set(_sedative_all.get_column("med_category").unique()))
     _dropped_by_action_filter = (
-        _sedative_all.group_by("med_category")
+        _amount_sedative_all.group_by("med_category")
         .agg(n_total=pl.len())
         .join(
-            _sedative_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
+            _amount_sedative_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
             .group_by("med_category")
             .agg(n_kept=pl.len()),
             on="med_category",
@@ -848,7 +869,7 @@ def _(
     )
 
     sed_admin = (
-        _sedative_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
+        _amount_sedative_all.filter(pl.col("mar_action_category").is_in(MAR_ACTIONS))
         .join(_bridge, on="hospitalization_id", how="inner")
         .drop("hospitalization_id")
     )
@@ -857,12 +878,19 @@ def _(
 
     # Post-filter reporting, kept alongside the pre-filter probe above -- this is what
     # actually feeds every downstream distribution, so it stays visible too.
+    print(f"rate-unit rows skipped   : {_rate_rows.height:,}")
+    if _rate_rows.height:
+        print(
+            _rate_rows.group_by(["med_category", "med_dose_unit"])
+            .agg(n=pl.len())
+            .sort("n", descending=True)
+        )
     print(f"sedative administrations : {sed_admin.height:,}")
     print("\nvalue_counts seen, by (med_category, mar_action_category), BEFORE the action filter:")
     print(_seen.sort("n", descending=True))
     print("\nrows dropped by the mar_action_category filter, per agent:")
     print(_dropped_by_action_filter)
-    print("\nvalue_counts, by (med_category, mar_action_category), AFTER the action filter:")
+    print("\nvalue_counts, by (med_category, mar_action_category), AFTER rate/action filters:")
     print(
         sed_admin.group_by(["med_category", "mar_action_category"])
         .agg(n=pl.len())

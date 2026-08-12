@@ -36,6 +36,7 @@ NOTEBOOKS = {
 }
 
 FUNC_NAME = "convert_doses_to_preferred_units"
+RATE_FUNC_NAME = "rate_unit_expr"
 
 
 def _load_from_notebook(path, name, namespace=None):
@@ -63,6 +64,10 @@ _NAMESPACE = {
 CONVERTERS = {
     label: _load_from_notebook(path, FUNC_NAME, _NAMESPACE) for label, path in NOTEBOOKS.items()
 }
+RATE_EXPRESSIONS = {
+    label: _load_from_notebook(path, RATE_FUNC_NAME, {"pl": pl})
+    for label, path in NOTEBOOKS.items()
+}
 
 # The spec's exact constant (brief, P18): mg for everything except fentanyl.
 PREFERRED_UNITS = {
@@ -84,6 +89,35 @@ def test_both_notebooks_define_the_function(label):
     """Guards the guard: if extraction silently returned nothing, every test below
     would vacuously pass against a missing function."""
     assert callable(CONVERTERS[label])
+
+
+@pytest.mark.parametrize("label", LABELS)
+def test_rate_units_are_identified_before_medication_analysis(label):
+    df = pl.DataFrame(
+        {
+            "med_dose_unit": [
+                "mcg/hr",
+                "mg/kg/min",
+                "ml/hour",
+                "mcg per minute",
+                "mg/day",
+                "mg",
+                "mcg",
+                None,
+            ]
+        }
+    ).with_columns(is_rate=RATE_EXPRESSIONS[label]("med_dose_unit"))
+
+    assert df.get_column("is_rate").to_list() == [
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        False,
+        False,
+    ]
 
 
 @pytest.mark.parametrize("label", LABELS)
