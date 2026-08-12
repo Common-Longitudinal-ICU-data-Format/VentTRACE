@@ -402,5 +402,116 @@ def _(
     return (cpt_offset_distribution,)
 
 
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    # Fixed categorical colours: teal is always "billed", grey always "not billed".
+    _CODED = "#1baf7a"
+    _NOT = "#b0aca2"
+
+    _c = pl.read_csv(SHARE_DIR / "cpt_cascade.csv").sort("evidence_tier")
+    _total = _c.get_column("n_blocks").sum()
+
+    _fig, _ax = plt.subplots(figsize=(10, 5.5))
+
+    # A mosaic, not grouped bars. The tiers are very unequal -- tier 1 in the thousands
+    # against tiers 2-3 in the hundreds -- and grouped bars would render the small tiers
+    # as hairlines. Row height proportional to n_blocks encodes the size disparity and
+    # the split encodes the coded fraction, in one mark.
+    _y = 0.0
+    for _row in _c.iter_rows(named=True):
+        _h = _row["n_blocks"] / _total if _total else 0.0
+        if _h == 0:
+            # A tier with no blocks: a published zero, drawn as a hairline rule so the
+            # row is visibly present and visibly empty rather than absent.
+            _ax.plot([0, 1], [_y, _y], color="0.3", linewidth=1.2, linestyle=":")
+            _ax.text(0.5, _y, f"{_row['tier_label']} — 0 blocks", ha="center", va="bottom", fontsize=8)
+            continue
+        _frac = (_row["n_cpt_yes"] / _row["n_blocks"]) if _row["n_blocks"] else 0.0
+        _ax.barh([_y + _h / 2], [_frac], height=_h * 0.92, color=_CODED, align="center")
+        _ax.barh([_y + _h / 2], [1 - _frac], left=[_frac], height=_h * 0.92, color=_NOT, align="center")
+        _ax.text(
+            -0.01, _y + _h / 2,
+            f"{_row['tier_label']}\nn = {_row['n_blocks']:,}",
+            ha="right", va="center", fontsize=9,
+        )
+        _ax.text(
+            _frac / 2 if _frac > 0.12 else _frac + 0.02,
+            _y + _h / 2,
+            f"{_row['pct_coded']:.1f}%",
+            ha="center" if _frac > 0.12 else "left",
+            va="center", fontsize=9,
+            color="white" if _frac > 0.12 else "#0b0b0b",
+        )
+        _y += _h
+
+    _ax.set_xlim(0, 1)
+    _ax.set_ylim(0, 1)
+    _ax.set_yticks([])
+    _ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
+    _ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+    _ax.set_xlabel("share of the tier's blocks carrying a CPT 31500")
+    for _spine in ("top", "right", "left"):
+        _ax.spines[_spine].set_visible(False)
+
+    _handles = [
+        _ax.plot([], [], color=_CODED, lw=6, label="CPT 31500 billed in the block")[0],
+        _ax.plot([], [], color=_NOT, lw=6, label="no CPT 31500 — not performed, or not charted")[0],
+    ]
+    _ax.legend(handles=_handles, loc="lower center", bbox_to_anchor=(0.5, -0.32), ncol=2, fontsize=8, frameon=False)
+    _ax.set_title(
+        "F.1 — CPT agreement by paralytic evidence tier\n"
+        "row height is the tier's share of blocks; CPT is a comparator, not a reference standard (P26)"
+    )
+    _fig.tight_layout()
+    _fig.subplots_adjust(left=0.24, bottom=0.22)
+    _fig.savefig(FIG_DIR / "F1_cpt_cascade.png", dpi=150)
+    plt.close(_fig)
+    print(f"F1_cpt_cascade.png -> {FIG_DIR}")
+    return
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    _AQUA = "#1baf7a"
+    _GREY = "#b0aca2"
+
+    _d = pl.read_csv(SHARE_DIR / "cpt_offset_distribution.csv").sort("bin_order")
+
+    _fig, _ax = plt.subplots(figsize=(11, 6))
+    for _row in _d.iter_rows(named=True):
+        _color = _GREY if _row["offset_bin"] == "no cpt code" else _AQUA
+        if _row["n"] > 0:
+            _ax.bar([_row["bin_order"]], [_row["n"]], width=0.7, color=_color)
+        else:
+            _ax.plot([_row["bin_order"]], [0], marker="D", markersize=7, color=_color,
+                     linestyle="None", zorder=5, clip_on=False)
+
+    _ax.set_xticks(_d.get_column("bin_order").to_list())
+    _ax.set_xticklabels(_d.get_column("offset_bin").to_list(), rotation=45, ha="right")
+    _ax.set_xlabel("signed days from t0 to the nearest CPT 31500 (negative = billed before the paralytic)")
+    _ax.set_ylabel("encounter blocks")
+    _ax.set_ylim(bottom=0)
+    _ax.set_axisbelow(True)
+    _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+
+    _handles = [
+        _ax.plot([], [], color=_AQUA, lw=6, label="blocks with a CPT 31500")[0],
+        _ax.plot([], [], color=_GREY, lw=6, label="blocks with no CPT 31500")[0],
+        _ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
+                 label="published zero (measured, exactly 0)")[0],
+    ]
+    _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
+    _ax.set_title(
+        "F.2 — how far the billed intubation sits from the index paralytic\n"
+        "the block-level flag carries no time alignment (P29); this is the measurement of what that costs"
+    )
+    _fig.tight_layout()
+    _fig.subplots_adjust(bottom=0.30)
+    _fig.savefig(FIG_DIR / "F2_cpt_offset.png", dpi=150)
+    plt.close(_fig)
+    print(f"F2_cpt_offset.png -> {FIG_DIR}")
+    return
+
+
 if __name__ == "__main__":
     app.run()
