@@ -1946,6 +1946,20 @@ def _(pl):
         `index_per_block.csv`'s contiguous n_index grid and Figure A.1's baseline
         diamonds. A missing row and a zero row are indistinguishable to a reader; only
         one of them is a measurement.
+
+        Level names are bracketed -- `discharge_category[expired]_n` -- rather than
+        joined with an underscore. That is not cosmetic. MIMIC's discharge_category
+        vocabulary contains a level literally named `missing` AND one literally named
+        `null`, so an underscore-joined `{column}_{level}_n` collides head-on with this
+        function's own `{column}_missing_n` summary row: two different rows with one
+        name, which then fans out the join on `statistic` in `build_table1` and
+        silently corrupts every stratum column. Renaming the summary row would only
+        move the problem, because any magic word can also be a category value. Brackets
+        make the collision structurally impossible instead of merely unlikely.
+
+        The same vocabulary makes the distinction worth preserving: this site charts the
+        *string* `null` as a category value AND has genuinely absent values, and the two
+        must stay separable in the published table.
         """
         total = df.get_column(column).drop_nulls().len()
         counts = dict(
@@ -1954,10 +1968,10 @@ def _(pl):
         rows = []
         for level in levels:
             n = float(counts.get(level, 0))
-            rows.append({"statistic": f"{column}_{level}_n", "rule": rule, "unit": unit, "value": n})
+            rows.append({"statistic": f"{column}[{level}]_n", "rule": rule, "unit": unit, "value": n})
             rows.append(
                 {
-                    "statistic": f"{column}_{level}_pct",
+                    "statistic": f"{column}[{level}]_pct",
                     "rule": rule,
                     "unit": unit,
                     "value": round(100.0 * n / total, 2) if total else None,
@@ -1966,7 +1980,7 @@ def _(pl):
         rows.append(
             {
                 "statistic": f"{column}_missing_n",
-                "rule": f"rows with a null {column}",
+                "rule": f"rows with an absent (null) {column}, not the literal string",
                 "unit": unit,
                 "value": float(df.get_column(column).null_count()),
             }
@@ -2050,6 +2064,21 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
     def build_table1(df, label):
         _overall = pl.DataFrame(table1_rows(df, _race, _eth, _sex, _disch)).rename(
             {"value": "overall"}
+        )
+        # `statistic` is the join key for every stratum column below, so a duplicate in
+        # it fans the join out and corrupts the table rather than raising. Checked here,
+        # with the offending names in the message, because the height assertion further
+        # down reports only that something is wrong and not what.
+        _dupes = (
+            _overall.group_by("statistic")
+            .agg(pl.len().alias("n"))
+            .filter(pl.col("n") > 1)
+            .sort("statistic")
+        )
+        assert _dupes.height == 0, (
+            f"[{label}] the row inventory emits duplicate statistic names, which would "
+            f"fan out the join on `statistic` and silently corrupt every stratum "
+            f"column: {_dupes.to_dicts()}"
         )
         out = _overall
         for _stratum in STRATA:
