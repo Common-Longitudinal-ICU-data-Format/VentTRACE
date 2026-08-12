@@ -669,5 +669,192 @@ def _(adt, block_outcomes, hospitalization, patient, pl, spine):
     return (spine_resolved,)
 
 
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## Life support before the index
+
+        Three sources, three windows, one predicate (P33). Every exposure is a **presence
+        test** — did any row for this patient land in `[t₀ - Xh, t₀]` — because that is all
+        P32 permits continuous medications to supply. No dose, no rate, no infusion-derived
+        index event.
+
+        **An absent optional table yields null, never `false`.** "No vasopressor row in 24
+        h" is returned identically by a patient on no pressors and by a site that does not
+        populate `medication_admin_continuous`. A `false` would make the second look like
+        the first; a null cannot be misread, and `covariate_coverage.csv` is what qualifies
+        it.
+
+        **Do NOT apply `rate_unit_expr` here.** `02` and `03` drop rate-charted rows from
+        `medication_admin_intermittent` because a discrete push charted as `mcg/kg/min` is
+        an infusion misfiled as a bolus (commit `305de1f`). This table is the opposite
+        case: every row in `medication_admin_continuous` is rate-charted by definition, and
+        filtering on that would zero the vasopressor column entirely — which would read as
+        "no patient was on pressors" rather than as a bug. Presence of an infusion **is**
+        the exposure here; no dose or rate is read at all (P32).
+        """
+    )
+    return
+
+
+@app.cell
+def _(LOOKBACK_HOURS, in_lookback, pl):
+    def load_optional(loader, label, **kwargs):
+        """Load an OPTIONAL clifpy table, returning None when the site does not have it.
+
+        Required tables (`patient`, `patient_procedures`) do not go through this -- they
+        raise. Optional ones degrade: the caller produces null columns and coverage
+        publishes 0%, which is a visibly different result from a clinical zero.
+
+        Catches only the absence of data, never a malformed load: a table that exists but
+        fails to parse is a real error and must not be silently downgraded to "this site
+        does not chart CRRT".
+        """
+        try:
+            table = loader.from_file(**kwargs)
+        except FileNotFoundError as exc:
+            print(f"  [{label}] NOT AVAILABLE at this site -- {exc}")
+            return None
+        if table.df is None or len(table.df) == 0:
+            print(f"  [{label}] present but empty")
+            return None
+        print(f"  [{label}] {len(table.df):,} rows")
+        return table.df.copy()
+
+    def exposure_flags(events, source, dttm_col, prefix):
+        """One boolean per look-back window, per index event, for one exposure source.
+
+        `events` carries index_paralytic_id, encounter_block and t_dttm.
+        `source` carries encounter_block and `dttm_col`; None when the table is absent.
+
+        Returns one row per index_paralytic_id with `{prefix}_{h}h` for each window. When
+        `source` is None every column is a typed null -- NOT false (spec §4).
+
+        The join is on encounter_block and nothing else, so an exposure can never be
+        attributed across blocks. It fans out to (events x source rows within the block)
+        before the group_by collapses it; that is the same accepted quadratic shape as
+        sub-analysis A's pairing, bounded here by one patient's charting.
+        """
+        cols = [f"{prefix}_{h}h" for h in LOOKBACK_HOURS]
+        if source is None:
+            return events.select(
+                "index_paralytic_id",
+                *[pl.lit(None, dtype=pl.Boolean).alias(c) for c in cols],
+            )
+        return (
+            events.select("index_paralytic_id", "encounter_block", "t_dttm")
+            .join(source.select("encounter_block", dttm_col), on="encounter_block", how="left")
+            .group_by("index_paralytic_id")
+            .agg(
+                *[
+                    in_lookback("t_dttm", dttm_col, h).any().alias(f"{prefix}_{h}h")
+                    for h in LOOKBACK_HOURS
+                ]
+            )
+            # `.any()` over an all-null group is false in polars, which is the correct
+            # reading here: the table exists, this patient has no row in it, so this
+            # patient had no exposure. That is a measurement, unlike the absent-table
+            # case above.
+            .with_columns([pl.col(c).fill_null(False) for c in cols])
+        )
+
+    return exposure_flags, load_optional
+
+
+@app.cell
+def _(
+    CrrtTherapy,
+    DATA_DIR,
+    FILETYPE,
+    MedicationAdminContinuous,
+    Position,
+    TIMEZONE,
+    VASOPRESSORS,
+    bridge,
+    bridge_hosp_ids,
+    load_optional,
+    pl,
+    to_site_naive,
+):
+    def _attach(df_pd, dttm_col):
+        """Naive-ify the timestamp, lower-case nothing, and map to encounter_block."""
+        df_pd = df_pd.copy()
+        df_pd[dttm_col] = to_site_naive(df_pd[dttm_col])
+        return pl.from_pandas(df_pd).join(
+            bridge.select("hospitalization_id", "encounter_block"),
+            on="hospitalization_id",
+            how="inner",
+        )
+
+    print("optional life-support tables:")
+
+    _vaso_pd = load_optional(
+        MedicationAdminContinuous,
+        "medication_admin_continuous",
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=["hospitalization_id", "admin_dttm", "med_category"],
+        # P20: casing variants enumerated at the from_file boundary.
+        filters={
+            "hospitalization_id": bridge_hosp_ids,
+            "med_category": VASOPRESSORS + [v.title() for v in VASOPRESSORS] + [v.upper() for v in VASOPRESSORS],
+        },
+    )
+    vasopressor = _attach(_vaso_pd, "admin_dttm") if _vaso_pd is not None else None
+
+    _crrt_pd = load_optional(
+        CrrtTherapy,
+        "crrt_therapy",
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=["hospitalization_id", "recorded_dttm"],
+        filters={"hospitalization_id": bridge_hosp_ids},
+    )
+    # P33 as the study lead specified it: presence of ANY charted CRRT record in the
+    # window is the exposure. No filter on modality or on a dose being non-zero.
+    crrt = _attach(_crrt_pd, "recorded_dttm") if _crrt_pd is not None else None
+
+    _POSITION_VARIANTS = ["prone", "Prone", "PRONE"]
+    _pos_pd = load_optional(
+        Position,
+        "position",
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=["hospitalization_id", "recorded_dttm", "position_category"],
+        filters={
+            "hospitalization_id": bridge_hosp_ids,
+            "position_category": _POSITION_VARIANTS,
+        },
+    )
+    prone = _attach(_pos_pd, "recorded_dttm") if _pos_pd is not None else None
+
+    return crrt, prone, vasopressor
+
+
+@app.cell
+def _(crrt, exposure_flags, prone, spine_resolved, vasopressor):
+    _events = spine_resolved.select("index_paralytic_id", "encounter_block", "t_dttm")
+
+    exposures = (
+        exposure_flags(_events, vasopressor, "admin_dttm", "vasopressor")
+        .join(exposure_flags(_events, crrt, "recorded_dttm", "crrt"), on="index_paralytic_id")
+        .join(exposure_flags(_events, prone, "recorded_dttm", "prone"), on="index_paralytic_id")
+    )
+
+    assert exposures.height == spine_resolved.height, "exposure join changed the row count"
+
+    for _c in sorted(c for c in exposures.columns if c != "index_paralytic_id"):
+        _col = exposures.get_column(_c)
+        if _col.null_count() == exposures.height:
+            print(f"  {_c:22s} table absent -- all null")
+        else:
+            print(f"  {_c:22s} {_col.sum():,} of {exposures.height:,}")
+    return (exposures,)
+
+
 if __name__ == "__main__":
     app.run()
