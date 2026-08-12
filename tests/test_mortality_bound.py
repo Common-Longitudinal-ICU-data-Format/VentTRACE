@@ -7,10 +7,14 @@ publishes it as in-hospital mortality. The bound is therefore part of the
 definition, not a refinement of it.
 
 ICU attribution is by death TIME inside an ADT icu interval (P37, chosen over
-last-known-location). Its cost is that a block flagged dead by discharge_category
-alone cannot be attributed either way; that count is published as its own row
-rather than being absorbed into either numerator, which is the same reasoning
-that put `no_device_record` beside `no_transition_in_window` in sub-analysis D.
+last-known-location). `hospital_mortality` and `icu_mortality` are two
+INDEPENDENT measurements published side by side (P37 as amended 2026-08-12) --
+neither is derived from the other, and icu_mortality is deliberately not
+constrained to be a subset of hospital_mortality. The amendment exists because
+of a MIMIC recording artifact: `death_dttm` can trail `discharge_dttm` by up to
+24 hours while the ADT icu interval extends past discharge too, so a handful of
+blocks measure icu_mortality True without also satisfying the hospital_mortality
+bound. That is accepted rather than papered over with a site-fitted grace window.
 
 Run:  uv run pytest tests/test_mortality_bound.py -v
 """
@@ -20,7 +24,6 @@ import datetime
 from pathlib import Path
 
 import polars as pl
-import pytest
 
 NOTEBOOK = Path(__file__).parent.parent / "code" / "04_covariates.py"
 NOTEBOOK_TREE = ast.parse(NOTEBOOK.read_text())
@@ -77,7 +80,6 @@ def test_death_after_discharge_is_not_in_hospital_mortality():
     got = resolve_mortality(_block(later, "home")).to_dicts()[0]
     assert got["hospital_mortality"] is False
     assert got["icu_mortality"] is False
-    assert got["icu_mortality_undeterminable"] is False
 
 
 def test_death_before_admission_is_not_in_hospital_mortality():
@@ -98,11 +100,12 @@ def test_expired_category_alone_is_in_hospital_mortality():
     assert got["hospital_mortality"] is True
 
 
-def test_expired_category_alone_is_icu_undeterminable():
-    """P37's stated cost: no death time means no ICU attribution either way."""
+def test_expired_category_alone_is_not_icu_mortality():
+    """No death time means no ADT icu interval can contain it, so icu_mortality is
+    false while hospital_mortality is true. The two are independent (P37 amended)."""
     got = resolve_mortality(_block(None, "expired")).to_dicts()[0]
+    assert got["hospital_mortality"] is True
     assert got["icu_mortality"] is False
-    assert got["icu_mortality_undeterminable"] is True
 
 
 def test_death_inside_an_icu_interval_is_icu_mortality():
@@ -116,7 +119,6 @@ def test_death_inside_an_icu_interval_is_icu_mortality():
         )
     ).to_dicts()[0]
     assert got["icu_mortality"] is True
-    assert got["icu_mortality_undeterminable"] is False
 
 
 def test_death_outside_every_icu_interval_is_not_icu_mortality():
@@ -132,49 +134,29 @@ def test_death_outside_every_icu_interval_is_not_icu_mortality():
     ).to_dicts()[0]
     assert got["hospital_mortality"] is True
     assert got["icu_mortality"] is False
-    assert got["icu_mortality_undeterminable"] is False
+
+
+def test_icu_death_after_discharge_is_icu_mortality_without_hospital_mortality():
+    """The MIMIC artifact P37's amendment accepts, pinned so it cannot regress.
+
+    death_dttm trails discharge_dttm by under a day and the icu interval extends past
+    discharge too. icu_mortality fires; hospital_mortality does not, because the death
+    time is outside the stay and the disposition is not 'expired'. The two flags are
+    independent by design -- this is not a violation to be asserted away.
+    """
+    got = resolve_mortality(
+        _block(
+            DISCH + datetime.timedelta(hours=20),
+            "home",
+            icu_in=DISCH - datetime.timedelta(hours=6),
+            icu_out=DISCH + datetime.timedelta(hours=24),
+        )
+    ).to_dicts()[0]
+    assert got["icu_mortality"] is True
+    assert got["hospital_mortality"] is False
 
 
 def test_survivor_is_not_dead_by_any_route():
     got = resolve_mortality(_block(None, "home")).to_dicts()[0]
     assert got["hospital_mortality"] is False
     assert got["icu_mortality"] is False
-    assert got["icu_mortality_undeterminable"] is False
-
-
-def test_icu_mortality_implies_hospital_mortality_or_raises():
-    """The subset invariant, asserted on resolve_mortality's own output rather than
-    assumed from the input: it holds only if every ADT icu interval sits inside its
-    owning hospitalization's [admission_dttm, discharge_dttm] window. Here the icu
-    interval pokes out past discharge_dttm, so a death timed inside it lands outside
-    the stay -- icu_mortality True, hospital_mortality False -- and resolve_mortality
-    refuses to publish that rather than let ICU mortality exceed hospital mortality."""
-    outside_the_stay = DISCH + datetime.timedelta(days=5)
-    with pytest.raises(AssertionError, match="icu_mortality True but hospital_mortality False"):
-        resolve_mortality(
-            _block(
-                outside_the_stay,
-                "home",
-                icu_in=DISCH + datetime.timedelta(days=4),
-                icu_out=DISCH + datetime.timedelta(days=6),
-            )
-        )
-
-
-def test_icu_mortality_and_undeterminable_are_disjoint_or_raises():
-    """Same root cause as the test above, different symptom: discharge_category alone
-    makes the block hospital_mortality True (so the subset check passes), but the death
-    time still lands inside an icu interval that pokes out past discharge_dttm. That
-    death time is both 'inside an icu interval' (icu_mortality) and 'not inside the
-    stay' (icu_mortality_undeterminable) at once, which should be impossible by
-    construction and resolve_mortality refuses to publish."""
-    outside_the_stay = DISCH + datetime.timedelta(days=5)
-    with pytest.raises(AssertionError, match="icu_mortality_undeterminable"):
-        resolve_mortality(
-            _block(
-                outside_the_stay,
-                "expired",
-                icu_in=DISCH + datetime.timedelta(days=4),
-                icu_out=DISCH + datetime.timedelta(days=6),
-            )
-        )

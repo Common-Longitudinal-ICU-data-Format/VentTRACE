@@ -404,25 +404,25 @@ def _(pl):
         death_dttm, icu_in_dttm, icu_out_dttm. Rows repeat per icu interval; a block with
         no icu row carries nulls in the two icu columns.
 
-        Returns one row per encounter_block with three booleans:
+        Returns one row per encounter_block with two booleans:
 
-          hospital_mortality           death_dttm inside a member hospitalization's
-                                       admission -> discharge interval, OR
-                                       discharge_category == 'expired'
-          icu_mortality                death_dttm inside an ADT icu interval
-          icu_mortality_undeterminable dead, but flagged by discharge_category alone --
-                                       no death time, so no ICU attribution either way
+          hospital_mortality  death_dttm inside a member hospitalization's
+                              admission -> discharge interval, OR
+                              discharge_category == 'expired'
+          icu_mortality       death_dttm inside an ADT icu interval
 
-        The bound on death_dttm is the whole point (see the module docstring of
-        tests/test_mortality_bound.py). The three flags are INTENDED to be mutually
-        consistent -- icu_mortality and icu_mortality_undeterminable both subsets of
-        hospital_mortality, and disjoint from each other -- but that consistency is not
-        free. It relies on every ADT icu interval sitting inside its owning
-        hospitalization's [admission_dttm, discharge_dttm] window, which this function has
-        no way to check (it never sees a hospitalization/icu-interval pairing, only the
-        already-joined death/interval columns). So the invariant is asserted on the
-        OUTPUT instead of assumed from the input: it needs no assumption about the ADT
-        extract and is the property that actually matters for publication.
+        Two INDEPENDENT measurements, published side by side (P37 as amended
+        2026-08-12). Neither is derived from the other and icu_mortality is deliberately
+        NOT constrained to be a subset of hospital_mortality: at MIMIC a death_dttm can
+        trail its own discharge_dttm by up to 24 hours while the ADT icu interval extends
+        past discharge too, so a handful of blocks are icu_mortality without satisfying
+        the hospital_mortality bound. That is a recording artifact, and the amended
+        decision accepts it rather than papering over it with a grace window fitted to
+        one site.
+
+        The bound on death_dttm is retained and is the whole point of the first flag (see
+        the module docstring of tests/test_mortality_bound.py): unbounded, it fires for a
+        patient discharged alive who died at home months later.
         """
         _death_in_stay = (
             pl.col("death_dttm").is_not_null()
@@ -435,7 +435,7 @@ def _(pl):
             & (pl.col("death_dttm") >= pl.col("icu_in_dttm"))
             & (pl.col("death_dttm") <= pl.col("icu_out_dttm"))
         )
-        _out = (
+        return (
             df.group_by("encounter_block")
             .agg(
                 _death_in_stay.any().alias("_death_dated_in_stay"),
@@ -447,46 +447,9 @@ def _(pl):
                     "hospital_mortality"
                 )
             )
-            .with_columns(
-                # Dead, but with no usable death time: the ICU question cannot be
-                # answered for this block in either direction. Published as its own
-                # count rather than absorbed into a numerator.
-                (
-                    pl.col("hospital_mortality")
-                    & ~pl.col("_death_dated_in_stay")
-                ).alias("icu_mortality_undeterminable")
-            )
             .drop("_death_dated_in_stay", "_expired_category")
             .sort("encounter_block")
         )
-
-        # icu_mortality subset of hospital_mortality: a violation means some ADT icu
-        # interval extends outside its own hospitalization's admission/discharge window,
-        # so a death timed inside the icu interval landed outside _death_in_stay.
-        _icu_not_hospital = _out.filter(
-            pl.col("icu_mortality") & ~pl.col("hospital_mortality")
-        )
-        assert _icu_not_hospital.is_empty(), (
-            f"{_icu_not_hospital.height:,} block(s) have icu_mortality True but "
-            "hospital_mortality False -- an ADT icu interval must extend outside its "
-            "owning hospitalization's [admission_dttm, discharge_dttm] window. Check "
-            f"the ADT extract for: {_icu_not_hospital.get_column('encounter_block').to_list()[:10]}"
-        )
-
-        # icu_mortality and icu_mortality_undeterminable disjoint: a violation means a
-        # block both had a death time landing inside an icu interval (icu_mortality) and
-        # was flagged as having no usable death time (icu_mortality_undeterminable) --
-        # only possible if the two death-time checks disagree, which again traces back to
-        # an icu interval outside the hospitalization window rather than a logic bug here.
-        _both = _out.filter(pl.col("icu_mortality") & pl.col("icu_mortality_undeterminable"))
-        assert _both.is_empty(), (
-            f"{_both.height:,} block(s) have both icu_mortality and "
-            "icu_mortality_undeterminable True, which should be impossible by "
-            "construction -- check the ADT extract for an icu interval outside its "
-            f"owning hospitalization's window: {_both.get_column('encounter_block').to_list()[:10]}"
-        )
-
-        return _out
 
     return (resolve_mortality,)
 
@@ -590,10 +553,6 @@ def _(adt_icu, epoch_minutes, hospitalization, patient, pl, resolve_mortality):
     print(f"blocks with outcomes : {block_outcomes.height:,}")
     print(f"  hospital mortality : {block_outcomes.get_column('hospital_mortality').sum():,}")
     print(f"  icu mortality      : {block_outcomes.get_column('icu_mortality').sum():,}")
-    print(
-        "  icu undeterminable : "
-        f"{block_outcomes.get_column('icu_mortality_undeterminable').sum():,}"
-    )
     return block_outcomes, los_hospital, los_icu
 
 
