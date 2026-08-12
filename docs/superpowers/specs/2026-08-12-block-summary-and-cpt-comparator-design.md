@@ -57,11 +57,11 @@ Three new notebooks, appended. `01`, `02` and `03` are not modified.
 
 | notebook | opens | reads | writes |
 |---|---|---|---|
-| `04_covariates.py` | `patient`, `vitals`, `medication_admin_continuous`, `crrt_therapy`, `position`, `hospital_diagnosis` | `index_paralytic.parquet`, `index_context.parquet`, `cohort_index.parquet` | `intermediate_phi/index_covariates.parquet` (2,117 rows, PHI); `final_no_phi/covariate_coverage.csv` |
+| `04_covariates.py` | `patient`, `vitals`, `medication_admin_continuous`, `crrt_therapy`, `position`, `hospital_diagnosis`, and re-opens `hospitalization` and `adt` (already-required tables, no contract change) | `index_context.parquet`, `cohort_index.parquet` | `intermediate_phi/index_covariates.parquet` (2,117 rows, PHI); `final_no_phi/covariate_coverage.csv` |
 | `05_table_one.py` | — | `index_covariates.parquet` | `table1_by_agent_block.csv`, `table1_by_agent_index.csv`, `figures/T1_life_support_by_window.png`, `figures/T2_source_coverage.png` |
 | `06_reference_cpt.py` | `patient_procedures` | `index_covariates.parquet` | `cpt_cascade.csv`, `cpt_cascade_qc.csv`, `cpt_offset_distribution.csv`, `figures/F1_cpt_cascade.png`, `figures/F2_cpt_offset.png` |
 
-`04` is the **sole owner of the analytic row**. It selects index events, joins the D/E tier from `index_context.parquet`, joins every covariate, attaches block-level attributes, and writes one frame. `05` and `06` only aggregate that frame: neither re-derives a block, re-selects `p_num`, nor re-computes a tier. Both assert their input height against the frame's, so a divergence fails rather than producing two tables with different N.
+`04` is the **sole owner of the analytic row**. It reads `index_context.parquet` alone for the event spine — that frame already carries every `index_paralytic.parquet` column plus the D and E results, so joining both would be a redundant join on the same key. It derives the tier from `index_context.parquet`, joins every covariate, attaches block-level attributes, and writes one frame. `05` and `06` only aggregate that frame: neither re-derives a block, re-selects `p_num`, nor re-computes a tier. Both assert their input height against the frame's, so a divergence fails rather than producing two tables with different N.
 
 `run_all.sh` becomes `STEPS=(01_cohort 02_index_paralytic 03_context 04_covariates 05_table_one 06_reference_cpt)`.
 
