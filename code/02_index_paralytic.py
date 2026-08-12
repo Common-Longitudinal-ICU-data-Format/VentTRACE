@@ -1530,15 +1530,23 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
 def _(mo):
     mo.md(
         """
-        ### Figure C.1 — what the fold removed
+        ### Figure C.1 — how far apart are a block's index paralytics
 
-        A's total shape (`coadmin_gap_distribution.csv`'s `n_pooled`) beside C's per-bin
-        counts (`index_gap_distribution.csv`), on the identical bin grid. Each side gets
-        the same treatment as A.1: a bar where that series has a real positive count, a
-        colored diamond on the baseline where it has a *published* zero. The six leftmost
-        bins are C's confirmation of the 15-minute floor -- with this encoding they show
-        six aqua diamonds sitting on the baseline, an affirmative "measured, and it is
-        zero."
+        One series, one question: inside a hospitalization that has **more than one** index
+        paralytic, how much time separates them? Every unordered pair of index paralytics
+        within an `encounter_block`, counted into the same 15-bin grid Figure A.1 uses, so
+        the two figures can still be read against each other bin-for-bin.
+
+        A block with a single index paralytic forms no pair and is therefore absent by
+        definition, not by a filter — the corner annotation names how many blocks actually
+        contribute, read from `index_per_block.csv`.
+
+        Only the bins **above 15 minutes** are drawn. The six at or below it are empty by
+        construction: the fold closes an index event at `t + 15` inclusive, so the next
+        index is strictly after that. They are still published as explicit zeros in
+        `index_gap_distribution.csv`, and the assertion in sub-analysis C is what tests
+        the floor. Drawing them here spent a third of the axis on a result that could not
+        have come out any other way.
         """
     )
     return
@@ -1546,64 +1554,83 @@ def _(mo):
 
 @app.cell
 def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
-    # Blue stays "raw administrations" here too (same entity as A.1's bars); aqua is a
-    # new entity, index paralytics, and gets its own slot rather than reusing orange
-    # (which means "cross-agent" in A.1 and would misstate identity here).
-    _BLUE = "#2a78d6"
+    # Aqua means "index paralytics" wherever they are drawn, the same way blue always
+    # means same-agent and orange always cross-agent in A.1. Fixed, never cycled.
     _AQUA = "#1baf7a"
-    _EDGE = "#0b0b0b"
 
-    _a = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv").select(
-        "bin_order", "gap_bin", "n_pooled"
+    # The floor is evidenced in the CSV, not on the axis. `bin_order` is the published
+    # column, so slicing on it -- rather than re-deriving positions from a re-read frame
+    # -- is what keeps the bars aligned with the labels if the grid ever changes.
+    _FIRST_DRAWN = GAP_BIN_LABELS.index("(15,30]")
+    _labels = GAP_BIN_LABELS[_FIRST_DRAWN:]
+
+    _c = pl.read_csv(SHARE_DIR / "index_gap_distribution.csv").filter(
+        pl.col("bin_order") >= _FIRST_DRAWN
     )
-    _c = pl.read_csv(SHARE_DIR / "index_gap_distribution.csv").select(
-        "bin_order", "gap_bin", "n"
+    _dropped = pl.read_csv(SHARE_DIR / "index_gap_distribution.csv").filter(
+        pl.col("bin_order") < _FIRST_DRAWN
+    )
+    assert _dropped.get_column("n").sum() == 0, (
+        "a bin at or below 15 minutes carries pairs, so omitting it from this figure "
+        "would hide a real count. The fold's floor is broken -- fix that, not the plot."
+    )
+
+    # Blocks with exactly one index contribute no pair; this figure's denominator is the
+    # rest. Read from the published per-block table so the number on the figure and the
+    # number in the CSV cannot drift apart.
+    _n_blocks = (
+        pl.read_csv(SHARE_DIR / "index_per_block.csv")
+        .filter(pl.col("n_index") > 1)
+        .get_column("n_blocks")
+        .sum()
     )
 
     _fig, _ax = plt.subplots(figsize=(11, 6.5))
 
-    for _row in _a.iter_rows(named=True):
-        _o = _row["bin_order"]
-        if _row["n_pooled"] > 0:
-            _ax.bar([_o - 0.2], [_row["n_pooled"]], width=0.4, color=_BLUE)
-        else:
-            mark_zero(_ax, _o - 0.2, _BLUE)
-
+    _has_published_zero = False
     for _row in _c.iter_rows(named=True):
-        _o = _row["bin_order"]
+        _x = _row["bin_order"] - _FIRST_DRAWN
         if _row["n"] > 0:
-            _ax.bar([_o + 0.2], [_row["n"]], width=0.4, color=_AQUA, edgecolor=_EDGE, linewidth=0.6)
+            _ax.bar([_x], [_row["n"]], width=0.62, color=_AQUA)
         else:
-            mark_zero(_ax, _o + 0.2, _AQUA)
+            mark_zero(_ax, _x, _AQUA)
+            _has_published_zero = True
 
-    _ax.set_xticks(list(range(len(GAP_BIN_LABELS))))
-    _ax.set_xticklabels(GAP_BIN_LABELS, rotation=45, ha="right")
-    _ax.set_xlabel("gap")
+    # Upper LEFT, not right: this distribution rises monotonically into the wide bins, so
+    # the right shoulder is where the tall bars are and the left is the only reliably
+    # empty corner. Both numbers come from published CSVs, never recomputed here.
+    _ax.text(
+        0.01, 0.98, f"{_c['n'].sum():,} pairs",
+        transform=_ax.transAxes, ha="left", va="top", fontsize=8, color="#0b0b0b",
+    )
+    _ax.text(
+        0.01, 0.94, f"{_n_blocks:,} encounter blocks with more than one index paralytic",
+        transform=_ax.transAxes, ha="left", va="top", fontsize=8, color="#0b0b0b",
+    )
+
+    _ax.set_xticks(list(range(len(_labels))))
+    _ax.set_xticklabels(_labels, rotation=45, ha="right")
+    _ax.set_xlabel("time between two index paralytics in the same encounter block")
     _ax.set_ylabel("pairs")
     _ax.set_ylim(bottom=0)
     _ax.set_axisbelow(True)
     _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
 
-    _fold_x = GAP_BIN_LABELS.index("(10,15]") + 0.5
-    _ax.axvline(_fold_x, color="#0b0b0b", linestyle="--", linewidth=1)
-    _ax.text(
-        _fold_x + 0.1, _ax.get_ylim()[1] * 0.92,
-        "15 min\n(the fold)", fontsize=8, va="top", color="#0b0b0b",
-    )
+    if _has_published_zero:
+        _ax.legend(
+            handles=[
+                _ax.plot([], [], marker="D", markersize=7, color=_AQUA, linestyle="None",
+                         label="published zero (measured, exactly 0)")[0]
+            ],
+            loc="upper center", fontsize=8, framealpha=0.9,
+        )
 
-    _handles = [
-        _ax.plot([], [], color=_BLUE, lw=6, label="A — raw administrations (pooled total)")[0],
-        _ax.plot([], [], color=_AQUA, lw=6, label="C — index paralytics")[0],
-        _ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
-                 label="published zero (measured, exactly 0)")[0],
-    ]
-    _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
     _ax.set_title(
-        "C.1 — what the fold removed\n"
-        "C is empty at and below 15 minutes by construction; this is the confirmation"
+        "C.1 — time between index paralytics, blocks with more than one index\n"
+        "bins at or below 15 min are empty by construction (the fold's floor) and are not drawn"
     )
     _fig.tight_layout()
-    _fig.subplots_adjust(bottom=0.38)
+    _fig.subplots_adjust(bottom=0.22)
     _fig.savefig(FIG_DIR / "C1_index_gap_distribution.png", dpi=150)
     plt.close(_fig)
     print(f"C1_index_gap_distribution.png -> {FIG_DIR}")
