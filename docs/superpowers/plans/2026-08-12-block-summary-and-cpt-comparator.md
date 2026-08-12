@@ -1452,6 +1452,18 @@ def _(
     ]
     _VITAL_CATEGORIES = [c for c, _, _ in _VITAL_SPECS] + ["weight_kg"]
 
+    # P20 casing variants, enumerated by hand rather than by `.upper()/.title()`.
+    # `"spo2".title()` is `"Spo2"` and never `"SpO2"`, which is how most EHRs spell it --
+    # a site charting `SpO2` would silently return zero rows for that category while sbp
+    # and heart_rate loaded fine, leaving all three lowest_spo2_*h columns null and
+    # `covariate_coverage` still reporting vitals at ~100%. Nothing downstream would
+    # signal the loss; Table 1 would show an SpO2 row that is 100% missing and read as a
+    # charting gap. The post-load check below is the second half of the defence.
+    _VITAL_VARIANTS = sorted(
+        {v for c in _VITAL_CATEGORIES for v in (c, c.upper(), c.title(), c.capitalize())}
+        | {"SpO2", "spO2", "SpO₂", "HeartRate", "heartRate", "weightKg", "WeightKg"}
+    )
+
     print("optional physiology table:")
     _vit_pd = load_optional(
         Vitals,
@@ -1462,9 +1474,7 @@ def _(
         columns=["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"],
         filters={
             "hospitalization_id": bridge_hosp_ids,
-            "vital_category": _VITAL_CATEGORIES
-            + [v.upper() for v in _VITAL_CATEGORIES]
-            + [v.title() for v in _VITAL_CATEGORIES],
+            "vital_category": _VITAL_VARIANTS,
         },
     )
 
@@ -1485,6 +1495,24 @@ def _(
             *[pl.lit(None, dtype=pl.Float64).alias(c) for c in _physio_cols],
         )
     else:
+        # The raw casings the load actually returned, printed before normalisation, and
+        # a loud line for any requested category that came back with zero rows. A filter
+        # matching zero rows is indistinguishable from a site that never charts the
+        # vital, and only this print separates them. Same posture as the vocabulary
+        # probe in `01_cohort.py`.
+        print("  vital_category casings returned by the load:")
+        for _raw, _n in sorted(_vit_pd["vital_category"].value_counts().items()):
+            print(f"    {_raw!r:20s} {_n:,}")
+        _seen = {str(v).lower() for v in _vit_pd["vital_category"].unique()}
+        for _want in _VITAL_CATEGORIES:
+            if _want not in _seen:
+                print(
+                    f"  WARNING: vital_category {_want!r} returned ZERO rows. Either this "
+                    "site does not chart it, or its casing is missing from _VITAL_VARIANTS "
+                    "-- every statistic derived from it will be null and coverage will "
+                    "still report vitals as available."
+                )
+
         _vit_pd["recorded_dttm"] = to_site_naive(_vit_pd["recorded_dttm"])
         vitals = (
             pl.from_pandas(_vit_pd)
@@ -1515,8 +1543,13 @@ def _(
         # Weight: most recent at or before t0, no look-back limit. `sort_by` then `last`
         # is the deterministic pick -- ties broken by the value itself so a re-run cannot
         # choose differently.
-        _weight_mask = (pl.col("vital_category") == "weight_kg") & (
-            pl.col("recorded_dttm") <= pl.col("t_dttm")
+        # `vital_value.is_not_null()` is part of the mask, not an afterthought: without
+        # it a charted-but-null weight row at the latest timestamp sorts last and
+        # `.last()` returns null, discarding an earlier real weight.
+        _weight_mask = (
+            (pl.col("vital_category") == "weight_kg")
+            & (pl.col("recorded_dttm") <= pl.col("t_dttm"))
+            & pl.col("vital_value").is_not_null()
         )
         _aggs.append(
             pl.when(_weight_mask)
@@ -1686,7 +1719,13 @@ def _(
                 "n_blocks_with_rows": 0,
                 "pct_blocks_covered": 0.0,
             }
-        _in_scope = frame.filter(pl.col("encounter_block").is_in(_analytic_blocks))
+        # `.implode()` is required, not stylistic: a bare Series argument is deprecated
+        # and polars has announced the semantics will flip to element-wise list
+        # comparison. pyproject pins `polars>=1.43.2` with no upper bound, so a site
+        # resolving a newer polars would get a filter that matches NOTHING -- every
+        # source publishing 0% coverage while `available` stays true, with no crash.
+        # Matches the five existing uses in `01_cohort.py`.
+        _in_scope = frame.filter(pl.col("encounter_block").is_in(_analytic_blocks.implode()))
         _b = _in_scope.get_column("encounter_block").n_unique()
         return {
             "source": name,
