@@ -1067,7 +1067,16 @@ def _(
     vasopressor,
     vitals,
 ):
-    _n_blocks = index_covariates.get_column("encounter_block").n_unique()
+    # The denominator is the ANALYTIC population -- the blocks that have an index
+    # paralytic -- so the numerator has to be restricted to the same blocks or the
+    # ratio is meaningless. `bridge` is built from the full cohort (34,017 blocks at
+    # MIMIC), so every source frame spans far more blocks than this frame does;
+    # dividing an unrestricted numerator by this denominator produced coverage
+    # percentages above 2000%, which is worse than no table at all: this CSV exists
+    # to tell a reader whether a covariate's zero is structural or clinical, and a
+    # percentage over 100 answers neither question.
+    _analytic_blocks = index_covariates.get_column("encounter_block").unique()
+    _n_blocks = _analytic_blocks.len()
 
     def _cov(name, required, frame):
         if frame is None:
@@ -1079,12 +1088,18 @@ def _(
                 "n_blocks_with_rows": 0,
                 "pct_blocks_covered": 0.0,
             }
-        _b = frame.get_column("encounter_block").n_unique()
+        _in_scope = frame.filter(pl.col("encounter_block").is_in(_analytic_blocks))
+        _b = _in_scope.get_column("encounter_block").n_unique()
         return {
             "source": name,
             "required": required,
+            # `available` is a property of the SITE (did the table load at all), so it
+            # stays true even when no analytic block has a row in it -- that
+            # combination, available with 0% coverage, is itself informative.
             "available": True,
-            "n_rows": frame.height,
+            # Rows and blocks are both counted within the analytic population, so
+            # every column of this table shares one denominator.
+            "n_rows": _in_scope.height,
             "n_blocks_with_rows": _b,
             "pct_blocks_covered": round(100.0 * _b / _n_blocks, 2),
         }
