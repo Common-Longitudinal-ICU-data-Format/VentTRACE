@@ -83,8 +83,14 @@ def test_code_on_a_hospitalization_outside_the_block_does_not_leak():
 
 
 def test_code_on_an_unknown_hospitalization_is_dropped():
-    """A procedure row for a hospitalization no block claims contributes nothing."""
+    """A procedure row for a hospitalization no block claims contributes nothing.
+
+    The row-count assertion is the load-bearing half: without it a bug that
+    manufactured a phantom block with has_cpt=False would satisfy the `all(...)`
+    check and pass.
+    """
     got = cpt_block_flag(_procs([("h_unknown", D)]), BRIDGE).sort("encounter_block").to_dicts()
+    assert [r["encounter_block"] for r in got] == [1, 2], "a phantom block was created"
     assert all(r["has_cpt"] is False for r in got)
 
 

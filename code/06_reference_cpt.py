@@ -327,26 +327,46 @@ def _(
     SHARE_DIR,
     SITE,
     blocks,
-    cpt_flags,
+    bridge,
     pl,
+    procedures,
     publish,
 ):
     # P30. Signed days from t0 to the NEAREST CPT date, so "billed before the paralytic"
     # and "billed after" are separable. Negative means the code predates t0.
+    #
+    # Computed against EVERY CPT date in the block, not against the first and last.
+    # `cpt_block_flag` aggregates to min/max for its QC columns, and picking the nearer
+    # of those two extremes is not the nearest date: a block coded at t0-10, t0-2 and
+    # t0+5 has first = t0-10 and last = t0+5, so the extremes comparison returns +5 when
+    # the true nearest is -2 -- wrong in magnitude and in sign, in the one table whose
+    # whole purpose is establishing whether the billed intubation is time-aligned with
+    # the paralytic. Inert wherever a block has at most two CPT dates, which is why it
+    # survives a site with sparse billing and misreports at one with real coverage.
+    _cpt_dates = procedures.join(
+        bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner"
+    ).select("encounter_block", "procedure_date")
+
     _with_dates = (
         blocks.select("encounter_block", "t_dttm")
-        .join(cpt_flags.select("encounter_block", "first_cpt_date", "last_cpt_date"), on="encounter_block", how="left")
         .with_columns(pl.col("t_dttm").dt.date().alias("t_date"))
+        .join(_cpt_dates, on="encounter_block", how="left")
         .with_columns(
-            (pl.col("first_cpt_date") - pl.col("t_date")).dt.total_days().alias("_d_first"),
-            (pl.col("last_cpt_date") - pl.col("t_date")).dt.total_days().alias("_d_last"),
+            (pl.col("procedure_date") - pl.col("t_date")).dt.total_days().alias("_d")
         )
-        .with_columns(
-            pl.when(pl.col("_d_first").abs() <= pl.col("_d_last").abs())
-            .then(pl.col("_d_first"))
-            .otherwise(pl.col("_d_last"))
-            .alias("offset_days")
-        )
+        # Nearest by absolute distance; ties broken toward the EARLIER date, so an
+        # equidistant pair reports the negative value. Deterministic, and it matches the
+        # reading P29 cares about -- a code that predates the paralytic is the case that
+        # tells you the block flag is not time-aligned.
+        .sort(["encounter_block", pl.col("_d").abs(), "_d"], nulls_last=True)
+        .group_by("encounter_block", maintain_order=True)
+        .first()
+        .select("encounter_block", pl.col("_d").alias("offset_days"))
+    )
+
+    # One row per block, still: the group_by collapses the fan-out the date join created.
+    assert _with_dates.height == blocks.height, (
+        "the nearest-date reduction did not return exactly one row per block"
     )
 
     _binned = _with_dates.filter(pl.col("offset_days").is_not_null()).with_columns(
