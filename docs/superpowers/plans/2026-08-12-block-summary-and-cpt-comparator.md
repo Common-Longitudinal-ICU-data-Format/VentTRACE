@@ -36,7 +36,7 @@ Every task's requirements implicitly include this section.
 | `tests/test_mortality_bound.py` | **Create.** Pins P37's `death_dttm` bound and the undeterminable bucket. |
 | `tests/test_cpt_bridge.py` | **Create.** Pins the explode-and-drop bridge for CPT. |
 | `tests/test_block_row_contract.py` | **Create.** Pins the `p_num = 1` subset and block-column constancy. |
-| `tests/test_clifpy_tz_boundary.py` | **Modify.** Extend the no-naive-timestamp AST check to `04`, `05`, `06`. |
+| `tests/test_collapse_agent_events.py` | **Modify.** Extend `ALL_NOTEBOOKS` (the no-naive-timestamp AST check) to `04`, `05`, `06`. |
 | `tests/test_publish_guard.py` | **Modify.** Assert `index_covariates.parquet`'s column set is rejected by `publish()`. |
 | `run_all.sh:24` | **Modify.** `STEPS` gains the three new notebooks. |
 | `README.md` | **Modify.** Required-tables section gains seven tables. |
@@ -2860,9 +2860,32 @@ time-aligned, a long tail means it is not."
 
 - [ ] **Step 1: Extend the AST timezone check to the new notebooks**
 
-Open `tests/test_clifpy_tz_boundary.py` and find the list of notebook paths the no-naive-timestamp AST check walks (added in commit `250f063`, which extended it to `01` and `03`). Add the three new notebooks to that list. Run it first to see it fail if any new notebook contains a banned call.
+The no-naive-timestamp AST check lives in `tests/test_collapse_agent_events.py`, not in `test_clifpy_tz_boundary.py`. Edit `ALL_NOTEBOOKS` at `tests/test_collapse_agent_events.py:41`:
 
-Run: `uv run pytest tests/test_clifpy_tz_boundary.py -v`
+```python
+ALL_NOTEBOOKS = [
+    CODE_DIR / name
+    for name in ("01_cohort.py", "02_index_paralytic.py", "03_context.py")
+]
+```
+
+becomes:
+
+```python
+ALL_NOTEBOOKS = [
+    CODE_DIR / name
+    for name in (
+        "01_cohort.py",
+        "02_index_paralytic.py",
+        "03_context.py",
+        "04_covariates.py",
+        "05_table_one.py",
+        "06_reference_cpt.py",
+    )
+]
+```
+
+Run: `uv run pytest tests/test_collapse_agent_events.py -v`
 Expected: PASS. If it fails, the failure names the offending call — fix the notebook, not the test.
 
 - [ ] **Step 2: Add the publish-guard case for the new PHI frame**
