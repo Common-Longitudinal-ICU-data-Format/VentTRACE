@@ -139,6 +139,35 @@ evidence_tier · rule · n_blocks · n_cpt_yes · n_cpt_no · pct_coded
 
 **Expected shape at MIMIC, stated so a departure is noticeable.** 1,135 of 1,547 blocks have their first index paralytic given to a patient already on IMV, so tier 1 will dominate and tiers 2–3 will be thin (473 blocks have an IMV transition on *any* index event, so 473 is a ceiling for tier 2 + tier 3 combined, not their value — a block whose transition sits on a later paralytic is tier 1 here). This is the ever-IMV cohort filter of P2 showing through at block level, and it is the first table in the study that makes it visible per block. A cascade where tier 1 is small would mean something upstream changed.
 
+**Observed at MIMIC, 2026-08-12 — the cascade is empty, and the reason is a site fact.**
+The tier partition came out as predicted (1,084 / 121 / 342, summing to 1,547; tiers 2+3 =
+463, just under the 473 ceiling implied by `imv_transition_summary.csv`). **`pct_coded` is
+0.0 in all three tiers.** This is not a defect and was verified rather than assumed:
+
+- MIMIC's `patient_procedures` holds 1,045,729 rows, of which 116,032 (11.1%) are
+  CPT-format — so the format filter works and CPT data is present.
+- Procedure code `31500` appears **15 times in the entire table**. MIMIC codes inpatient
+  procedures via ICD-9 (469,209 rows) and ICD-10-PCS (390,446); CPT is professional
+  billing, which this extract largely does not carry for ICU stays.
+- Of those 15 hospitalizations, 9 fall inside the ever-IMV cohort and **none** falls in
+  the 1,547 index-bearing blocks. `cpt_cascade_qc.csv` reports
+  `pct_blocks_with_any_procedure_row = 0.06`.
+
+Two consequences worth stating plainly. **First, P26 is what keeps this readable.** Under the
+denominator of P27 the result is "uniformly not charted", and had this analysis published
+sensitivity or kappa it would have reported 0% agreement — which a reader would take as the
+paralytic index failing against truth, rather than as MIMIC not using this code. The decision
+to publish `pct_coded` beside a coverage QC table, and no agreement statistic, is the only
+reason the output says what actually happened. **Second, those 9 blocks are the
+false-negative cell made concrete**: CPT-coded intubations among ever-IMV patients with no
+index paralytic, every one of them excluded by construction from the denominator P27 sets.
+The limitation P26 records in the abstract is observable here as a specific, countable set.
+
+**For the multi-site protocol:** sub-analysis F cannot answer its question at a site whose
+extract lacks professional billing. `cpt_cascade_qc.csv` is what tells a site that before
+they read the cascade, and a site reporting `pct_blocks_with_any_procedure_row` near zero
+should treat F as not run rather than as a null result.
+
 ------------------------------------------------------------------------
 
 ## 6. Table 1
