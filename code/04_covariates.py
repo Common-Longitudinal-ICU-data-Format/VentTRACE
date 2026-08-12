@@ -349,11 +349,6 @@ def _(
 
 @app.cell
 def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_naive):
-    # P20. The casing variants are enumerated at the from_file boundary because that
-    # filter runs before any normalisation we control, and a filter matching zero rows
-    # looks exactly like a site where the thing never happens.
-    _ICU_VARIANTS = ["icu", "ICU", "Icu"]
-
     _adt_table = Adt.from_file(
         data_directory=DATA_DIR,
         filetype=FILETYPE,
@@ -711,10 +706,12 @@ def _(LOOKBACK_HOURS, in_lookback, pl):
                     for h in LOOKBACK_HOURS
                 ]
             )
-            # `.any()` over an all-null group is false in polars, which is the correct
-            # reading here: the table exists, this patient has no row in it, so this
-            # patient had no exposure. That is a measurement, unlike the absent-table
-            # case above.
+            # Null-handling for "table exists, this patient has no row in it" already
+            # happened inside in_lookback: its own `.fill_null(False)` resolves a null
+            # dttm_col (the left join's unmatched side) to "not an exposure" before
+            # `.any()` ever sees it, so `.any()` over an all-null group already reduces to
+            # False. This trailing fill_null is therefore belt-and-braces, not where the
+            # semantics live -- kept only as a defensive backstop, not load-bearing.
             .with_columns([pl.col(c).fill_null(False) for c in cols])
         )
 
@@ -736,11 +733,22 @@ def _(
     pl,
     to_site_naive,
 ):
-    def _attach(df_pd, dttm_col):
-        """Naive-ify the timestamp, lower-case nothing, and map to encounter_block."""
+    def _attach(df_pd, dttm_col, category_col=None):
+        """Naive-ify the timestamp, lower-case the category, map to encounter_block.
+
+        The lower-casing is P20 and is not optional even though `exposure_flags` drops
+        the category column before comparing anything: these frames are returned whole
+        and Task 4's coverage table groups over them. A site charting `Norepinephrine`
+        beside `norepinephrine` would split into two buckets there, which is precisely
+        the silent failure P20 exists to prevent. Every sibling load in this pipeline
+        does the same thing one line after its from_file call.
+        """
         df_pd = df_pd.copy()
         df_pd[dttm_col] = to_site_naive(df_pd[dttm_col])
-        return pl.from_pandas(df_pd).join(
+        out = pl.from_pandas(df_pd)
+        if category_col is not None:
+            out = out.with_columns(pl.col(category_col).str.to_lowercase())
+        return out.join(
             bridge.select("hospitalization_id", "encounter_block"),
             on="hospitalization_id",
             how="inner",
@@ -761,7 +769,7 @@ def _(
             "med_category": VASOPRESSORS + [v.title() for v in VASOPRESSORS] + [v.upper() for v in VASOPRESSORS],
         },
     )
-    vasopressor = _attach(_vaso_pd, "admin_dttm") if _vaso_pd is not None else None
+    vasopressor = _attach(_vaso_pd, "admin_dttm", "med_category") if _vaso_pd is not None else None
 
     _crrt_pd = load_optional(
         CrrtTherapy,
@@ -789,7 +797,7 @@ def _(
             "position_category": _POSITION_VARIANTS,
         },
     )
-    prone = _attach(_pos_pd, "recorded_dttm") if _pos_pd is not None else None
+    prone = _attach(_pos_pd, "recorded_dttm", "position_category") if _pos_pd is not None else None
 
     return crrt, prone, vasopressor
 
