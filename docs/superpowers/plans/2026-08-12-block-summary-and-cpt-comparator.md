@@ -1185,6 +1185,14 @@ def _(mo):
         populate `medication_admin_continuous`. A `false` would make the second look like
         the first; a null cannot be misread, and `covariate_coverage.csv` is what qualifies
         it.
+
+        **Do NOT apply `rate_unit_expr` here.** `02` and `03` drop rate-charted rows from
+        `medication_admin_intermittent` because a discrete push charted as `mcg/kg/min` is
+        an infusion misfiled as a bolus (commit `305de1f`). This table is the opposite
+        case: every row in `medication_admin_continuous` is rate-charted by definition, and
+        filtering on that would zero the vasopressor column entirely — which would read as
+        "no patient was on pressors" rather than as a bug. Presence of an infusion **is**
+        the exposure here; no dose or rate is read at all (P32).
         """
     )
     return
