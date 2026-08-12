@@ -323,5 +323,104 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
     return build_table1, index_covariates, table1_block, table1_index
 
 
+@app.cell
+def _(plt):
+    def mark_zero(ax, x, color):
+        """A published, exactly-zero value: a diamond centered on the baseline.
+
+        Placed at y=0 in DATA coordinates, so it has zero data-height by construction and
+        can never equal or exceed a bar of any positive height. `clip_on=False` keeps its
+        lower half drawn. Copied from `02`/`03` rather than shared -- this project
+        duplicates figure helpers deliberately (spec §4).
+        """
+        ax.plot(
+            [x], [0], marker="D", markersize=7, color=color,
+            linestyle="None", zorder=5, clip_on=False,
+        )
+
+    return (mark_zero,)
+
+
+@app.cell
+def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, mark_zero, pl, plt):
+    # Fixed categorical colours, never cycled: one colour per life-support modality
+    # wherever it appears.
+    _COLORS = {"vasopressor": "#2a78d6", "crrt": "#eb6834", "prone": "#1baf7a"}
+
+    _t1 = pl.read_csv(SHARE_DIR / "table1_by_agent_block.csv")
+
+    _fig, _ax = plt.subplots(figsize=(10, 6))
+    _width = 0.26
+
+    for _i, (_modality, _color) in enumerate(_COLORS.items()):
+        for _j, _h in enumerate(LOOKBACK_HOURS):
+            _row = _t1.filter(pl.col("statistic") == f"{_modality}_{_h}h_pct")
+            _v = _row["overall"][0] if _row.height else None
+            _x = _j + (_i - 1) * _width
+            if _v is None:
+                # Source table absent at this site: null, not zero. Drawn as an open
+                # marker ABOVE the baseline so it cannot be confused with the filled
+                # diamond that means "measured, exactly 0".
+                _ax.plot([_x], [0], marker="o", markersize=7, markerfacecolor="none",
+                         color=_color, linestyle="None", clip_on=False)
+            elif _v > 0:
+                _ax.bar([_x], [_v], width=_width, color=_color)
+            else:
+                mark_zero(_ax, _x, _color)
+
+    _ax.set_xticks(list(range(len(LOOKBACK_HOURS))))
+    _ax.set_xticklabels([f"{_h} h before t0" for _h in LOOKBACK_HOURS])
+    _ax.set_ylabel("% of encounter blocks")
+    _ax.set_ylim(bottom=0)
+    _ax.set_axisbelow(True)
+    _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+
+    _handles = [_ax.plot([], [], color=_c, lw=6, label=_m)[0] for _m, _c in _COLORS.items()]
+    _handles.append(_ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
+                             label="published zero (measured, exactly 0)")[0])
+    _handles.append(_ax.plot([], [], marker="o", markersize=7, markerfacecolor="none",
+                             color="0.3", linestyle="None",
+                             label="source table absent (not measured)")[0])
+    _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
+    _ax.set_title(
+        "T.1 — life support before the index paralytic, encounter blocks\n"
+        "the 1 h to 24 h ramp is where 'already shocked' separates from 'crashed at intubation'"
+    )
+    _fig.tight_layout()
+    _fig.savefig(FIG_DIR / "T1_life_support_by_window.png", dpi=150)
+    plt.close(_fig)
+    print(f"T1_life_support_by_window.png -> {FIG_DIR}")
+    return
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    _cov = pl.read_csv(SHARE_DIR / "covariate_coverage.csv").sort("source")
+
+    _fig, _ax = plt.subplots(figsize=(9, 4.5))
+    for _i, _row in enumerate(_cov.iter_rows(named=True)):
+        _color = "#1baf7a" if _row["available"] else "#b0aca2"
+        _ax.barh([_i], [_row["pct_blocks_covered"]], color=_color, height=0.6)
+        if not _row["available"]:
+            _ax.text(1, _i, "table absent at this site", va="center", fontsize=8, color="#0b0b0b")
+
+    _ax.set_yticks(list(range(_cov.height)))
+    _ax.set_yticklabels(_cov.get_column("source").to_list(), fontsize=9)
+    _ax.set_xlabel("% of encounter blocks with at least one row in the source table")
+    _ax.set_xlim(0, 100)
+    _ax.invert_yaxis()
+    _ax.set_axisbelow(True)
+    _ax.grid(axis="x", color="#e1e0d9", linewidth=0.8)
+    _ax.set_title(
+        "T.2 — source-table coverage\n"
+        "a covariate's zero means nothing until this figure says the table was there"
+    )
+    _fig.tight_layout()
+    _fig.savefig(FIG_DIR / "T2_source_coverage.png", dpi=150)
+    plt.close(_fig)
+    print(f"T2_source_coverage.png -> {FIG_DIR}")
+    return
+
+
 if __name__ == "__main__":
     app.run()
