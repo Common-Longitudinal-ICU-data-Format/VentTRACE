@@ -537,7 +537,6 @@ def test_block_level_columns_are_constant_within_a_block(frame):
         "los_icu_days",
         "hospital_mortality",
         "icu_mortality",
-        "icu_mortality_undeterminable",
     ]
     present = [c for c in block_cols if c in frame.columns]
     assert present, "none of the block-level columns are in the frame"
@@ -598,7 +597,7 @@ bought by making them share a window predicate."
 
 **Interfaces:**
 - Consumes: `spine`, `to_site_naive`, `epoch_minutes`, `in_lookback`, `DATA_DIR`, `FILETYPE`, `TIMEZONE`, `PHI_DIR` from Task 1.
-- Produces: `bridge` (`encounter_block`, `patient_id`, `hospitalization_id`; one row per hospitalization); `resolve_mortality(df) -> pl.DataFrame`; `spine_resolved` — `spine` plus `hospitalization_id` (the one containing t₀), `age_at_admission`, `sex_category`, `race_category`, `ethnicity_category`, `location_at_index`, `los_hospital_days`, `los_icu_days`, `hospital_mortality`, `icu_mortality`, `icu_mortality_undeterminable`.
+- Produces: `bridge` (`encounter_block`, `patient_id`, `hospitalization_id`; one row per hospitalization); `resolve_mortality(df) -> pl.DataFrame`; `spine_resolved` — `spine` plus `hospitalization_id` (the one containing t₀), `age_at_admission`, `sex_category`, `race_category`, `ethnicity_category`, `location_at_index`, `los_hospital_days`, `los_icu_days`, `hospital_mortality`, `icu_mortality`.
 
 - [ ] **Step 1: Write the failing mortality test**
 
@@ -683,7 +682,6 @@ def test_death_after_discharge_is_not_in_hospital_mortality():
     got = resolve_mortality(_block(later, "home")).to_dicts()[0]
     assert got["hospital_mortality"] is False
     assert got["icu_mortality"] is False
-    assert got["icu_mortality_undeterminable"] is False
 
 
 def test_death_before_admission_is_not_in_hospital_mortality():
@@ -704,11 +702,12 @@ def test_expired_category_alone_is_in_hospital_mortality():
     assert got["hospital_mortality"] is True
 
 
-def test_expired_category_alone_is_icu_undeterminable():
-    """P37's stated cost: no death time means no ICU attribution either way."""
+def test_expired_category_alone_is_not_icu_mortality():
+    """No death time means no ADT icu interval can contain it, so icu_mortality is
+    false while hospital_mortality is true. The two are independent (P37 amended)."""
     got = resolve_mortality(_block(None, "expired")).to_dicts()[0]
+    assert got["hospital_mortality"] is True
     assert got["icu_mortality"] is False
-    assert got["icu_mortality_undeterminable"] is True
 
 
 def test_death_inside_an_icu_interval_is_icu_mortality():
@@ -722,7 +721,6 @@ def test_death_inside_an_icu_interval_is_icu_mortality():
         )
     ).to_dicts()[0]
     assert got["icu_mortality"] is True
-    assert got["icu_mortality_undeterminable"] is False
 
 
 def test_death_outside_every_icu_interval_is_not_icu_mortality():
@@ -738,14 +736,32 @@ def test_death_outside_every_icu_interval_is_not_icu_mortality():
     ).to_dicts()[0]
     assert got["hospital_mortality"] is True
     assert got["icu_mortality"] is False
-    assert got["icu_mortality_undeterminable"] is False
+
+
+def test_icu_death_after_discharge_is_icu_mortality_without_hospital_mortality():
+    """The MIMIC artifact P37's amendment accepts, pinned so it cannot regress.
+
+    death_dttm trails discharge_dttm by under a day and the icu interval extends past
+    discharge too. icu_mortality fires; hospital_mortality does not, because the death
+    time is outside the stay and the disposition is not 'expired'. The two flags are
+    independent by design -- this is not a violation to be asserted away.
+    """
+    got = resolve_mortality(
+        _block(
+            DISCH + datetime.timedelta(hours=20),
+            "home",
+            icu_in=DISCH - datetime.timedelta(hours=6),
+            icu_out=DISCH + datetime.timedelta(hours=24),
+        )
+    ).to_dicts()[0]
+    assert got["icu_mortality"] is True
+    assert got["hospital_mortality"] is False
 
 
 def test_survivor_is_not_dead_by_any_route():
     got = resolve_mortality(_block(None, "home")).to_dicts()[0]
     assert got["hospital_mortality"] is False
     assert got["icu_mortality"] is False
-    assert got["icu_mortality_undeterminable"] is False
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -895,17 +911,23 @@ def _(pl):
 
         Returns one row per encounter_block with three booleans:
 
-          hospital_mortality           death_dttm inside a member hospitalization's
-                                       admission -> discharge interval, OR
-                                       discharge_category == 'expired'
-          icu_mortality                death_dttm inside an ADT icu interval
-          icu_mortality_undeterminable dead, but flagged by discharge_category alone --
-                                       no death time, so no ICU attribution either way
+          hospital_mortality  death_dttm inside a member hospitalization's
+                              admission -> discharge interval, OR
+                              discharge_category == 'expired'
+          icu_mortality       death_dttm inside an ADT icu interval
 
-        The bound on death_dttm is the whole point (see the module docstring of
-        tests/test_mortality_bound.py). The three flags are mutually consistent by
-        construction: icu_mortality and icu_mortality_undeterminable are both subsets of
-        hospital_mortality and are disjoint from each other.
+        Two INDEPENDENT measurements, published side by side (P37 as amended
+        2026-08-12). Neither is derived from the other and icu_mortality is deliberately
+        NOT constrained to be a subset of hospital_mortality: at MIMIC a death_dttm can
+        trail its own discharge_dttm by up to 24 hours while the ADT icu interval extends
+        past discharge too, so a handful of blocks are icu_mortality without satisfying
+        the hospital_mortality bound. That is a recording artifact, and the amended
+        decision accepts it rather than papering over it with a grace window fitted to
+        one site.
+
+        The bound on death_dttm is retained and is the whole point of the first flag (see
+        the module docstring of tests/test_mortality_bound.py): unbounded, it fires for a
+        patient discharged alive who died at home months later.
         """
         _death_in_stay = (
             pl.col("death_dttm").is_not_null()
@@ -929,15 +951,6 @@ def _(pl):
                 (pl.col("_death_dated_in_stay") | pl.col("_expired_category")).alias(
                     "hospital_mortality"
                 )
-            )
-            .with_columns(
-                # Dead, but with no usable death time: the ICU question cannot be
-                # answered for this block in either direction. Published as its own
-                # count rather than absorbed into a numerator.
-                (
-                    pl.col("hospital_mortality")
-                    & ~pl.col("_death_dated_in_stay")
-                ).alias("icu_mortality_undeterminable")
             )
             .drop("_death_dated_in_stay", "_expired_category")
             .sort("encounter_block")
@@ -1053,10 +1066,6 @@ def _(adt_icu, epoch_minutes, hospitalization, patient, pl, resolve_mortality):
     print(f"blocks with outcomes : {block_outcomes.height:,}")
     print(f"  hospital mortality : {block_outcomes.get_column('hospital_mortality').sum():,}")
     print(f"  icu mortality      : {block_outcomes.get_column('icu_mortality').sum():,}")
-    print(
-        "  icu undeterminable : "
-        f"{block_outcomes.get_column('icu_mortality_undeterminable').sum():,}"
-    )
     return block_outcomes, los_hospital, los_icu
 ```
 
@@ -1609,7 +1618,6 @@ def _(PHI_DIR, comorbidity, exposures, physiology, pl, spine_resolved):
         "los_icu_days",
         "hospital_mortality",
         "icu_mortality",
-        "icu_mortality_undeterminable",
     ]
     _varying = (
         index_covariates.group_by("encounter_block")
@@ -1947,8 +1955,7 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
         rows += categorical_rows(df, "evidence_tier", "1 index only, 2 +imv transition, 3 +imv +sedation (P31)", EVENT, [1, 2, 3])
 
         rows += binary_rows(df, "hospital_mortality", "death_dttm inside a member stay, or discharge_category expired", BLOCK)
-        rows += binary_rows(df, "icu_mortality", "death_dttm inside an adt icu interval", BLOCK)
-        rows += binary_rows(df, "icu_mortality_undeterminable", "dead by discharge_category alone; no death time to attribute", BLOCK)
+        rows += binary_rows(df, "icu_mortality", "death_dttm inside an adt icu interval; independent of hospital_mortality (P37 amended)", BLOCK)
         rows += categorical_rows(df, "discharge_category", "hospitalization containing t0", EVENT, discharge_levels)
         rows += continuous_rows(df, "los_hospital_days", "sum of member hospitalization LOS in the block (P38)", BLOCK)
         rows += continuous_rows(df, "los_icu_days", "sum of adt icu intervals in the block", BLOCK)
