@@ -823,5 +823,285 @@ def _(crrt, exposure_flags, prone, spine_resolved, vasopressor):
     return (exposures,)
 
 
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## Physiology and comorbidity
+
+        Worst value in each look-back window — lowest SBP, highest HR, lowest SpO₂ — which
+        is what makes "was this a crashing patient" answerable. Weight is the most recent
+        value at or before `t₀` with no look-back limit: a weight recorded on admission is
+        still the patient's weight a week later, and bounding it would null out most of the
+        cohort for no gain (spec §3.2).
+
+        CCI comes from clifpy, computed on the hospitalization containing `t₀`.
+        """
+    )
+    return
+
+
+@app.cell
+def _(
+    DATA_DIR,
+    FILETYPE,
+    LOOKBACK_HOURS,
+    TIMEZONE,
+    Vitals,
+    bridge,
+    bridge_hosp_ids,
+    in_lookback,
+    load_optional,
+    pl,
+    spine_resolved,
+    to_site_naive,
+):
+    _VITAL_SPECS = [
+        ("sbp", "lowest", "sbp"),
+        ("heart_rate", "highest", "hr"),
+        ("spo2", "lowest", "spo2"),
+    ]
+    _VITAL_CATEGORIES = [c for c, _, _ in _VITAL_SPECS] + ["weight_kg"]
+
+    print("optional physiology table:")
+    _vit_pd = load_optional(
+        Vitals,
+        "vitals",
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"],
+        filters={
+            "hospitalization_id": bridge_hosp_ids,
+            "vital_category": _VITAL_CATEGORIES
+            + [v.upper() for v in _VITAL_CATEGORIES]
+            + [v.title() for v in _VITAL_CATEGORIES],
+        },
+    )
+
+    _events = spine_resolved.select("index_paralytic_id", "encounter_block", "t_dttm")
+    # Bound unconditionally: the coverage cell consumes `vitals` whether or not the
+    # table loaded, and a name bound only inside the else branch is a NameError at
+    # exactly the sites this degradation path exists for.
+    vitals = None
+    _physio_cols = [
+        f"{direction}_{short}_{h}h"
+        for _, direction, short in _VITAL_SPECS
+        for h in LOOKBACK_HOURS
+    ] + ["weight_kg"]
+
+    if _vit_pd is None:
+        physiology = _events.select(
+            "index_paralytic_id",
+            *[pl.lit(None, dtype=pl.Float64).alias(c) for c in _physio_cols],
+        )
+    else:
+        _vit_pd["recorded_dttm"] = to_site_naive(_vit_pd["recorded_dttm"])
+        vitals = (
+            pl.from_pandas(_vit_pd)
+            .with_columns(pl.col("vital_category").str.to_lowercase())
+            .join(
+                bridge.select("hospitalization_id", "encounter_block"),
+                on="hospitalization_id",
+                how="inner",
+            )
+        )
+
+        _joined = _events.join(
+            vitals.select("encounter_block", "recorded_dttm", "vital_category", "vital_value"),
+            on="encounter_block",
+            how="left",
+        )
+
+        _aggs = []
+        for _cat, _direction, _short in _VITAL_SPECS:
+            for _h in LOOKBACK_HOURS:
+                _in = in_lookback("t_dttm", "recorded_dttm", _h) & (
+                    pl.col("vital_category") == _cat
+                )
+                _value = pl.when(_in).then(pl.col("vital_value")).otherwise(None)
+                _reduced = _value.min() if _direction == "lowest" else _value.max()
+                _aggs.append(_reduced.alias(f"{_direction}_{_short}_{_h}h"))
+
+        # Weight: most recent at or before t0, no look-back limit. `sort_by` then `last`
+        # is the deterministic pick -- ties broken by the value itself so a re-run cannot
+        # choose differently.
+        _weight_mask = (pl.col("vital_category") == "weight_kg") & (
+            pl.col("recorded_dttm") <= pl.col("t_dttm")
+        )
+        _aggs.append(
+            pl.when(_weight_mask)
+            .then(pl.col("vital_value"))
+            .otherwise(None)
+            .sort_by(
+                pl.when(_weight_mask).then(pl.col("recorded_dttm")).otherwise(None),
+                pl.when(_weight_mask).then(pl.col("vital_value")).otherwise(None),
+                nulls_last=False,
+            )
+            .last()
+            .alias("weight_kg")
+        )
+
+        physiology = _joined.group_by("index_paralytic_id").agg(*_aggs)
+
+    assert physiology.height == spine_resolved.height, "physiology join changed the row count"
+    for _c in _physio_cols:
+        _col = physiology.get_column(_c)
+        print(f"  {_c:22s} {physiology.height - _col.null_count():,} non-null")
+    return physiology, vitals
+
+
+@app.cell
+def _(
+    DATA_DIR,
+    FILETYPE,
+    HospitalDiagnosis,
+    TIMEZONE,
+    bridge,
+    bridge_hosp_ids,
+    load_optional,
+    pl,
+    spine_resolved,
+):
+    print("optional comorbidity table:")
+    _diag_pd = load_optional(
+        HospitalDiagnosis,
+        "hospital_diagnosis",
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=["hospitalization_id", "diagnosis_code", "diagnosis_code_format"],
+        filters={"hospitalization_id": bridge_hosp_ids},
+    )
+
+    # Bound unconditionally for the same reason `vitals` is: the coverage cell
+    # consumes it on both paths.
+    diagnosis = None
+
+    if _diag_pd is None:
+        comorbidity = spine_resolved.select(
+            "index_paralytic_id", pl.lit(None, dtype=pl.Int32).alias("cci")
+        )
+    else:
+        from clifpy.utils.comorbidity import calculate_cci
+
+        _cci_pd = calculate_cci(_diag_pd)
+        _cci_col = [c for c in _cci_pd.columns if c.lower() in ("cci_score", "cci")]
+        assert _cci_col, (
+            f"clifpy's CCI output has no recognisable score column: {list(_cci_pd.columns)}"
+        )
+        _cci = pl.from_pandas(_cci_pd).select(
+            "hospitalization_id", pl.col(_cci_col[0]).cast(pl.Int32).alias("cci")
+        )
+        # Joined on the hospitalization containing t0 (spec §3.2), which spine_resolved
+        # already carries -- not on the block, whose four member stays can have four
+        # different diagnosis lists.
+        comorbidity = spine_resolved.select(
+            "index_paralytic_id", "hospitalization_id"
+        ).join(_cci, on="hospitalization_id", how="left").select("index_paralytic_id", "cci")
+
+        diagnosis = pl.from_pandas(_diag_pd).join(
+            bridge.select("hospitalization_id", "encounter_block"),
+            on="hospitalization_id",
+            how="inner",
+        )
+
+    assert comorbidity.height == spine_resolved.height, "CCI join changed the row count"
+    print(f"  cci non-null : {comorbidity.height - comorbidity.get_column('cci').null_count():,}")
+    return comorbidity, diagnosis
+
+
+@app.cell
+def _(PHI_DIR, comorbidity, exposures, physiology, pl, spine_resolved):
+    index_covariates = (
+        spine_resolved.join(exposures, on="index_paralytic_id", how="left")
+        .join(physiology, on="index_paralytic_id", how="left")
+        .join(comorbidity, on="index_paralytic_id", how="left")
+        .sort(["encounter_block", "p_num", "index_paralytic_id"])
+    )
+
+    assert index_covariates.height == spine_resolved.height, (
+        "assembling the covariate frame changed the row count"
+    )
+    assert index_covariates.get_column("index_paralytic_id").is_unique().all()
+
+    # Block-level columns must be constant within a block -- pinned by
+    # tests/test_block_row_contract.py, asserted here so a bad run fails at the write
+    # rather than at the next notebook's aggregation.
+    _block_cols = [
+        "n_index_in_block",
+        "los_hospital_days",
+        "los_icu_days",
+        "hospital_mortality",
+        "icu_mortality",
+    ]
+    _varying = (
+        index_covariates.group_by("encounter_block")
+        .agg([pl.col(c).n_unique().alias(c) for c in _block_cols])
+        .filter(pl.any_horizontal([pl.col(c) > 1 for c in _block_cols]))
+    )
+    assert _varying.height == 0, (
+        f"{_varying.height:,} blocks have a block-level column varying within the block"
+    )
+
+    PHI_DIR.mkdir(parents=True, exist_ok=True)
+    index_covariates.write_parquet(PHI_DIR / "index_covariates.parquet")
+
+    print(f"index_covariates : {index_covariates.height:,} rows, "
+          f"{len(index_covariates.columns)} columns -> {PHI_DIR}")
+    print(f"  blocks         : {index_covariates.get_column('encounter_block').n_unique():,}")
+    print(f"  p_num == 1     : {index_covariates.filter(pl.col('p_num') == 1).height:,}")
+    return (index_covariates,)
+
+
+@app.cell
+def _(
+    SHARE_DIR,
+    SITE,
+    crrt,
+    diagnosis,
+    index_covariates,
+    pl,
+    prone,
+    publish,
+    vasopressor,
+    vitals,
+):
+    _n_blocks = index_covariates.get_column("encounter_block").n_unique()
+
+    def _cov(name, required, frame):
+        if frame is None:
+            return {
+                "source": name,
+                "required": required,
+                "available": False,
+                "n_rows": 0,
+                "n_blocks_with_rows": 0,
+                "pct_blocks_covered": 0.0,
+            }
+        _b = frame.get_column("encounter_block").n_unique()
+        return {
+            "source": name,
+            "required": required,
+            "available": True,
+            "n_rows": frame.height,
+            "n_blocks_with_rows": _b,
+            "pct_blocks_covered": round(100.0 * _b / _n_blocks, 2),
+        }
+
+    covariate_coverage = pl.DataFrame(
+        [
+            _cov("medication_admin_continuous", False, vasopressor),
+            _cov("crrt_therapy", False, crrt),
+            _cov("position", False, prone),
+            _cov("vitals", False, vitals),
+            _cov("hospital_diagnosis", False, diagnosis),
+        ]
+    ).with_columns(pl.lit(SITE).alias("site_name")).sort("source")
+
+    publish(covariate_coverage, SHARE_DIR / "covariate_coverage.csv", "covariate_coverage")
+    return (covariate_coverage,)
+
+
 if __name__ == "__main__":
     app.run()

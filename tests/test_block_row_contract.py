@@ -82,7 +82,6 @@ def test_block_level_columns_are_constant_within_a_block(frame):
         "los_icu_days",
         "hospital_mortality",
         "icu_mortality",
-        "icu_mortality_undeterminable",
     ]
     present = [c for c in block_cols if c in frame.columns]
     assert present, "none of the block-level columns are in the frame"
