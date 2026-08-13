@@ -28,6 +28,7 @@ Run:  uv run pytest tests/test_publish_guard.py -v
 """
 
 import datetime
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -144,3 +145,26 @@ def test_publish_reports_what_it_wrote(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "gap_distribution" in out
     assert "3 row" in out
+
+
+def test_index_covariates_column_set_is_refused():
+    """The analytic frame is PHI and must never reach final_no_phi.
+
+    It carries four identifier columns and two datetime columns; `publish()` must
+    refuse it on the first of them. This is the same construction the docstring of
+    utils/suppress.py calls out for index_context.parquet -- dropping the ids alone
+    would still leave a row-level frame with timestamps.
+    """
+    frame = pl.DataFrame(
+        {
+            "index_paralytic_id": ["b1_P1"],
+            "encounter_block": [1],
+            "patient_id": ["p1"],
+            "p_num": [1],
+            "t_dttm": [datetime.datetime(2024, 5, 1, 12, 0)],
+            "evidence_tier": [2],
+            "los_hospital_days": [4.5],
+        }
+    )
+    with pytest.raises(AssertionError, match="identifier column"):
+        publish(frame, Path("/dev/null"), "index_covariates")

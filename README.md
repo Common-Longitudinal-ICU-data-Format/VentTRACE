@@ -37,9 +37,26 @@ paralytic, and does not adjudicate whether an intubation occurred.
    `mar_action_category`, `med_dose`, `med_dose_unit` — filtered to the paralytics
    (`rocuronium`, `succinylcholine`, `vecuronium`) and the sedatives (`midazolam`, `etomidate`,
    `ketamine`, `propofol`, `fentanyl`)
+5. **patient**: `patient_id`, `sex_category`, `race_category`, `ethnicity_category`, `death_dttm`
+6. **patient_procedures**: `hospitalization_id`, `procedure_code`, `procedure_code_format`,
+   `procedure_billed_dttm`. Required procedure code: `31500` (endotracheal intubation). It is a
+   comparator, not a reference standard — see the design's P26.
+7. **medication_admin_continuous** *(optional — the pipeline runs without it and publishes 0%
+   coverage)*: `hospitalization_id`, `admin_dttm`, `med_category`
+8. **crrt_therapy** *(optional — the pipeline runs without it and publishes 0% coverage)*:
+   `hospitalization_id`, `recorded_dttm`
+9. **position** *(optional — the pipeline runs without it and publishes 0% coverage)*:
+   `hospitalization_id`, `recorded_dttm`, `position_category`
+10. **vitals** *(optional — the pipeline runs without it and publishes 0% coverage)*:
+    `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value`
+11. **hospital_diagnosis** *(optional — the pipeline runs without it and publishes 0% coverage)*:
+    `hospitalization_id`, `diagnosis_code`, `diagnosis_code_format`
 
-`medication_admin_continuous` is never opened — every dose in this study is a discrete charted
-push. See [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §2 for the full per-notebook table map.
+`patient` and `patient_procedures` are required; `medication_admin_continuous`, `crrt_therapy`,
+`position`, `vitals` and `hospital_diagnosis` are optional — absent, their derived columns are
+null and `covariate_coverage.csv` publishes 0% for them. `04_covariates.py` also re-opens
+`hospitalization` and `adt`, already required above; that is no new contract. See
+[`docs/pipeline_flow.md`](docs/pipeline_flow.md) §2 for the full per-notebook table map.
 
 ## Cohort identification
 
@@ -78,7 +95,7 @@ project PI / consortium.
 
 3. **Run.**
    ```
-   ./run_all.sh            # 01_cohort -> 02_index_paralytic -> 03_context, in order
+   ./run_all.sh            # 01_cohort -> ... -> 06_reference_cpt, in order
    ./run_all.sh 02 03      # or just a subset of steps
    ```
    Each run is logged to `output/logs/run_<UTC timestamp>/`. Results land in
@@ -89,4 +106,4 @@ project PI / consortium.
    uv run pytest
    ```
 
-`code/README.md` has a short per-notebook description of what `01`, `02` and `03` each do.
+`code/README.md` has a short per-notebook description of what `01` through `06` each do.

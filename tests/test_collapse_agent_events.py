@@ -40,7 +40,14 @@ NOTEBOOK_TREE = ast.parse(NOTEBOOK.read_text())
 # timestamp below walks all three.
 ALL_NOTEBOOKS = [
     Path(__file__).parent.parent / "code" / name
-    for name in ("01_cohort.py", "02_index_paralytic.py", "03_context.py", "04_covariates.py")
+    for name in (
+        "01_cohort.py",
+        "02_index_paralytic.py",
+        "03_context.py",
+        "04_covariates.py",
+        "05_table_one.py",
+        "06_reference_cpt.py",
+    )
 ]
 
 

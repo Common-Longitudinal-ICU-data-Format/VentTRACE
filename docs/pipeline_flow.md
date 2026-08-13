@@ -63,17 +63,60 @@ machinery at all — there is nothing to agree with, because there is exactly on
 │  D  first non-IMV → IMV transition in t ± 60 min                 │
 │  E  sedatives charted in t ± 60 min, with dose                   │
 └───────┬──────────────────────────────────────────────────────────┘
+        │  index_context.parquet
+        │
+┌───────▼──────────────────────────────────────────────────────────┐
+│ 04_covariates.py        THE ANALYTIC ROW                         │
+│                                                                  │
+│  demographics · comorbidity · physiology and life support in     │
+│  1/6/24h look-backs · block-level LOS and mortality               │
+└───────┬──────────────────────────────────────────────────────────┘
+        │  index_covariates.parquet — PHI, the sole owner of the analytic row
+        │
+┌───────▼──────────────────────────────────────────────────────────┐
+│ 05_table_one.py         TABLE 1                                  │
+│                                                                  │
+│  published twice from one row inventory: by encounter block at   │
+│  its first index, and by index event                             │
+└───────┬──────────────────────────────────────────────────────────┘
+        │
+┌───────▼──────────────────────────────────────────────────────────┐
+│ 06_reference_cpt.py     THE CPT 31500 COMPARATOR                 │
+│                                                                  │
+│  three evidence tiers vs a block-level billing flag, plus the    │
+│  day offset between the index paralytic and the nearest code     │
+└───────┬──────────────────────────────────────────────────────────┘
         │
    output/final_no_phi/   aggregates + figures, no row-level records
 ```
 
-Three notebooks, run in order, each named for the CLIF table it opens rather than for a step
+Six notebooks, run in order, each named for the CLIF table it opens rather than for a step
 number that would drift as the design changes. `01` touches `hospitalization`, `adt` and
 `respiratory_support`. `02` touches exactly one table —
 `medication_admin_intermittent`, filtered to the three paralytics. `03` touches the waterfalled
 device timeline from `01` and `medication_admin_intermittent` again, filtered to five sedatives.
-`medication_admin_continuous` is never opened anywhere in this pipeline — every dose in this
-study is a discrete charted push.
+`04` is the sole owner of the study's analytic row — one row per index paralytic — and is the
+only notebook that opens `patient`, `vitals`, `medication_admin_continuous`, `crrt_therapy`,
+`position` and `hospital_diagnosis`, re-opening `hospitalization` and `adt` alongside them; its
+output, `index_covariates.parquet`, is PHI (it carries `t_dttm` and the identifier columns) and
+is never published. `05` opens nothing new — it reads `index_covariates.parquet` alone and
+publishes Table 1 twice, once by block and once by index event. `06` opens `patient_procedures`,
+the only notebook in the pipeline that does, alongside `index_covariates.parquet` and
+`cohort_index.parquet`. `medication_admin_continuous` is opened only by `04`; every dose measured
+in `02`/`03` is a discrete charted push, not a continuous infusion.
+
+**New artifacts in `output/final_no_phi/`:** `covariate_coverage.csv` (from `04` — the null rate
+of every derived covariate, including 0% for any optional CLIF table a site's extract lacks);
+`table1_by_agent_block.csv` and `table1_by_agent_index.csv` (from `05` — identical statistic
+inventories, one row per statistic, denominated in encounter blocks and in index events
+respectively); `cpt_cascade.csv`, `cpt_cascade_qc.csv` and `cpt_offset_distribution.csv` (from
+`06` — the three-tier evidence cascade against the CPT `31500` billing flag, its QC, and the
+day-offset histogram between the index paralytic and the nearest code). §2's table map above and
+`code/README.md`'s table carry the same three rows. CPT `31500` is a **comparator, not a
+reference standard** (spec P26 —
+[`superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md`](superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md)),
+and a site whose extract lacks professional billing sees an empty cascade —
+`cpt_cascade_qc.csv`'s `pct_blocks_with_any_procedure_row` says so before the cascade itself does.
 
 ---
 
