@@ -2,8 +2,11 @@
 
 A plain-language walkthrough of what each notebook does and why. The authoritative
 definitions live in
-[`superpowers/specs/2026-08-10-paralytic-index-design.md`](superpowers/specs/2026-08-10-paralytic-index-design.md);
-this document is the map, not the territory. Where the two disagree, the spec wins.
+[`superpowers/specs/2026-08-10-paralytic-index-design.md`](superpowers/specs/2026-08-10-paralytic-index-design.md)
+(`01`–`03`) and
+[`superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md`](superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md)
+(P26–P38, the amendment that is the entire rationale for `04`–`06`); this document is the map,
+not the territory. Where either disagrees with a spec, the spec wins.
 
 Counts shown are MIMIC, `cohort_run_id` 2026-08-10T14:15:46, read from the CSVs in
 `output/final_no_phi/` as they stand.
@@ -374,8 +377,11 @@ published in any form.
 **`output/intermediate_phi/` is row-level PHI and never leaves the site.** It holds real
 timestamps and, upstream of the drop points described above, real identifiers — `cohort.parquet`,
 `cohort_resp_waterfall.parquet`, `cohort_index.parquet`, `index_paralytic.parquet`,
-`index_context.parquet`. Nothing in this directory is a deliverable. Copying a file out of it, by
-any means, is a data breach.
+`index_context.parquet`, `index_covariates.parquet`. Nothing in this directory is a deliverable.
+Copying a file out of it, by any means, is a data breach. `index_covariates.parquet` carries
+`index_paralytic_id`, `encounter_block`, `patient_id`, `p_num` and `t_dttm` — `publish()` refuses
+it by construction, and `tests/test_publish_guard.py`'s
+`test_index_covariates_column_set_is_refused` pins exactly that refusal.
 
 **`output/logs/` also holds PHI-adjacent content and is not a deliverable either.**
 `run_all.sh` tees every run's stdout into `output/logs/run_<UTC timestamp>/`, and `02` prints the

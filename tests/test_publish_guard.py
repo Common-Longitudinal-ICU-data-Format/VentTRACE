@@ -150,7 +150,7 @@ def test_publish_reports_what_it_wrote(tmp_path, capsys):
 def test_index_covariates_column_set_is_refused():
     """The analytic frame is PHI and must never reach final_no_phi.
 
-    It carries four identifier columns and two datetime columns; `publish()` must
+    It carries four identifier columns and one datetime column; `publish()` must
     refuse it on the first of them. This is the same construction the docstring of
     utils/suppress.py calls out for index_context.parquet -- dropping the ids alone
     would still leave a row-level frame with timestamps.

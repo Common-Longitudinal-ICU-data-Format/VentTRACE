@@ -37,7 +37,7 @@ NOTEBOOK_TREE = ast.parse(NOTEBOOK.read_text())
 
 # P19 ("the timezone always comes from config['timezone']; no code path consults the
 # OS zone") binds in every notebook, not just this one -- test_notebook_calls_no_naive_
-# timestamp below walks all three.
+# timestamp below walks every notebook in code/, kept current here as each is added.
 ALL_NOTEBOOKS = [
     Path(__file__).parent.parent / "code" / name
     for name in (
