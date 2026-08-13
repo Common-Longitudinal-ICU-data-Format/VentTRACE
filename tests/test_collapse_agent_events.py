@@ -251,12 +251,15 @@ def test_collapse_merges_across_a_dst_fall_back(central_os_timezone):
 
 @pytest.mark.parametrize("notebook_path", ALL_NOTEBOOKS, ids=lambda p: p.name)
 def test_notebook_calls_no_naive_timestamp(notebook_path):
-    """No stage of `01`, `02` or `03` may convert a timestamp by asking the OS what
+    """No notebook in `ALL_NOTEBOOKS` may convert a timestamp by asking the OS what
     zone it is in.
 
     Walks each notebook's AST rather than grepping, so the trap named in
     `epoch_minutes`' docstring does not itself trip the check. P19 binds everywhere in
-    this pipeline, not only in the notebook the rest of this file otherwise pins.
+    this pipeline, not only in the notebook the rest of this file otherwise pins --
+    which is why the notebook list lives in one place (`ALL_NOTEBOOKS`, kept current as
+    each is added) rather than being named here, where it would need editing again
+    every time this file's own docstring should not have to change.
     """
     tree = ast.parse(notebook_path.read_text())
     offenders = [

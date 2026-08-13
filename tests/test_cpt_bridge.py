@@ -41,6 +41,7 @@ def _load_from_notebook(name, namespace=None):
 
 
 cpt_block_flag = _load_from_notebook("cpt_block_flag")
+nearest_offset_days = _load_from_notebook("nearest_offset_days")
 
 # Block 1 stitches four hospitalizations; block 2 stitches one.
 BRIDGE = pl.DataFrame(
@@ -108,3 +109,96 @@ def test_every_block_in_the_bridge_gets_a_row():
     got = cpt_block_flag(_procs([]), BRIDGE)
     assert sorted(got.get_column("encounter_block").to_list()) == [1, 2]
     assert got.get_column("has_cpt").to_list() == [False, False]
+
+
+# ----------------------------------------------------------------------------------
+# nearest_offset_days -- Task 7's "against every date, not the first and last" fix,
+# lifted by AST the same way cpt_block_flag is above. Untested at MIMIC, where every
+# block has at most one CPT date and the bug this function fixes cannot show up.
+# ----------------------------------------------------------------------------------
+
+
+def _events(block_dates):
+    """block_dates: list of (encounter_block, t_date)."""
+    return pl.DataFrame(
+        {
+            "encounter_block": [b for b, _ in block_dates],
+            "t_date": [d for _, d in block_dates],
+        },
+        schema={"encounter_block": pl.Int32, "t_date": pl.Date},
+    )
+
+
+def test_nearest_offset_reduces_to_the_true_nearest_not_the_extremes():
+    """t0-10, t0-2, t0+5 must reduce to -2.
+
+    `cpt_block_flag` aggregates only first_cpt_date (min) and last_cpt_date (max) for
+    its own QC columns; picking the nearer of THOSE two extremes for this block would
+    compare t0-10 against t0+5 and return +5 -- wrong in both magnitude and sign. -2 is
+    the true nearest date and the only correct answer.
+    """
+    events = _events([(1, D)])
+    cpt_dates = pl.DataFrame(
+        {
+            "encounter_block": [1, 1, 1],
+            "procedure_date": [
+                D - datetime.timedelta(days=10),
+                D - datetime.timedelta(days=2),
+                D + datetime.timedelta(days=5),
+            ],
+        },
+        schema={"encounter_block": pl.Int32, "procedure_date": pl.Date},
+    )
+    got = nearest_offset_days(events, cpt_dates)
+    assert got.get_column("offset_days").to_list() == [-2]
+
+
+def test_nearest_offset_ties_break_toward_the_earlier_date():
+    """An exact tie, [-2, +2], reduces to -2 -- deterministic, and the reading P29
+    cares about: a code that predates the paralytic is the case that tells you the
+    block flag is not time-aligned."""
+    events = _events([(1, D)])
+    cpt_dates = pl.DataFrame(
+        {
+            "encounter_block": [1, 1],
+            "procedure_date": [D - datetime.timedelta(days=2), D + datetime.timedelta(days=2)],
+        },
+        schema={"encounter_block": pl.Int32, "procedure_date": pl.Date},
+    )
+    got = nearest_offset_days(events, cpt_dates)
+    assert got.get_column("offset_days").to_list() == [-2]
+
+
+def test_nearest_offset_is_null_for_a_block_with_no_cpt_date():
+    """A block with no CPT date at all yields offset_days = null, not a missing row."""
+    events = _events([(1, D), (2, D)])
+    cpt_dates = pl.DataFrame(
+        {"encounter_block": [1], "procedure_date": [D]},
+        schema={"encounter_block": pl.Int32, "procedure_date": pl.Date},
+    )
+    got = nearest_offset_days(events, cpt_dates).sort("encounter_block")
+    by_block = dict(
+        zip(got.get_column("encounter_block").to_list(), got.get_column("offset_days").to_list())
+    )
+    assert by_block[1] == 0
+    assert by_block[2] is None
+
+
+def test_nearest_offset_returns_one_row_per_block():
+    """The date join fans out to (block x its own CPT dates); the group_by must
+    collapse it back to exactly one row per block in `events`, no more and no less."""
+    events = _events([(1, D), (2, D), (3, D)])
+    cpt_dates = pl.DataFrame(
+        {
+            "encounter_block": [1, 1, 3],
+            "procedure_date": [
+                D - datetime.timedelta(days=1),
+                D + datetime.timedelta(days=1),
+                D,
+            ],
+        },
+        schema={"encounter_block": pl.Int32, "procedure_date": pl.Date},
+    )
+    got = nearest_offset_days(events, cpt_dates)
+    assert sorted(got.get_column("encounter_block").to_list()) == [1, 2, 3]
+    assert got.height == 3

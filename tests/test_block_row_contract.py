@@ -56,6 +56,42 @@ def index_per_block():
     return pl.read_csv(path)
 
 
+@pytest.fixture(scope="module")
+def table1_block():
+    _, share = _dirs()
+    path = share / "table1_by_agent_block.csv"
+    if not path.exists():
+        pytest.skip("table1_by_agent_block.csv absent; run code/05_table_one.py first")
+    return pl.read_csv(path)
+
+
+@pytest.fixture(scope="module")
+def table1_index():
+    _, share = _dirs()
+    path = share / "table1_by_agent_index.csv"
+    if not path.exists():
+        pytest.skip("table1_by_agent_index.csv absent; run code/05_table_one.py first")
+    return pl.read_csv(path)
+
+
+@pytest.fixture(scope="module")
+def cpt_cascade():
+    _, share = _dirs()
+    path = share / "cpt_cascade.csv"
+    if not path.exists():
+        pytest.skip("cpt_cascade.csv absent; run code/06_reference_cpt.py first")
+    return pl.read_csv(path)
+
+
+@pytest.fixture(scope="module")
+def cpt_offset_distribution():
+    _, share = _dirs()
+    path = share / "cpt_offset_distribution.csv"
+    if not path.exists():
+        pytest.skip("cpt_offset_distribution.csv absent; run code/06_reference_cpt.py first")
+    return pl.read_csv(path)
+
+
 def test_p_num_one_subset_matches_index_per_block(frame, index_per_block):
     """The block table's N must equal the blocks that have at least one index."""
     expected = index_per_block.get_column("n_blocks").sum()
@@ -103,6 +139,48 @@ def test_evidence_tier_is_consistent_with_its_inputs(frame):
         | ((pl.col("evidence_tier") == 1) & pl.col("imv_transition"))
     )
     assert bad.height == 0, f"{bad.height:,} rows have a tier inconsistent with D/E"
+
+
+def test_block_and_index_artifacts_agree_on_n(
+    frame, table1_block, table1_index, cpt_cascade, cpt_offset_distribution, index_per_block
+):
+    """FIX 10 (2026-08-12 final review): automates the reconciliation spec §8 already
+    claims this file performs.
+
+    Four independently-computed block counts must be identical:
+
+      * table1_by_agent_block.csv's own n_rows row
+      * cpt_cascade.csv's n_blocks, summed across the three evidence tiers
+      * cpt_offset_distribution.csv's n, summed across every offset bin plus the
+        explicit "no cpt code" row
+      * index_per_block.csv's n_blocks, summed across the >=1-index grid
+
+    Before this test existed, that agreement was checked by hand once and never pinned
+    -- exactly the kind of cross-notebook drift `04`'s single analytic frame exists to
+    prevent, left unguarded at the one point three separately-published CSVs are
+    supposed to restate the same number.
+
+    table1_by_agent_index.csv's n_rows is checked separately against the analytic
+    frame's own height, since the index-level table's unit is the event, not the
+    block, and has no equivalent in the other three artifacts.
+    """
+    _t1_block_n_rows = table1_block.filter(pl.col("statistic") == "n_rows").get_column("overall")[0]
+    _cpt_cascade_n = cpt_cascade.get_column("n_blocks").sum()
+    _cpt_offset_n = cpt_offset_distribution.get_column("n").sum()
+    _index_per_block_n = index_per_block.get_column("n_blocks").sum()
+
+    assert _t1_block_n_rows == _cpt_cascade_n == _cpt_offset_n == _index_per_block_n, (
+        "the four block counts disagree: table1_by_agent_block.csv n_rows="
+        f"{_t1_block_n_rows}, cpt_cascade.csv sum(n_blocks)={_cpt_cascade_n}, "
+        f"cpt_offset_distribution.csv sum(n)={_cpt_offset_n}, "
+        f"index_per_block.csv sum(n_blocks)={_index_per_block_n}"
+    )
+
+    _t1_index_n_rows = table1_index.filter(pl.col("statistic") == "n_rows").get_column("overall")[0]
+    assert _t1_index_n_rows == frame.height, (
+        f"table1_by_agent_index.csv reports n_rows={_t1_index_n_rows} but "
+        f"index_covariates.parquet has {frame.height:,} rows"
+    )
 
 
 def test_agent_stratum_collapses_only_combinations(frame):

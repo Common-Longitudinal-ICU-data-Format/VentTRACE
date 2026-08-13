@@ -200,7 +200,7 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
     EVENT = "index event"
     BLOCK = "encounter block; repeated for each index event in the index-level table"
 
-    def table1_rows(df, race_levels, ethnicity_levels, sex_levels, discharge_levels, table_unit):
+    def table1_rows(df, race_levels, ethnicity_levels, sex_levels, discharge_levels, table_unit, event_unit):
         """The full row inventory (spec §6), evaluated over whichever unit `df` carries.
 
         `table_unit` is the unit of THIS table's rows -- "encounter block" for the
@@ -209,6 +209,23 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
         block table's 1,547 as index events. That is the one failure the `unit` column
         exists to prevent, so getting it wrong on the row that reports the table's own
         size would undermine every other row's label.
+
+        `event_unit` is P35's whole purpose (FIX 3 of the 2026-08-12 final review): the
+        unit stamped on the *substantive* per-event rows -- demographics, physiology,
+        life support, evidence tier. It used to be the module constant EVENT
+        unconditionally, which is correct for the index table (each row IS an index
+        event) but wrong for the block table, where each row is measured at the block's
+        p_num = 1 event and stands for the block. Publishing "index event" there made
+        `table1_by_agent_block.csv`'s evidence_tier[1]_n = 1084 carry a unit that
+        contradicts both `cpt_cascade.csv` (the identical 1,084 published as n_blocks)
+        and this same file's own n_rows row (which already said "encounter block"). A
+        unit column that is wrong is worse than no unit column at all, because a reader
+        trusts it exactly where it lies.
+
+        Block-level rows (LOS, mortality, n_index_in_block) are the mirror case: they
+        keep BLOCK's "repeated for each index event" caveat in the index table, where
+        it is exactly right, but in the block table they are not repeated -- one row IS
+        one block -- so they take table_unit ("encounter block") there instead.
         """
         rows = []
 
@@ -218,18 +235,22 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
         # is neither a block count nor repeated per index event.
         rows.append({"statistic": "n_patients", "rule": "distinct patient_id", "unit": "patient", "value": float(df.get_column("patient_id").n_unique())})
 
-        rows += continuous_rows(df, "age_at_admission", "hospitalization containing t0", EVENT)
-        rows += categorical_rows(df, "sex_category", "patient.sex_category, lower-cased", EVENT, sex_levels)
-        rows += categorical_rows(df, "race_category", "patient.race_category, lower-cased, raw mCIDE level", EVENT, race_levels)
-        rows += categorical_rows(df, "ethnicity_category", "patient.ethnicity_category, lower-cased", EVENT, ethnicity_levels)
+        # BLOCK in the index table (repeated per index event, as BLOCK's own string
+        # says); table_unit in the block table, where these rows are not repeated.
+        _block_unit = table_unit if table_unit == "encounter block" else BLOCK
 
-        rows += continuous_rows(df, "cci", "Charlson via clifpy on the hospitalization containing t0", EVENT)
+        rows += continuous_rows(df, "age_at_admission", "hospitalization containing t0", event_unit)
+        rows += categorical_rows(df, "sex_category", "patient.sex_category, lower-cased", event_unit, sex_levels)
+        rows += categorical_rows(df, "race_category", "patient.race_category, lower-cased, raw mCIDE level", event_unit, race_levels)
+        rows += categorical_rows(df, "ethnicity_category", "patient.ethnicity_category, lower-cased", event_unit, ethnicity_levels)
+
+        rows += continuous_rows(df, "cci", "Charlson via clifpy on the hospitalization containing t0", event_unit)
 
         for _short, _dir in (("sbp", "lowest"), ("hr", "highest"), ("spo2", "lowest")):
             for _h in LOOKBACK_HOURS:
                 _c = f"{_dir}_{_short}_{_h}h"
-                rows += continuous_rows(df, _c, f"{_dir} vitals {_short} in [t0-{_h}h, t0]", EVENT)
-        rows += continuous_rows(df, "weight_kg", "most recent vitals weight at or before t0", EVENT)
+                rows += continuous_rows(df, _c, f"{_dir} vitals {_short} in [t0-{_h}h, t0]", event_unit)
+        rows += continuous_rows(df, "weight_kg", "most recent vitals weight at or before t0", event_unit)
 
         for _prefix, _rule in (
             ("vasopressor", "any medication_admin_continuous vasopressor row in [t0-{h}h, t0]"),
@@ -237,20 +258,20 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
             ("prone", "any position prone row in [t0-{h}h, t0]"),
         ):
             for _h in LOOKBACK_HOURS:
-                rows += binary_rows(df, f"{_prefix}_{_h}h", _rule.format(h=_h), EVENT)
+                rows += binary_rows(df, f"{_prefix}_{_h}h", _rule.format(h=_h), event_unit)
 
-        rows += binary_rows(df, "imv_transition", "device change onto imv within +/-60 min of t0 (sub-analysis D)", EVENT)
-        rows += binary_rows(df, "any_sedative", "sedative charted within +/-60 min of t0 (sub-analysis E)", EVENT)
-        rows += categorical_rows(df, "no_transition_reason", "why sub-analysis D found no transition", EVENT, ["already_on_imv", "no_transition_in_window", "no_device_record"])
-        rows += categorical_rows(df, "location_at_index", "adt row where in_dttm <= t0 < out_dttm", EVENT, ["ed", "icu", "other", "unknown"])
-        rows += categorical_rows(df, "evidence_tier", "1 index only, 2 +imv transition, 3 +imv +sedation (P31)", EVENT, [1, 2, 3])
+        rows += binary_rows(df, "imv_transition", "device change onto imv within +/-60 min of t0 (sub-analysis D)", event_unit)
+        rows += binary_rows(df, "any_sedative", "sedative charted within +/-60 min of t0 (sub-analysis E)", event_unit)
+        rows += categorical_rows(df, "no_transition_reason", "why sub-analysis D found no transition", event_unit, ["already_on_imv", "no_transition_in_window", "no_device_record"])
+        rows += categorical_rows(df, "location_at_index", "adt row where in_dttm <= t0 < out_dttm", event_unit, ["ed", "icu", "other", "unknown"])
+        rows += categorical_rows(df, "evidence_tier", "1 index only, 2 +imv transition, 3 +imv +sedation (P31)", event_unit, [1, 2, 3])
 
-        rows += binary_rows(df, "hospital_mortality", "death_dttm inside a member stay, or discharge_category expired", BLOCK)
-        rows += binary_rows(df, "icu_mortality", "death_dttm inside an adt icu interval; independent of hospital_mortality (P37 amended)", BLOCK)
-        rows += categorical_rows(df, "discharge_category", "hospitalization containing t0", EVENT, discharge_levels)
-        rows += continuous_rows(df, "los_hospital_days", "sum of member hospitalization LOS in the block (P38)", BLOCK)
-        rows += continuous_rows(df, "los_icu_days", "sum of adt icu intervals in the block", BLOCK)
-        rows += continuous_rows(df, "n_index_in_block", "index paralytics in the block", BLOCK)
+        rows += binary_rows(df, "hospital_mortality", "death_dttm inside a member stay, or discharge_category expired", _block_unit)
+        rows += binary_rows(df, "icu_mortality", "death_dttm inside an adt icu interval; independent of hospital_mortality (P37 amended)", _block_unit)
+        rows += categorical_rows(df, "discharge_category", "hospitalization containing t0", event_unit, discharge_levels)
+        rows += continuous_rows(df, "los_hospital_days", "sum of member hospitalization LOS in the block (P38)", _block_unit)
+        rows += continuous_rows(df, "los_icu_days", "sum of adt icu intervals in the block", _block_unit)
+        rows += continuous_rows(df, "n_index_in_block", "index paralytics in the block", _block_unit)
 
         return rows
 
@@ -271,11 +292,19 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
     )
 
     _TABLE_UNIT = {"block": "encounter block", "index": "index event"}
+    # FIX 3: the substantive per-event rows' unit. The block table's rows are measured
+    # at the block's first index paralytic (p_num = 1), never repeated within the row --
+    # so "index event" alone would understate what the row actually represents.
+    _EVENT_UNIT = {
+        "block": "encounter block (measured at the block's first index paralytic, p_num = 1)",
+        "index": "index event",
+    }
 
     def build_table1(df, label):
         _unit = _TABLE_UNIT[label]
+        _event_unit = _EVENT_UNIT[label]
         _overall = pl.DataFrame(
-            table1_rows(df, _race, _eth, _sex, _disch, _unit)
+            table1_rows(df, _race, _eth, _sex, _disch, _unit, _event_unit)
         ).rename({"value": "overall"})
         # `statistic` is the join key for every stratum column below, so a duplicate in
         # it fans the join out and corrupts the table rather than raising. Checked here,
@@ -296,7 +325,7 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
         for _stratum in STRATA:
             _sub = df.filter(pl.col("agent_stratum") == _stratum)
             _col = pl.DataFrame(
-                table1_rows(_sub, _race, _eth, _sex, _disch, _unit)
+                table1_rows(_sub, _race, _eth, _sex, _disch, _unit, _event_unit)
             ).select("statistic", pl.col("value").alias(_stratum))
             assert _col.height == out.height, (
                 f"stratum {_stratum} produced {_col.height} rows against the overall "

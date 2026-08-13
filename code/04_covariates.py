@@ -419,6 +419,15 @@ def _(pl):
         the module docstring of tests/test_mortality_bound.py): unbounded, it fires for a
         patient discharged alive who died at home months later.
         """
+        # NOTE (2026-08-12 final review, left unchanged): a null `discharge_dttm` (an
+        # open encounter) makes this whole comparison null in polars, not true, so
+        # `_death_in_stay` is silently False for a death recorded during a stay that
+        # has not yet been discharged. `hospital_mortality` still catches it when
+        # `discharge_category == 'expired'` is charted, but a death in an open
+        # encounter with a different discharge_category is missed by this flag.
+        # Changing mortality semantics is a spec decision, not an implementation one --
+        # P37 was already amended once (see the docstring above) -- so this is recorded
+        # rather than silently patched.
         _death_in_stay = (
             pl.col("death_dttm").is_not_null()
             & (pl.col("death_dttm") >= pl.col("admission_dttm"))
@@ -490,6 +499,16 @@ def _(DATA_DIR, FILETYPE, Patient, TIMEZONE, cohort_index, pl, to_site_naive):
 def _(adt_icu, epoch_minutes, hospitalization, patient, pl, resolve_mortality):
     # LOS: summed over member hospitalizations, never the block's span (P38). The span
     # would count the stitch gaps, during which the patient was not in the hospital.
+    #
+    # Null-propagating, not `pl.col("_days").sum()` directly: polars' `.sum()` over a
+    # group that is ALL null returns 0.0, not null. A block whose only hospitalization
+    # has a null `discharge_dttm` (an open encounter) would therefore publish
+    # `los_hospital_days = 0.0` -- a fabricated measured zero, indistinguishable from a
+    # real same-day stay, and invisible to Table 1 because `los_hospital_days_n_nonnull`
+    # only counts blocks that got a value at all and this fabricated zero counts as one.
+    # If ANY member interval is unmeasurable the block's LOS is null instead -- a
+    # partial sum over the measurable members would understate the true LOS just as
+    # silently as the all-null zero does.
     los_hospital = (
         hospitalization.with_columns(
             (
@@ -497,15 +516,35 @@ def _(adt_icu, epoch_minutes, hospitalization, patient, pl, resolve_mortality):
             ).alias("_days")
         )
         .group_by("encounter_block")
-        .agg(pl.col("_days").sum().round(3).alias("los_hospital_days"))
+        .agg(
+            pl.when(pl.col("_days").is_null().any())
+            .then(pl.lit(None, dtype=pl.Float64))
+            .otherwise(pl.col("_days").sum())
+            .round(3)
+            .alias("los_hospital_days")
+        )
     )
 
+    # Same null-propagation, same reason, for the ICU sum: a null `out_dttm` (an open
+    # final ADT interval) must not silently become a zero or a truncated partial sum.
+    # `_has_icu_row` is carried through so the `fill_null(0.0)` below (which is correct
+    # for a block with NO icu row at all) cannot also swallow this different case -- a
+    # block that DOES have an icu row but one with an unmeasurable interval. "no ICU
+    # stay" and "ICU stay of unknown length" are different facts and must stay
+    # distinguishable after the join, not collapse into the same null.
     los_icu = (
         adt_icu.with_columns(
             ((epoch_minutes("out_dttm") - epoch_minutes("in_dttm")) / 1440.0).alias("_days")
         )
         .group_by("encounter_block")
-        .agg(pl.col("_days").sum().round(3).alias("los_icu_days"))
+        .agg(
+            pl.when(pl.col("_days").is_null().any())
+            .then(pl.lit(None, dtype=pl.Float64))
+            .otherwise(pl.col("_days").sum())
+            .round(3)
+            .alias("los_icu_days"),
+            pl.lit(True).alias("_has_icu_row"),
+        )
     )
 
     # One row per (block, hospitalization, icu interval) for resolve_mortality. The
@@ -541,7 +580,19 @@ def _(adt_icu, epoch_minutes, hospitalization, patient, pl, resolve_mortality):
         # A block with no ADT icu row spent no time in an ICU. That is a measured zero,
         # not a missing value, and filling it keeps the median from being computed on a
         # denominator that silently drops non-ICU blocks.
-        .with_columns(pl.col("los_icu_days").fill_null(0.0))
+        #
+        # Only for blocks where `_has_icu_row` is null -- i.e. absent from `los_icu`
+        # entirely, which happens only when the block has no icu row at all. A block
+        # that DOES have an icu row but an unmeasurable one (`_has_icu_row` is True,
+        # `los_icu_days` is null from the agg above) must keep its null, not be
+        # collapsed into the same "no ICU stay" zero.
+        .with_columns(
+            pl.when(pl.col("_has_icu_row").is_null())
+            .then(pl.col("los_icu_days").fill_null(0.0))
+            .otherwise(pl.col("los_icu_days"))
+            .alias("los_icu_days")
+        )
+        .drop("_has_icu_row")
         .sort("encounter_block")
     )
 
@@ -564,8 +615,11 @@ def _(adt, block_outcomes, hospitalization, patient, pl, spine):
             & (pl.col("t_dttm") <= pl.col("discharge_dttm"))
         )
         # A t0 landing in two member hospitalizations would mean overlapping stays, which
-        # the stitcher should have merged. Take the earliest admission deterministically
-        # and assert the tie is rare enough to be visible.
+        # the stitcher should have merged -- it should not happen, but the tiebreak below
+        # is deterministic and complete rather than relying on that: sorted first by
+        # admission_dttm (earliest wins) and then by hospitalization_id (a total order on
+        # the remaining candidates, so even a same-instant admission_dttm tie resolves the
+        # same way on every run) before `.first()` picks the row.
         .sort(["index_paralytic_id", "admission_dttm", "hospitalization_id"])
         .group_by("index_paralytic_id", maintain_order=True)
         .first()

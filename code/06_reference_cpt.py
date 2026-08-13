@@ -157,6 +157,52 @@ def _(pl):
 
 
 @app.cell
+def _(pl):
+    def nearest_offset_days(events, cpt_dates):
+        """Signed days from each block's t0 to the NEAREST CPT date, one row per block.
+
+        `events` carries encounter_block and t_date (one row per block in the
+        denominator). `cpt_dates` carries encounter_block and procedure_date (zero, one
+        or many rows per block, already bridged from hospitalization_id).
+
+        Extracted as its own function (FIX 11 of the 2026-08-12 final review) so it can
+        be reached by a test: it was previously inline in a marimo cell, which is
+        untestable directly, and it is inert at MIMIC -- every MIMIC block has at most
+        one CPT date, so the bug this function fixes cannot show up there. Untested
+        precisely where it matters is not a state this reduction should stay in.
+
+        Computed against EVERY CPT date in the block, not against the first and last
+        two extremes `cpt_block_flag` aggregates for its own QC columns: a block coded
+        at t0-10, t0-2 and t0+5 has first = t0-10 and last = t0+5, so an extremes-only
+        comparison would return +5 when the true nearest is -2 -- wrong in magnitude
+        and in sign, in the one table whose whole purpose is establishing whether the
+        billed intubation is time-aligned with the paralytic.
+
+        Nearest by absolute distance; ties broken toward the EARLIER date, so an
+        equidistant pair reports the negative value -- the reading P29 cares about,
+        since a code that predates the paralytic is the case that tells you the block
+        flag is not time-aligned.
+
+        A block with no CPT date at all gets offset_days = null, not a missing row:
+        every block in `events` returns exactly one row, by construction of the left
+        join followed by one row per encounter_block group.
+        """
+        return (
+            events.select("encounter_block", "t_date")
+            .join(cpt_dates, on="encounter_block", how="left")
+            .with_columns(
+                (pl.col("procedure_date") - pl.col("t_date")).dt.total_days().alias("_d")
+            )
+            .sort(["encounter_block", pl.col("_d").abs(), "_d"], nulls_last=True)
+            .group_by("encounter_block", maintain_order=True)
+            .first()
+            .select("encounter_block", pl.col("_d").alias("offset_days"))
+        )
+
+    return (nearest_offset_days,)
+
+
+@app.cell
 def _(
     CPT_FORMAT_VARIANTS,
     CPT_INTUBATION,
@@ -218,19 +264,34 @@ def _(
     )
 
     # patient_procedures is REQUIRED (spec §4): a missing file already raises inside
-    # clifpy's from_file. What that does NOT catch is the CPT_FORMAT_VARIANTS filter
-    # silently matching nothing -- indistinguishable, from a bare zero, from a site
-    # that genuinely bills no CPT at all (see the comment on CPT_FORMAT_VARIANTS
-    # above). procedures_all being non-empty proves the format filter is actually
-    # doing something at this site; procedures (the code == 31500 filter) is allowed
-    # to be legitimately zero and is reported as-is -- that is a finding, not a bug.
-    assert procedures_all.height > 0, (
-        "patient_procedures loaded but zero rows matched CPT_FORMAT_VARIANTS for "
-        "these hospitalizations -- fails loudly rather than silently publishing a "
-        "cascade whose zero agreement might just mean the filter never matched "
-        "(spec §4: a comparator that silently reports zero agreement because its "
-        "input was absent is worse than no comparator)"
-    )
+    # clifpy's from_file -- that is what "fail loudly" means for a genuinely absent
+    # table, and no further check is needed for it here.
+    #
+    # What from_file's raise does NOT catch is CPT_FORMAT_VARIANTS matching zero rows
+    # for this cohort. That case is NOT a hard failure: `procedures_all` is already
+    # filtered at the from_file boundary to CPT-format rows AND to this cohort's
+    # hospitalizations, so a zero here just as easily means "this site does not bill
+    # CPT for its analytic cohort" as it means a broken extract, and the two are
+    # indistinguishable from inside this notebook. Spec §5 is explicit that a site in
+    # that position must be able to see it as a site fact, not have the pipeline die
+    # before publishing the QC table that names it -- "a site reporting
+    # pct_blocks_with_any_cpt_format_row near zero should treat F as not run rather
+    # than as a null result" cannot be read by an operator whose notebook already
+    # aborted. At MIMIC this passed with exactly one row. A loud print, not an assert:
+    # the empty result is what cpt_cascade_qc.csv exists to publish.
+    if procedures_all.height == 0:
+        print(
+            "\n"
+            "WARNING: zero rows matched CPT_FORMAT_VARIANTS for this cohort's "
+            "hospitalizations.\n"
+            "  Sub-analysis F cannot answer its question at this site -- every tier of "
+            "the cascade\n"
+            "  below will show 0% coded, and that 0% is indistinguishable from a "
+            "broken CPT extract\n"
+            "  from inside this notebook. See cpt_cascade_qc.csv "
+            "(pct_blocks_with_any_cpt_format_row)\n"
+            "  before reading cpt_cascade.csv as a measurement of agreement.\n"
+        )
 
     cpt_flags = cpt_block_flag(procedures, bridge)
 
@@ -308,11 +369,18 @@ def _(SHARE_DIR, SITE, blocks, cpt_flags, pl, procedures_all, publish, bridge):
     cpt_cascade_qc = pl.DataFrame(
         [
             {"stat": "n_blocks_denominator", "value": float(blocks.height)},
-            {"stat": "n_blocks_with_any_procedure_row", "value": float(_blocks_with_any_proc)},
-            {"stat": "pct_blocks_with_any_procedure_row", "value": round(100.0 * _blocks_with_any_proc / blocks.height, 2)},
+            # Named for what `procedures_all` actually is: CPT-FORMAT rows (P20's casing
+            # variants at the from_file boundary), not "any procedure of any kind". MIMIC
+            # has 1,045,729 procedure rows covering essentially every block but publishes
+            # this stat at 0.06% -- under the old "any_procedure" name that reads as a
+            # broken extract; under this name it correctly reads as "this cohort's
+            # billing is CPT-format-thin", which is the site fact sub-analysis F needs.
+            {"stat": "n_blocks_with_any_cpt_format_row", "value": float(_blocks_with_any_proc)},
+            {"stat": "pct_blocks_with_any_cpt_format_row", "value": round(100.0 * _blocks_with_any_proc / blocks.height, 2)},
             {"stat": "n_blocks_with_cpt_31500", "value": float(_codes.gt(0).sum())},
             {"stat": "max_cpt_codes_in_one_block", "value": float(_codes.max())},
-            {"stat": "median_cpt_codes_where_present", "value": float(_codes.filter(_codes > 0).median() or 0)},
+            # A median over an empty set is not zero -- null, not `or 0` (FIX 6).
+            {"stat": "median_cpt_codes_where_present", "value": _codes.filter(_codes > 0).median()},
         ]
     ).with_columns(pl.lit(SITE).alias("site_name")).sort("stat")
 
@@ -328,41 +396,24 @@ def _(
     SITE,
     blocks,
     bridge,
+    nearest_offset_days,
     pl,
     procedures,
     publish,
 ):
     # P30. Signed days from t0 to the NEAREST CPT date, so "billed before the paralytic"
     # and "billed after" are separable. Negative means the code predates t0.
-    #
-    # Computed against EVERY CPT date in the block, not against the first and last.
-    # `cpt_block_flag` aggregates to min/max for its QC columns, and picking the nearer
-    # of those two extremes is not the nearest date: a block coded at t0-10, t0-2 and
-    # t0+5 has first = t0-10 and last = t0+5, so the extremes comparison returns +5 when
-    # the true nearest is -2 -- wrong in magnitude and in sign, in the one table whose
-    # whole purpose is establishing whether the billed intubation is time-aligned with
-    # the paralytic. Inert wherever a block has at most two CPT dates, which is why it
-    # survives a site with sparse billing and misreports at one with real coverage.
+    # `nearest_offset_days` (defined above, pinned by tests/test_cpt_bridge.py) is the
+    # reduction; this cell only assembles its two inputs.
     _cpt_dates = procedures.join(
         bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner"
     ).select("encounter_block", "procedure_date")
 
-    _with_dates = (
-        blocks.select("encounter_block", "t_dttm")
-        .with_columns(pl.col("t_dttm").dt.date().alias("t_date"))
-        .join(_cpt_dates, on="encounter_block", how="left")
-        .with_columns(
-            (pl.col("procedure_date") - pl.col("t_date")).dt.total_days().alias("_d")
-        )
-        # Nearest by absolute distance; ties broken toward the EARLIER date, so an
-        # equidistant pair reports the negative value. Deterministic, and it matches the
-        # reading P29 cares about -- a code that predates the paralytic is the case that
-        # tells you the block flag is not time-aligned.
-        .sort(["encounter_block", pl.col("_d").abs(), "_d"], nulls_last=True)
-        .group_by("encounter_block", maintain_order=True)
-        .first()
-        .select("encounter_block", pl.col("_d").alias("offset_days"))
+    _events = blocks.select("encounter_block", "t_dttm").with_columns(
+        pl.col("t_dttm").dt.date().alias("t_date")
     )
+
+    _with_dates = nearest_offset_days(_events, _cpt_dates)
 
     # One row per block, still: the group_by collapses the fan-out the date join created.
     assert _with_dates.height == blocks.height, (
@@ -411,7 +462,41 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     _c = pl.read_csv(SHARE_DIR / "cpt_cascade.csv").sort("evidence_tier")
     _total = _c.get_column("n_blocks").sum()
 
-    _fig, _ax = plt.subplots(figsize=(10, 5.5))
+    # FIX 4 (2026-08-12 final review). Standing alone in a slide, the mosaic below reads
+    # as "the paralytic index agrees with billing X% of the time" with no defence against
+    # X being near zero for a site-level reason rather than a clinical one. Every other
+    # artifact in sub-analysis F carries that defence -- the module docstring, P26, the
+    # QC table itself -- except the one artifact most likely to be shown without any of
+    # them attached. The number comes from cpt_cascade_qc.csv, never recomputed here, so
+    # nothing appears on the figure that is not already in a published CSV (spec §7).
+    _qc = pl.read_csv(SHARE_DIR / "cpt_cascade_qc.csv")
+    _coverage_pct = _qc.filter(pl.col("stat") == "pct_blocks_with_any_cpt_format_row")["value"][0]
+
+    # 5% chosen as the threshold: MIMIC's observed value is 0.06%, two orders of
+    # magnitude below it, and a site with reasonable CPT billing for its ICU cohort
+    # should clear it easily. Below it, "thin billing extract" is a better explanation
+    # for a low pct_coded than "the index disagrees with truth", so the subtitle says so
+    # explicitly rather than leaving that inference to the reader.
+    #
+    # Split across two lines unconditionally, not left to wrap: a one-line subtitle at
+    # this font size ran past the right edge of the canvas and was clipped by
+    # `savefig` (no `bbox_inches="tight"` is used, so text outside the figure's bbox is
+    # silently cut rather than shrunk) -- checked by measuring the rendered PNG's ink
+    # extent, not by eye.
+    _COVERAGE_THRESHOLD = 5.0
+    _coverage_line1 = (
+        f"CPT coverage at this site: {_coverage_pct:.2f}% of blocks carry any "
+        "CPT-format procedure row"
+    )
+    if _coverage_pct < _COVERAGE_THRESHOLD:
+        _coverage_line2 = (
+            f"below {_COVERAGE_THRESHOLD:.0f}%, sub-analysis F cannot answer its question "
+            "here (see cpt_cascade_qc.csv)"
+        )
+    else:
+        _coverage_line2 = "(see cpt_cascade_qc.csv)"
+
+    _fig, _ax = plt.subplots(figsize=(10, 6.8))
 
     # A mosaic, not grouped bars. The tiers are very unequal -- tier 1 in the thousands
     # against tiers 2-3 in the hundreds -- and grouped bars would render the small tiers
@@ -460,10 +545,13 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     _ax.legend(handles=_handles, loc="lower center", bbox_to_anchor=(0.5, -0.32), ncol=2, fontsize=8, frameon=False)
     _ax.set_title(
         "F.1 — CPT agreement by paralytic evidence tier\n"
-        "row height is the tier's share of blocks; CPT is a comparator, not a reference standard (P26)"
+        "row height is the tier's share of blocks; CPT is a comparator, not a reference standard (P26)\n"
+        f"{_coverage_line1}\n"
+        f"{_coverage_line2}",
+        fontsize=10,
     )
     _fig.tight_layout()
-    _fig.subplots_adjust(left=0.24, bottom=0.22)
+    _fig.subplots_adjust(left=0.24, bottom=0.20, top=0.78)
     _fig.savefig(FIG_DIR / "F1_cpt_cascade.png", dpi=150)
     plt.close(_fig)
     print(f"F1_cpt_cascade.png -> {FIG_DIR}")
