@@ -133,7 +133,7 @@ The frame carries identifiers and `t_dttm`, so `utils/suppress.py` will refuse i
 evidence_tier · rule · n_blocks · n_cpt_yes · n_cpt_no · pct_coded
 ```
 
-**`cpt_cascade_qc.csv`** — denominator quality: blocks with any `patient_procedures` row at all, and the distribution of CPT codes per block. A site with thin billing extracts is visible here rather than being reported as poor agreement in the table above.
+**`cpt_cascade_qc.csv`** — denominator quality: blocks with any CPT-format `patient_procedures` row (`n_blocks_with_any_cpt_format_row` / `pct_blocks_with_any_cpt_format_row` — named for the CPT-format filter that actually produces them, not "any procedure of any kind"; see the observed result below for why the distinction matters), and the distribution of CPT codes per block. A site with thin billing extracts is visible here rather than being reported as poor agreement in the table above.
 
 **`cpt_offset_distribution.csv`** — P30. Days between `t₀` and the nearest CPT `31500` date, binned, with an explicit `no_cpt` row. Signed, so "billed before the paralytic" and "billed after" are separable.
 
@@ -151,7 +151,10 @@ The tier partition came out as predicted (1,084 / 121 / 342, summing to 1,547; t
   billing, which this extract largely does not carry for ICU stays.
 - Of those 15 hospitalizations, 9 fall inside the ever-IMV cohort and **none** falls in
   the 1,547 index-bearing blocks. `cpt_cascade_qc.csv` reports
-  `pct_blocks_with_any_procedure_row = 0.06`.
+  `pct_blocks_with_any_cpt_format_row = 0.06` — MIMIC has 1,045,729 procedure rows
+  covering essentially every block, so this stat is deliberately scoped to
+  CPT-*format* rows and not to "any procedure of any kind"; publishing it under an
+  all-procedures name would read as a broken extract instead of as this site fact.
 
 Two consequences worth stating plainly. **First, P26 is what keeps this readable.** Under the
 denominator of P27 the result is "uniformly not charted", and had this analysis published
@@ -165,7 +168,7 @@ The limitation P26 records in the abstract is observable here as a specific, cou
 
 **For the multi-site protocol:** sub-analysis F cannot answer its question at a site whose
 extract lacks professional billing. `cpt_cascade_qc.csv` is what tells a site that before
-they read the cascade, and a site reporting `pct_blocks_with_any_procedure_row` near zero
+they read the cascade, and a site reporting `pct_blocks_with_any_cpt_format_row` near zero
 should treat F as not run rather than as a null result.
 
 ------------------------------------------------------------------------

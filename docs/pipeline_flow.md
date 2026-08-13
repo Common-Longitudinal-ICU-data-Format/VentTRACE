@@ -376,8 +376,9 @@ published in any form.
 
 **`output/intermediate_phi/` is row-level PHI and never leaves the site.** It holds real
 timestamps and, upstream of the drop points described above, real identifiers — `cohort.parquet`,
-`cohort_resp_waterfall.parquet`, `cohort_index.parquet`, `index_paralytic.parquet`,
-`index_context.parquet`, `index_covariates.parquet`. Nothing in this directory is a deliverable.
+`cohort_resp_imv_raw.parquet`, `cohort_resp_waterfall.parquet`, `cohort_index.parquet`,
+`index_paralytic.parquet`, `index_context.parquet`, `index_covariates.parquet`. Nothing in this
+directory is a deliverable.
 Copying a file out of it, by any means, is a data breach. `index_covariates.parquet` carries
 `index_paralytic_id`, `encounter_block`, `patient_id`, `p_num` and `t_dttm` — `publish()` refuses
 it by construction, and `tests/test_publish_guard.py`'s
