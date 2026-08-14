@@ -112,9 +112,12 @@ in `02`/`03` is a discrete charted push, not a continuous infusion.
 of every derived covariate, including 0% for any optional CLIF table a site's extract lacks);
 `table1_by_agent_block.*` and `table1_by_agent_index.*` (from `05` — identical statistic
 inventories, denominated in encounter blocks and in index events respectively, each published
-three ways: the long numeric `.csv` the pipeline and its tests read, a `_readable.csv` formatted
-for a person, and a `.json` carrying the same numbers plus a provenance header for pooling with
-other sites); `cpt_cascade.csv` and `cpt_cascade_qc.csv` (from `06` — the three-tier evidence
+as two files: a `_readable.csv` formatted for a person, and a `.json` carrying the long numeric
+form plus a provenance header — read by this pipeline's own figure T.1, by its tests, and by a
+coordinating centre pooling sites alike. **The Table 1 JSONs are the only artifacts in
+`final_no_phi/` that are not CSVs**, and the only published tables a reader must unwrap
+(`payload["rows"]`) before reading; the long form carried its own `.csv` until 2026-08-14, when
+the study lead withdrew it as an exact duplicate of that array); `cpt_cascade.csv` and `cpt_cascade_qc.csv` (from `06` — the three-tier evidence
 cascade against the CPT `31500` billing flag, and its QC). §2's table map above and
 `code/README.md`'s table carry the same rows. The CPT comparison is **presence within the
 encounter block**: all the codes for all the block's member hospitalizations are pooled, and one

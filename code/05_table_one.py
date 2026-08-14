@@ -45,18 +45,21 @@ def _(mo):
         count are all heavily right-skewed. Categoricals publish `n` **and** `pct`: a
         percentage without its numerator cannot be pooled across sites.
 
-        Each unit is published in **three** forms from one row inventory (P39):
+        Each unit is published in **two** files from one row inventory (P39, amended
+        2026-08-14):
 
         | file | for | shape |
         |---|---|---|
-        | `table1_by_agent_{unit}.csv` | the pipeline and its tests | long, one statistic per row, numeric |
         | `table1_by_agent_{unit}_readable.csv` | a human, a manuscript | one variable per row, `63.2 (16.4)` |
-        | `table1_by_agent_{unit}.json` | pooling with other sites | the long form plus a provenance header |
+        | `table1_by_agent_{unit}.json` | every machine — this pipeline, its tests, and other sites | one statistic per row, numeric, plus a provenance header |
 
-        The readable CSV is formatted **from** the long one and never recomputed, so the
-        three can restate a number but cannot disagree about it. The JSON keeps the
-        numbers as numbers: a partner pooling `63.2 (16.4)` would have to parse the
-        string back apart first, and string parsing is where sites diverge.
+        The readable CSV is formatted **from** the same long frame the JSON serializes
+        and is never recomputed, so the two can restate a number but cannot disagree
+        about it. The JSON keeps the numbers as numbers: anything pooling or plotting
+        `63.2 (16.4)` would have to parse the string back apart first, and string
+        parsing is where sites diverge. It is the **only** artifact in `final_no_phi/`
+        that is not a CSV, and it is the one place in this pipeline where a reader must
+        unwrap `payload["rows"]` before reading a published table.
 
         Proning was withdrawn from the covariate set on 2026-08-14 at the study lead's
         direction, so no `position` row appears here and `04` no longer opens the table.
@@ -232,7 +235,7 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
         unconditionally, which is correct for the index table (each row IS an index
         event) but wrong for the block table, where each row is measured at the block's
         p_num = 1 event and stands for the block. Publishing "index event" there made
-        `table1_by_agent_block.csv`'s evidence_tier[1]_n = 1084 carry a unit that
+        `table1_by_agent_block`'s evidence_tier[1]_n = 1084 carry a unit that
         contradicts both `cpt_cascade.csv` (the identical 1,084 published as n_blocks)
         and this same file's own n_rows row (which already said "encounter block"). A
         unit column that is wrong is worse than no unit column at all, because a reader
@@ -432,7 +435,7 @@ def _(pl):
     def build_readable(long_df, display, value_columns):
         """The human table, formatted FROM the published long table (P39).
 
-        `long_df` is exactly what `table1_by_agent_{unit}.csv` carries; every number
+        `long_df` is exactly what `table1_by_agent_{unit}.json`'s `rows` array carries; every number
         here is looked up out of it and formatted, never recomputed from the analytic
         frame. Two tables that recompute the same quantity can disagree; two tables
         where one is a rendering of the other cannot.
@@ -540,7 +543,15 @@ def _(
             # Full tiebreak so the file is byte-identical across runs (commit 6c70808).
             .sort(["statistic", "unit"])
         )
-        publish(out, SHARE_DIR / f"table1_by_agent_{label}.csv", f"table1_by_agent_{label}")
+        # `out` -- the long, one-statistic-per-row, numeric form -- is published as JSON
+        # below and NOT as its own CSV. It carried a `table1_by_agent_{label}.csv` until
+        # 2026-08-14, when the study lead withdrew it as redundant: the JSON's `rows`
+        # array is that CSV's content exactly, and the two consumers that read the file
+        # (figure T.1 and tests/test_block_row_contract.py) read the JSON instead.
+        #
+        # The frame itself is not redundant and is still built once, here: the readable
+        # table is formatted FROM it and the JSON is a serialization OF it, so both
+        # forms still come from one computation and cannot disagree.
 
         # The same table for a person. `row_order` is the layout, so the file survives a
         # spreadsheet's re-sort: without it the only ordering is alphabetical by label,
@@ -619,13 +630,19 @@ def _(plt):
 
 
 @app.cell
-def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, mark_zero, pl, plt):
+def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, json, mark_zero, pl, plt):
     # Fixed categorical colours, never cycled: one colour per life-support modality
     # wherever it appears.
     # Proning was withdrawn from the covariate set on 2026-08-14; two modalities remain.
     _COLORS = {"vasopressor": "#2a78d6", "crrt": "#eb6834"}
 
-    _t1 = pl.read_csv(SHARE_DIR / "table1_by_agent_block.csv")
+    # Read from the published JSON, not from an in-memory frame: the convention set in
+    # `02`/`03` is that a figure draws only from an artifact a reader can also open, so
+    # no number reaches a plot that is not in a published file beside it. That artifact
+    # is JSON rather than CSV since 2026-08-14 (P39 amended); `rows` is the same long
+    # table the CSV carried.
+    with open(SHARE_DIR / "table1_by_agent_block.json", "r") as _f:
+        _t1 = pl.DataFrame(json.load(_f)["rows"])
 
     _fig, _ax = plt.subplots(figsize=(10, 6))
     _width = 0.26

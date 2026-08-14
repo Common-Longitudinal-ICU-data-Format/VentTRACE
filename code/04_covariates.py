@@ -52,7 +52,7 @@ def _(mo):
         The sole owner of this study's analytic row. Everything downstream — both Table 1s
         and the CPT cascade — aggregates the single frame this notebook writes, and none of
         them re-derives a block, re-selects `p_num`, or re-computes a tier. That is what
-        keeps `table1_by_agent_block.csv` and `cpt_cascade.csv` from disagreeing about N.
+        keeps `table1_by_agent_block.json` and `cpt_cascade.csv` from disagreeing about N.
 
         One row per index paralytic event. Block-level attributes (LOS, mortality, the
         block's index count) are constant within a block and repeat down its rows; the
