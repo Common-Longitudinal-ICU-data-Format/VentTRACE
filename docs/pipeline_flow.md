@@ -99,27 +99,31 @@ number that would drift as the design changes. `01` touches `hospitalization`, `
 `medication_admin_intermittent`, filtered to the three paralytics. `03` touches the waterfalled
 device timeline from `01` and `medication_admin_intermittent` again, filtered to five sedatives.
 `04` is the sole owner of the study's analytic row — one row per index paralytic — and is the
-only notebook that opens `patient`, `vitals`, `medication_admin_continuous`, `crrt_therapy`,
-`position` and `hospital_diagnosis`, re-opening `hospitalization` and `adt` alongside them; its
+only notebook that opens `patient`, `vitals`, `medication_admin_continuous`, `crrt_therapy`
+and `hospital_diagnosis`, re-opening `hospitalization` and `adt` alongside them; its
 output, `index_covariates.parquet`, is PHI (it carries `t_dttm` and the identifier columns) and
 is never published. `05` opens nothing new — it reads `index_covariates.parquet` alone and
-publishes Table 1 twice, once by block and once by index event. `06` opens `patient_procedures`,
+publishes Table 1 twice, once by block and once by index event, in three forms each. `06` opens `patient_procedures`,
 the only notebook in the pipeline that does, alongside `index_covariates.parquet` and
 `cohort_index.parquet`. `medication_admin_continuous` is opened only by `04`; every dose measured
 in `02`/`03` is a discrete charted push, not a continuous infusion.
 
 **New artifacts in `output/final_no_phi/`:** `covariate_coverage.csv` (from `04` — the null rate
 of every derived covariate, including 0% for any optional CLIF table a site's extract lacks);
-`table1_by_agent_block.csv` and `table1_by_agent_index.csv` (from `05` — identical statistic
-inventories, one row per statistic, denominated in encounter blocks and in index events
-respectively); `cpt_cascade.csv`, `cpt_cascade_qc.csv` and `cpt_offset_distribution.csv` (from
-`06` — the three-tier evidence cascade against the CPT `31500` billing flag, its QC, and the
-day-offset histogram between the index paralytic and the nearest code). §2's table map above and
-`code/README.md`'s table carry the same three rows. CPT `31500` is a **comparator, not a
-reference standard** (spec P26 —
+`table1_by_agent_block.*` and `table1_by_agent_index.*` (from `05` — identical statistic
+inventories, denominated in encounter blocks and in index events respectively, each published
+three ways: the long numeric `.csv` the pipeline and its tests read, a `_readable.csv` formatted
+for a person, and a `.json` carrying the same numbers plus a provenance header for pooling with
+other sites); `cpt_cascade.csv` and `cpt_cascade_qc.csv` (from `06` — the three-tier evidence
+cascade against the CPT `31500` billing flag, and its QC). §2's table map above and
+`code/README.md`'s table carry the same rows. The CPT comparison is **presence within the
+encounter block**: all the codes for all the block's member hospitalizations are pooled, and one
+`31500` anywhere in that pool means the block has an intubation. No date is compared — P30's
+`cpt_offset_distribution.csv` and figure `F2_cpt_offset.png` were withdrawn on 2026-08-14. CPT
+`31500` is a **comparator, not a reference standard** (spec P26 —
 [`superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md`](superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md)),
 and a site whose extract lacks professional billing sees an empty cascade —
-`cpt_cascade_qc.csv`'s `pct_blocks_with_any_procedure_row` says so before the cascade itself does.
+`cpt_cascade_qc.csv`'s `pct_blocks_with_any_cpt_format_row` says so before the cascade itself does.
 
 ---
 
@@ -396,8 +400,10 @@ stays on site.
 aggregate: a count, a rate, a quantile, keyed on a bin or a category — never a row that describes
 one person.
 
-**`utils/suppress.py`'s `publish()` is the only door between them**, imported by `01`, `02` and
-`03` and nowhere else. It refuses to write (raises `AssertionError`, does not filter silently) a frame
+**`utils/suppress.py` is the only door between them**, imported by every notebook and nowhere
+else. It exposes two writers over one shared check: `publish()` for CSV, and `publish_json()`
+for the Table 1 aggregation payloads `05` produces. JSON is a second *serialization*, never a
+second policy — both refuse to write (raise `AssertionError`, do not filter silently) a frame
 that carries either:
 
 - an **identifier column** — `patient_id`, `hospitalization_id`, `encounter_block`, `p_num`, or
@@ -496,7 +502,8 @@ design — `index_imv.parquet`, `method_*.parquet`, `method_*.json` — would st
 join, and would supply the wrong denominator without raising. `02` asserts on start that none of
 them are present in `output/intermediate_phi/` before it writes anything of its own.
 
-**A `write_csv` anywhere in `code/` other than inside `publish()` is a bug.** Every published
-output is an aggregate and `utils/suppress.py`'s `publish()` is the only route into
-`output/final_no_phi/` — it is what enforces §6's boundary. A notebook that calls `write_csv`
-directly bypasses that check entirely, whatever it thinks it is writing.
+**A `write_csv` or a `json.dump` to `final_no_phi/` anywhere in `code/` is a bug.** Every
+published output is an aggregate and `utils/suppress.py` — `publish()` for CSV, `publish_json()`
+for JSON — is the only route into `output/final_no_phi/`; it is what enforces §6's boundary. A
+notebook that writes the directory directly bypasses that check entirely, whatever it thinks it
+is writing.

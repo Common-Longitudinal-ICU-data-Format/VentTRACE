@@ -39,21 +39,25 @@ paralytic, and does not adjudicate whether an intubation occurred.
    `ketamine`, `propofol`, `fentanyl`)
 5. **patient**: `patient_id`, `sex_category`, `race_category`, `ethnicity_category`, `death_dttm`
 6. **patient_procedures**: `hospitalization_id`, `procedure_code`, `procedure_code_format`,
-   `procedure_billed_dttm`. Required procedure code: `31500` (endotracheal intubation). It is a
+   `procedure_billed_dttm`. Required procedure code: `31500` (endotracheal intubation). The
+   comparison is **presence within the encounter block** — one `31500` on any member
+   hospitalization means that block has an intubation. No date is compared;
+   `procedure_billed_dttm` is read only because the CLIF 2.1 schema marks it required. It is a
    comparator, not a reference standard — see the design's P26.
 7. **medication_admin_continuous** *(optional — the pipeline runs without it and publishes 0%
    coverage)*: `hospitalization_id`, `admin_dttm`, `med_category`
 8. **crrt_therapy** *(optional — the pipeline runs without it and publishes 0% coverage)*:
    `hospitalization_id`, `recorded_dttm`
-9. **position** *(optional — the pipeline runs without it and publishes 0% coverage)*:
-   `hospitalization_id`, `recorded_dttm`, `position_category`
-10. **vitals** *(optional — the pipeline runs without it and publishes 0% coverage)*:
-    `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value`
-11. **hospital_diagnosis** *(optional — the pipeline runs without it and publishes 0% coverage)*:
+9. **vitals** *(optional — the pipeline runs without it and publishes 0% coverage)*:
+   `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value`
+10. **hospital_diagnosis** *(optional — the pipeline runs without it and publishes 0% coverage)*:
     `hospitalization_id`, `diagnosis_code`, `diagnosis_code_format`
 
+`position` is **not** read. Proning was withdrawn from the covariate set on 2026-08-14 at the
+study lead's direction; a site does not need the table and its absence is not reported.
+
 `patient` and `patient_procedures` are required; `medication_admin_continuous`, `crrt_therapy`,
-`position`, `vitals` and `hospital_diagnosis` are optional — absent, their derived columns are
+`vitals` and `hospital_diagnosis` are optional — absent, their derived columns are
 null and `covariate_coverage.csv` publishes 0% for them. `04_covariates.py` also re-opens
 `hospitalization` and `adt`, already required above; that is no new contract. See
 [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §2 for the full per-notebook table map.
