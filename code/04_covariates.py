@@ -19,7 +19,6 @@ def _():
         Hospitalization,
         MedicationAdminContinuous,
         Patient,
-        Position,
         Vitals,
     )
 
@@ -36,7 +35,6 @@ def _():
         MedicationAdminContinuous,
         Patient,
         Path,
-        Position,
         Vitals,
         json,
         mo,
@@ -778,7 +776,6 @@ def _(
     DATA_DIR,
     FILETYPE,
     MedicationAdminContinuous,
-    Position,
     TIMEZONE,
     VASOPRESSORS,
     bridge,
@@ -838,32 +835,21 @@ def _(
     # window is the exposure. No filter on modality or on a dose being non-zero.
     crrt = _attach(_crrt_pd, "recorded_dttm") if _crrt_pd is not None else None
 
-    _POSITION_VARIANTS = ["prone", "Prone", "PRONE"]
-    _pos_pd = load_optional(
-        Position,
-        "position",
-        data_directory=DATA_DIR,
-        filetype=FILETYPE,
-        timezone=TIMEZONE,
-        columns=["hospitalization_id", "recorded_dttm", "position_category"],
-        filters={
-            "hospitalization_id": bridge_hosp_ids,
-            "position_category": _POSITION_VARIANTS,
-        },
-    )
-    prone = _attach(_pos_pd, "recorded_dttm", "position_category") if _pos_pd is not None else None
+    # `position` / prone was withdrawn from this notebook on 2026-08-14 at the study
+    # lead's direction: proning is not a covariate of this study. The table is no longer
+    # opened, so it is neither a required nor an optional dependency, and its absence at
+    # a site is not a fact this pipeline reports.
 
-    return crrt, prone, vasopressor
+    return crrt, vasopressor
 
 
 @app.cell
-def _(crrt, exposure_flags, prone, spine_resolved, vasopressor):
+def _(crrt, exposure_flags, spine_resolved, vasopressor):
     _events = spine_resolved.select("index_paralytic_id", "encounter_block", "t_dttm")
 
     exposures = (
         exposure_flags(_events, vasopressor, "admin_dttm", "vasopressor")
         .join(exposure_flags(_events, crrt, "recorded_dttm", "crrt"), on="index_paralytic_id")
-        .join(exposure_flags(_events, prone, "recorded_dttm", "prone"), on="index_paralytic_id")
     )
 
     assert exposures.height == spine_resolved.height, "exposure join changed the row count"
@@ -1149,7 +1135,6 @@ def _(
     diagnosis,
     index_covariates,
     pl,
-    prone,
     publish,
     vasopressor,
     vitals,
@@ -1201,7 +1186,6 @@ def _(
         [
             _cov("medication_admin_continuous", False, vasopressor),
             _cov("crrt_therapy", False, crrt),
-            _cov("position", False, prone),
             _cov("vitals", False, vitals),
             _cov("hospital_diagnosis", False, diagnosis),
         ]

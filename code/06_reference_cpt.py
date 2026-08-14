@@ -39,10 +39,12 @@ def _(mo):
         false-negative cell is excluded by construction and every statistic needing it
         would be computed on a cell that cannot be observed.
 
-        **The comparison is at block level with no time alignment (P29).** A block flagged
-        CPT-positive may have been billed for an intubation days from the index paralytic.
-        `cpt_offset_distribution.csv` measures exactly that rather than assuming it away —
-        it is the only instrument that recovers what the block-level flag gives up.
+        **The comparison is presence, at block level (P29; P30 withdrawn 2026-08-14).**
+        A block is CPT-positive if `31500` appears on any member hospitalization of that
+        block, at any time within it. Nothing is aligned to `t₀` and no offset is
+        computed. The question is whether the block was billed for an intubation at all;
+        a date comparison answers a different question and was withdrawn by the study
+        lead rather than reduced.
 
         Design: `docs/superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md` §5
         """
@@ -73,14 +75,6 @@ def _(Path, json):
     # that bills no intubations.
     CPT_FORMAT_VARIANTS = ["cpt", "CPT", "Cpt", "cpt4", "CPT4"]
 
-    # P30. Day bins, signed: `procedure_billed_dttm` is trusted to the day and not to the
-    # minute, which is why this is a day distribution and not a minute offset.
-    OFFSET_BIN_BREAKS = [-30, -7, -1, 0, 1, 7, 30]
-    OFFSET_BIN_LABELS = [
-        "<= -30 d", "(-30,-7] d", "(-7,-1] d", "(-1,0] d",
-        "(0,1] d", "(1,7] d", "(7,30] d", "> 30 d",
-    ]
-
     TIER_LABELS = {1: "index only", 2: "index + imv transition", 3: "index + imv + sedation"}
 
     print(f"site : {SITE}")
@@ -91,8 +85,6 @@ def _(Path, json):
         DATA_DIR,
         FIG_DIR,
         FILETYPE,
-        OFFSET_BIN_BREAKS,
-        OFFSET_BIN_LABELS,
         PHI_DIR,
         SHARE_DIR,
         SITE,
@@ -110,6 +102,11 @@ def _(TIMEZONE, pl):
         clifpy hands back a pytz tzinfo still in its LMT state, so `.dt.tz_localize(None)`
         drops the offset that is *attached* rather than the offset that is *correct* and
         silently shifts every timestamp by about an hour. Defined locally (spec §4).
+
+        Still here although this notebook computes nothing from a timestamp:
+        `procedure_billed_dttm` is a REQUIRED column of the CLIF 2.1 patient_procedures
+        schema, so it is read, and P19 binds on every clifpy datetime the moment it
+        lands -- including one that is about to be dropped.
         """
         return series.dt.tz_convert(TIMEZONE).dt.tz_localize(None)
 
@@ -121,9 +118,16 @@ def _(pl):
     def cpt_block_flag(procedures, bridge):
         """One row per encounter_block: does any member hospitalization carry the code?
 
-        `procedures` carries hospitalization_id and procedure_date (already filtered to
-        CPT 31500). `bridge` carries encounter_block and hospitalization_id, one row per
-        hospitalization.
+        `procedures` carries hospitalization_id, one row per CPT 31500 charge (already
+        filtered to that code). `bridge` carries encounter_block and hospitalization_id,
+        one row per hospitalization.
+
+        Presence, not timing (P29; P30 withdrawn 2026-08-14). All the codes for all the
+        hospitalizations in the block are pooled, and one code anywhere in that pool
+        makes the block CPT-positive. No date is read, kept or compared -- the study
+        lead's rule is "if it is there at all, that block has the intubation", and any
+        date arithmetic here would be answering a question nobody asked. `n_cpt_codes`
+        survives only as a QC column: it says how thick the billing is, never when.
 
         The join is INNER on the bridge side, so a procedure row for a hospitalization no
         block claims is dropped rather than creating a phantom block -- the explode-and-
@@ -136,11 +140,7 @@ def _(pl):
         _hits = (
             procedures.join(bridge, on="hospitalization_id", how="inner")
             .group_by("encounter_block")
-            .agg(
-                pl.len().cast(pl.Int32).alias("n_cpt_codes"),
-                pl.col("procedure_date").min().alias("first_cpt_date"),
-                pl.col("procedure_date").max().alias("last_cpt_date"),
-            )
+            .agg(pl.len().cast(pl.Int32).alias("n_cpt_codes"))
         )
         return (
             bridge.select("encounter_block")
@@ -154,52 +154,6 @@ def _(pl):
         )
 
     return (cpt_block_flag,)
-
-
-@app.cell
-def _(pl):
-    def nearest_offset_days(events, cpt_dates):
-        """Signed days from each block's t0 to the NEAREST CPT date, one row per block.
-
-        `events` carries encounter_block and t_date (one row per block in the
-        denominator). `cpt_dates` carries encounter_block and procedure_date (zero, one
-        or many rows per block, already bridged from hospitalization_id).
-
-        Extracted as its own function (FIX 11 of the 2026-08-12 final review) so it can
-        be reached by a test: it was previously inline in a marimo cell, which is
-        untestable directly, and it is inert at MIMIC -- every MIMIC block has at most
-        one CPT date, so the bug this function fixes cannot show up there. Untested
-        precisely where it matters is not a state this reduction should stay in.
-
-        Computed against EVERY CPT date in the block, not against the first and last
-        two extremes `cpt_block_flag` aggregates for its own QC columns: a block coded
-        at t0-10, t0-2 and t0+5 has first = t0-10 and last = t0+5, so an extremes-only
-        comparison would return +5 when the true nearest is -2 -- wrong in magnitude
-        and in sign, in the one table whose whole purpose is establishing whether the
-        billed intubation is time-aligned with the paralytic.
-
-        Nearest by absolute distance; ties broken toward the EARLIER date, so an
-        equidistant pair reports the negative value -- the reading P29 cares about,
-        since a code that predates the paralytic is the case that tells you the block
-        flag is not time-aligned.
-
-        A block with no CPT date at all gets offset_days = null, not a missing row:
-        every block in `events` returns exactly one row, by construction of the left
-        join followed by one row per encounter_block group.
-        """
-        return (
-            events.select("encounter_block", "t_date")
-            .join(cpt_dates, on="encounter_block", how="left")
-            .with_columns(
-                (pl.col("procedure_date") - pl.col("t_date")).dt.total_days().alias("_d")
-            )
-            .sort(["encounter_block", pl.col("_d").abs(), "_d"], nulls_last=True)
-            .group_by("encounter_block", maintain_order=True)
-            .first()
-            .select("encounter_block", pl.col("_d").alias("offset_days"))
-        )
-
-    return (nearest_offset_days,)
 
 
 @app.cell
@@ -222,7 +176,13 @@ def _(
     blocks = index_covariates.filter(pl.col("p_num") == 1)
     bridge = (
         cohort_index.filter(
-            pl.col("encounter_block").is_in(blocks.get_column("encounter_block"))
+            # `.implode()` is required, not stylistic: a bare Series argument is
+            # deprecated and polars has announced the semantics will flip to element-wise
+            # list comparison. pyproject pins `polars>=1.43.2` with no upper bound, so a
+            # site resolving a newer polars would get a filter matching NOTHING -- an
+            # empty bridge, every block reported CPT-negative, and no crash to say so.
+            # Matches the five uses in `01_cohort.py` and the one in `04_covariates.py`.
+            pl.col("encounter_block").is_in(blocks.get_column("encounter_block").implode())
         )
         .select(["encounter_block", "list_hospitalization_id"])
         .explode("list_hospitalization_id")
@@ -253,15 +213,19 @@ def _(
         },
     )
     _proc_pd = _proc_table.df.copy()
+    # Read because the CLIF 2.1 schema marks it required, stripped because P19 binds on
+    # every clifpy datetime the moment it lands, dropped because the comparator is
+    # presence and nothing downstream may reach for a date it is not entitled to use.
     _proc_pd["procedure_billed_dttm"] = to_site_naive(_proc_pd["procedure_billed_dttm"])
 
-    procedures_all = pl.from_pandas(_proc_pd).with_columns(
-        pl.col("procedure_code").cast(pl.String).str.strip_chars()
+    procedures_all = (
+        pl.from_pandas(_proc_pd)
+        .drop("procedure_billed_dttm")
+        .with_columns(pl.col("procedure_code").cast(pl.String).str.strip_chars())
     )
-    procedures = procedures_all.filter(pl.col("procedure_code") == CPT_INTUBATION).select(
-        "hospitalization_id",
-        pl.col("procedure_billed_dttm").dt.date().alias("procedure_date"),
-    )
+    procedures = procedures_all.filter(
+        pl.col("procedure_code") == CPT_INTUBATION
+    ).select("hospitalization_id")
 
     # patient_procedures is REQUIRED (spec §4): a missing file already raises inside
     # clifpy's from_file -- that is what "fail loudly" means for a genuinely absent
@@ -389,71 +353,6 @@ def _(SHARE_DIR, SITE, blocks, cpt_flags, pl, procedures_all, publish, bridge):
 
 
 @app.cell
-def _(
-    OFFSET_BIN_BREAKS,
-    OFFSET_BIN_LABELS,
-    SHARE_DIR,
-    SITE,
-    blocks,
-    bridge,
-    nearest_offset_days,
-    pl,
-    procedures,
-    publish,
-):
-    # P30. Signed days from t0 to the NEAREST CPT date, so "billed before the paralytic"
-    # and "billed after" are separable. Negative means the code predates t0.
-    # `nearest_offset_days` (defined above, pinned by tests/test_cpt_bridge.py) is the
-    # reduction; this cell only assembles its two inputs.
-    _cpt_dates = procedures.join(
-        bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner"
-    ).select("encounter_block", "procedure_date")
-
-    _events = blocks.select("encounter_block", "t_dttm").with_columns(
-        pl.col("t_dttm").dt.date().alias("t_date")
-    )
-
-    _with_dates = nearest_offset_days(_events, _cpt_dates)
-
-    # One row per block, still: the group_by collapses the fan-out the date join created.
-    assert _with_dates.height == blocks.height, (
-        "the nearest-date reduction did not return exactly one row per block"
-    )
-
-    _binned = _with_dates.filter(pl.col("offset_days").is_not_null()).with_columns(
-        pl.col("offset_days")
-        .cut(OFFSET_BIN_BREAKS, labels=OFFSET_BIN_LABELS)
-        .cast(pl.String)
-        .alias("offset_bin")
-    )
-
-    cpt_offset_distribution = (
-        pl.DataFrame({"offset_bin": OFFSET_BIN_LABELS})
-        .with_row_index("bin_order")
-        .join(_binned.group_by("offset_bin").agg(pl.len().cast(pl.Int32).alias("n")), on="offset_bin", how="left")
-        .with_columns(pl.col("n").fill_null(0))
-        .vstack(
-            pl.DataFrame(
-                {
-                    "bin_order": [len(OFFSET_BIN_LABELS)],
-                    "offset_bin": ["no cpt code"],
-                    "n": [int(_with_dates.get_column("offset_days").null_count())],
-                }
-            ).with_columns(pl.col("bin_order").cast(pl.UInt32), pl.col("n").cast(pl.Int32))
-        )
-        .with_columns(pl.lit(SITE).alias("site_name"))
-        .sort(["bin_order", "offset_bin"])
-    )
-
-    assert cpt_offset_distribution.get_column("n").sum() == blocks.height, (
-        "the offset distribution does not account for every block in the denominator"
-    )
-
-    publish(cpt_offset_distribution, SHARE_DIR / "cpt_offset_distribution.csv", "cpt_offset_distribution")
-    return (cpt_offset_distribution,)
-
-
-@app.cell
 def _(FIG_DIR, SHARE_DIR, pl, plt):
     # Fixed categorical colours: teal is always "billed", grey always "not billed".
     _CODED = "#1baf7a"
@@ -555,49 +454,6 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     _fig.savefig(FIG_DIR / "F1_cpt_cascade.png", dpi=150)
     plt.close(_fig)
     print(f"F1_cpt_cascade.png -> {FIG_DIR}")
-    return
-
-
-@app.cell
-def _(FIG_DIR, SHARE_DIR, pl, plt):
-    _AQUA = "#1baf7a"
-    _GREY = "#b0aca2"
-
-    _d = pl.read_csv(SHARE_DIR / "cpt_offset_distribution.csv").sort("bin_order")
-
-    _fig, _ax = plt.subplots(figsize=(11, 6))
-    for _row in _d.iter_rows(named=True):
-        _color = _GREY if _row["offset_bin"] == "no cpt code" else _AQUA
-        if _row["n"] > 0:
-            _ax.bar([_row["bin_order"]], [_row["n"]], width=0.7, color=_color)
-        else:
-            _ax.plot([_row["bin_order"]], [0], marker="D", markersize=7, color=_color,
-                     linestyle="None", zorder=5, clip_on=False)
-
-    _ax.set_xticks(_d.get_column("bin_order").to_list())
-    _ax.set_xticklabels(_d.get_column("offset_bin").to_list(), rotation=45, ha="right")
-    _ax.set_xlabel("signed days from t0 to the nearest CPT 31500 (negative = billed before the paralytic)")
-    _ax.set_ylabel("encounter blocks")
-    _ax.set_ylim(bottom=0)
-    _ax.set_axisbelow(True)
-    _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
-
-    _handles = [
-        _ax.plot([], [], color=_AQUA, lw=6, label="blocks with a CPT 31500")[0],
-        _ax.plot([], [], color=_GREY, lw=6, label="blocks with no CPT 31500")[0],
-        _ax.plot([], [], marker="D", markersize=7, color="0.3", linestyle="None",
-                 label="published zero (measured, exactly 0)")[0],
-    ]
-    _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
-    _ax.set_title(
-        "F.2 — how far the billed intubation sits from the index paralytic\n"
-        "the block-level flag carries no time alignment (P29); this is the measurement of what that costs"
-    )
-    _fig.tight_layout()
-    _fig.subplots_adjust(bottom=0.30)
-    _fig.savefig(FIG_DIR / "F2_cpt_offset.png", dpi=150)
-    plt.close(_fig)
-    print(f"F2_cpt_offset.png -> {FIG_DIR}")
     return
 
 

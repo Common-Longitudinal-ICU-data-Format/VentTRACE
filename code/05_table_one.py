@@ -16,9 +16,9 @@ def _():
     import marimo as mo
 
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from utils.suppress import publish
+    from utils.suppress import publish, publish_json
 
-    return Path, json, mo, pl, plt, publish
+    return Path, json, mo, pl, plt, publish, publish_json
 
 
 @app.cell
@@ -44,6 +44,22 @@ def _(mo):
         median is how a reader detects skew without a figure, and LOS, CCI and the index
         count are all heavily right-skewed. Categoricals publish `n` **and** `pct`: a
         percentage without its numerator cannot be pooled across sites.
+
+        Each unit is published in **three** forms from one row inventory (P39):
+
+        | file | for | shape |
+        |---|---|---|
+        | `table1_by_agent_{unit}.csv` | the pipeline and its tests | long, one statistic per row, numeric |
+        | `table1_by_agent_{unit}_readable.csv` | a human, a manuscript | one variable per row, `63.2 (16.4)` |
+        | `table1_by_agent_{unit}.json` | pooling with other sites | the long form plus a provenance header |
+
+        The readable CSV is formatted **from** the long one and never recomputed, so the
+        three can restate a number but cannot disagree about it. The JSON keeps the
+        numbers as numbers: a partner pooling `63.2 (16.4)` would have to parse the
+        string back apart first, and string parsing is where sites diverge.
+
+        Proning was withdrawn from the covariate set on 2026-08-14 at the study lead's
+        direction, so no `position` row appears here and `04` no longer opens the table.
 
         This notebook opens no CLIF table.
         """
@@ -85,7 +101,7 @@ def _(pl):
         Returns five records. Nulls are excluded from every statistic -- a missing SBP is
         not a low SBP -- and `n_nonnull` is emitted as a sixth so the reader knows the
         denominator each statistic was computed on. That denominator differs per variable
-        (a site without `position` has null prone flags but real ages) and a Table 1 that
+        (a site without `crrt_therapy` has null CRRT flags but real ages) and a Table 1 that
         hides it invites pooling statistics computed on different populations.
         """
         s = df.get_column(column).drop_nulls()
@@ -226,60 +242,238 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
         keep BLOCK's "repeated for each index event" caveat in the index table, where
         it is exactly right, but in the block table they are not repeated -- one row IS
         one block -- so they take table_unit ("encounter block") there instead.
-        """
-        rows = []
 
-        rows.append({"statistic": "n_rows", "rule": "rows in this table's unit", "unit": table_unit, "value": float(df.height)})
-        rows.append({"statistic": "n_blocks", "rule": "distinct encounter_block", "unit": "encounter block", "value": float(df.get_column("encounter_block").n_unique())})
+        Returns `(rows, display)` (P39). `rows` is the long numeric inventory that the
+        machine-readable CSV and the aggregation JSON both carry. `display` is the
+        human layout: one entry per printed line, naming the group it belongs to, the
+        label a reader sees, and the `rows` statistics that line is formatted FROM.
+
+        The two are built together, in one pass, at one call site per variable --
+        never as two independent lists that happen to describe the same variables.
+        A display list maintained separately from the row inventory drifts the first
+        time a variable is added to one and not the other, and the failure is silent:
+        the readable table simply omits a row nobody notices is missing. Here a
+        variable that is not emitted cannot be displayed, and a display line whose
+        statistic does not exist raises in `build_readable`.
+        """
+        rows, display = [], []
+
+        COHORT = "cohort"
+        DEMOG = "demographics"
+        COMORB = "comorbidity"
+        PHYS = "physiology before the index paralytic"
+        LIFE = "life support before the index paralytic"
+        CONTEXT = "intubation context"
+        OUTCOME = "outcomes"
+
+        def _row(statistic, rule, unit, value):
+            rows.append({"statistic": statistic, "rule": rule, "unit": unit, "value": value})
+
+        def _show(group, variable, fmt, keys, rule, unit, digits=1):
+            display.append(
+                {
+                    "group": group,
+                    "variable": variable,
+                    "fmt": fmt,
+                    "keys": keys,
+                    "digits": digits,
+                    "rule": rule,
+                    "unit": unit,
+                }
+            )
+
+        def _count(statistic, group, label, rule, unit, value):
+            _row(statistic, rule, unit, value)
+            _show(group, f"{label}, n", "count", [statistic], rule, unit, digits=0)
+
+        def _cont(column, group, label, rule, unit, digits=1):
+            rows.extend(continuous_rows(df, column, rule, unit))
+            _show(group, f"{label} — mean (SD)", "mean_sd",
+                  [f"{column}_mean", f"{column}_sd"], rule, unit, digits)
+            _show(group, f"{label} — median [Q1, Q3]", "median_iqr",
+                  [f"{column}_median", f"{column}_q1", f"{column}_q3"], rule, unit, digits)
+            _show(group, f"{label} — missing, n", "missing",
+                  ["n_rows", f"{column}_n_nonnull"],
+                  f"rows with no {column}", unit, digits=0)
+
+        def _bin(column, group, label, rule, unit):
+            rows.extend(binary_rows(df, column, rule, unit))
+            _show(group, f"{label} — n (%)", "n_pct",
+                  [f"{column}_n", f"{column}_pct"], rule, unit, digits=0)
+            _show(group, f"{label} — missing, n", "missing",
+                  ["n_rows", f"{column}_n_nonnull"],
+                  f"rows with no {column}", unit, digits=0)
+
+        def _cat(column, group, label, rule, unit, levels):
+            rows.extend(categorical_rows(df, column, rule, unit, levels))
+            for _level in levels:
+                # The level is printed exactly as it is stored, never prettified. A
+                # displayed label that does not match the mCIDE value it counts is how a
+                # reader ends up unable to find the level in the data, and the casing
+                # rules here are P20's, not English's.
+                _show(group, f"{label} — {_level}, n (%)", "n_pct",
+                      [f"{column}[{_level}]_n", f"{column}[{_level}]_pct"], rule, unit, digits=0)
+            _show(group, f"{label} — missing, n", "count", [f"{column}_missing_n"],
+                  f"rows with an absent (null) {column}, not the literal string", unit, digits=0)
+
+        _count("n_rows", COHORT, f"Total {table_unit}s", "rows in this table's unit", table_unit, float(df.height))
+        _count("n_blocks", COHORT, "Distinct encounter blocks", "distinct encounter_block", "encounter block", float(df.get_column("encounter_block").n_unique()))
         # Patient granularity, not block: a patient can span more than one block, so this
         # is neither a block count nor repeated per index event.
-        rows.append({"statistic": "n_patients", "rule": "distinct patient_id", "unit": "patient", "value": float(df.get_column("patient_id").n_unique())})
+        _count("n_patients", COHORT, "Distinct patients", "distinct patient_id", "patient", float(df.get_column("patient_id").n_unique()))
 
         # BLOCK in the index table (repeated per index event, as BLOCK's own string
         # says); table_unit in the block table, where these rows are not repeated.
         _block_unit = table_unit if table_unit == "encounter block" else BLOCK
 
-        rows += continuous_rows(df, "age_at_admission", "hospitalization containing t0", event_unit)
-        rows += categorical_rows(df, "sex_category", "patient.sex_category, lower-cased", event_unit, sex_levels)
-        rows += categorical_rows(df, "race_category", "patient.race_category, lower-cased, raw mCIDE level", event_unit, race_levels)
-        rows += categorical_rows(df, "ethnicity_category", "patient.ethnicity_category, lower-cased", event_unit, ethnicity_levels)
+        _cont("age_at_admission", DEMOG, "Age at admission, years", "hospitalization containing t0", event_unit)
+        _cat("sex_category", DEMOG, "Sex", "patient.sex_category, lower-cased", event_unit, sex_levels)
+        _cat("race_category", DEMOG, "Race", "patient.race_category, lower-cased, raw mCIDE level", event_unit, race_levels)
+        _cat("ethnicity_category", DEMOG, "Ethnicity", "patient.ethnicity_category, lower-cased", event_unit, ethnicity_levels)
 
-        rows += continuous_rows(df, "cci", "Charlson via clifpy on the hospitalization containing t0", event_unit)
+        _cont("cci", COMORB, "Charlson comorbidity index", "Charlson via clifpy on the hospitalization containing t0", event_unit)
 
-        for _short, _dir in (("sbp", "lowest"), ("hr", "highest"), ("spo2", "lowest")):
-            for _h in LOOKBACK_HOURS:
-                _c = f"{_dir}_{_short}_{_h}h"
-                rows += continuous_rows(df, _c, f"{_dir} vitals {_short} in [t0-{_h}h, t0]", event_unit)
-        rows += continuous_rows(df, "weight_kg", "most recent vitals weight at or before t0", event_unit)
-
-        for _prefix, _rule in (
-            ("vasopressor", "any medication_admin_continuous vasopressor row in [t0-{h}h, t0]"),
-            ("crrt", "any crrt_therapy recorded_dttm in [t0-{h}h, t0]"),
-            ("prone", "any position prone row in [t0-{h}h, t0]"),
+        for _short, _dir, _label, _units in (
+            ("sbp", "lowest", "Lowest systolic blood pressure", "mmHg"),
+            ("hr", "highest", "Highest heart rate", "bpm"),
+            ("spo2", "lowest", "Lowest SpO2", "%"),
         ):
             for _h in LOOKBACK_HOURS:
-                rows += binary_rows(df, f"{_prefix}_{_h}h", _rule.format(h=_h), event_unit)
+                _c = f"{_dir}_{_short}_{_h}h"
+                _cont(_c, PHYS, f"{_label} within {_h} h before, {_units}",
+                      f"{_dir} vitals {_short} in [t0-{_h}h, t0]", event_unit)
+        _cont("weight_kg", PHYS, "Weight, kg", "most recent vitals weight at or before t0", event_unit)
 
-        rows += binary_rows(df, "imv_transition", "device change onto imv within +/-60 min of t0 (sub-analysis D)", event_unit)
-        rows += binary_rows(df, "any_sedative", "sedative charted within +/-60 min of t0 (sub-analysis E)", event_unit)
-        rows += categorical_rows(df, "no_transition_reason", "why sub-analysis D found no transition", event_unit, ["already_on_imv", "no_transition_in_window", "no_device_record"])
-        rows += categorical_rows(df, "location_at_index", "adt row where in_dttm <= t0 < out_dttm", event_unit, ["ed", "icu", "other", "unknown"])
-        rows += categorical_rows(df, "evidence_tier", "1 index only, 2 +imv transition, 3 +imv +sedation (P31)", event_unit, [1, 2, 3])
+        for _prefix, _label, _rule in (
+            ("vasopressor", "Vasopressor", "any medication_admin_continuous vasopressor row in [t0-{h}h, t0]"),
+            ("crrt", "CRRT", "any crrt_therapy recorded_dttm in [t0-{h}h, t0]"),
+        ):
+            for _h in LOOKBACK_HOURS:
+                _bin(f"{_prefix}_{_h}h", LIFE, f"{_label} within {_h} h before",
+                     _rule.format(h=_h), event_unit)
 
-        rows += binary_rows(df, "hospital_mortality", "death_dttm inside a member stay, or discharge_category expired", _block_unit)
-        rows += binary_rows(df, "icu_mortality", "death_dttm inside an adt icu interval; independent of hospital_mortality (P37 amended)", _block_unit)
-        rows += categorical_rows(df, "discharge_category", "hospitalization containing t0", event_unit, discharge_levels)
-        rows += continuous_rows(df, "los_hospital_days", "sum of member hospitalization LOS in the block (P38)", _block_unit)
-        rows += continuous_rows(df, "los_icu_days", "sum of adt icu intervals in the block", _block_unit)
-        rows += continuous_rows(df, "n_index_in_block", "index paralytics in the block", _block_unit)
+        _bin("imv_transition", CONTEXT, "New transition onto IMV at the index paralytic", "device change onto imv within +/-60 min of t0 (sub-analysis D)", event_unit)
+        _bin("any_sedative", CONTEXT, "Sedative within +/-60 min of the index paralytic", "sedative charted within +/-60 min of t0 (sub-analysis E)", event_unit)
+        _cat("no_transition_reason", CONTEXT, "Reason no IMV transition was found", "why sub-analysis D found no transition", event_unit, ["already_on_imv", "no_transition_in_window", "no_device_record"])
+        _cat("location_at_index", CONTEXT, "Location at the index paralytic", "adt row where in_dttm <= t0 < out_dttm", event_unit, ["ed", "icu", "other", "unknown"])
+        _cat("evidence_tier", CONTEXT, "Evidence tier", "1 index only, 2 +imv transition, 3 +imv +sedation (P31)", event_unit, [1, 2, 3])
 
-        return rows
+        _bin("hospital_mortality", OUTCOME, "Hospital mortality", "death_dttm inside a member stay, or discharge_category expired", _block_unit)
+        _bin("icu_mortality", OUTCOME, "ICU mortality", "death_dttm inside an adt icu interval; independent of hospital_mortality (P37 amended)", _block_unit)
+        _cat("discharge_category", OUTCOME, "Discharge disposition", "hospitalization containing t0", event_unit, discharge_levels)
+        _cont("los_hospital_days", OUTCOME, "Hospital length of stay, days", "sum of member hospitalization LOS in the block (P38)", _block_unit)
+        _cont("los_icu_days", OUTCOME, "ICU length of stay, days", "sum of adt icu intervals in the block", _block_unit)
+        _cont("n_index_in_block", OUTCOME, "Index paralytics in the block", "index paralytics in the block", _block_unit)
+
+        return rows, display
 
     return BLOCK, EVENT, table1_rows
 
 
 @app.cell
-def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
+def _(pl):
+    def format_stat(fmt, values, digits):
+        """One display line's numbers -> the string a human reads (P39).
+
+        `NA` means *not measured*: the statistic is null because the column is null,
+        which at this site means the source table was absent. It is never a zero. A
+        measured zero prints as `0` or `0 (0.0%)`, and keeping the two typographically
+        distinct in the readable table is the same distinction `covariate_coverage.csv`
+        and Figure T.2 exist to make -- a reader who cannot tell "this site does not
+        chart CRRT" from "no patient had CRRT" has been handed a clinical finding that
+        is really a data-availability one.
+
+        Thousands separators throughout: these tables are read at a glance and `1547`
+        and `15470` are one keystroke apart by eye.
+        """
+        def _f(v, d):
+            return f"{v:,.{d}f}"
+
+        if fmt == "count":
+            _v = values[0]
+            return "NA" if _v is None else _f(_v, 0)
+        if fmt == "mean_sd":
+            _m, _sd = values
+            if _m is None:
+                return "NA"
+            # A single non-null observation has a mean and no SD. Printing the mean with
+            # `(NA)` beside it says exactly that; dropping the whole line would hide a
+            # real measurement, and printing `(0.0)` would invent a dispersion.
+            return f"{_f(_m, digits)} ({'NA' if _sd is None else _f(_sd, digits)})"
+        if fmt == "median_iqr":
+            _md, _q1, _q3 = values
+            # All three come from the same `drop_nulls` pass, so they are null together
+            # or present together -- checked rather than assumed, because a partial
+            # triple would otherwise crash here with a TypeError three files from the
+            # statistic that produced it.
+            if _md is None or _q1 is None or _q3 is None:
+                return "NA"
+            return f"{_f(_md, digits)} [{_f(_q1, digits)}, {_f(_q3, digits)}]"
+        if fmt == "n_pct":
+            _n, _pct = values
+            if _n is None:
+                return "NA"
+            # A count with no percentage is a real and separate state: `categorical_rows`
+            # returns pct = null when the level's denominator is zero, which is what an
+            # empty stratum column looks like -- succinylcholine is absent from MIMIC
+            # entirely, so every one of its levels is 0 out of 0. `0 (NA)` says that the
+            # count was measured and the proportion is undefined. `0 (0.0%)` would claim
+            # a proportion computed on no one.
+            if _pct is None:
+                return f"{_f(_n, 0)} (NA)"
+            return f"{_f(_n, 0)} ({_f(_pct, 1)}%)"
+        if fmt == "missing":
+            _total, _nonnull = values
+            if _total is None or _nonnull is None:
+                return "NA"
+            return _f(_total - _nonnull, 0)
+        raise ValueError(f"unknown display format {fmt!r}")
+
+    def build_readable(long_df, display, value_columns):
+        """The human table, formatted FROM the published long table (P39).
+
+        `long_df` is exactly what `table1_by_agent_{unit}.csv` carries; every number
+        here is looked up out of it and formatted, never recomputed from the analytic
+        frame. Two tables that recompute the same quantity can disagree; two tables
+        where one is a rendering of the other cannot.
+
+        A display line naming a statistic the inventory did not emit raises rather than
+        printing `NA`. `NA` is a published claim -- "this was not measured" -- and a
+        typo in a key is not that claim.
+        """
+        lookup = {r["statistic"]: r for r in long_df.to_dicts()}
+        out = []
+        for _i, _d in enumerate(display):
+            _absent = [k for k in _d["keys"] if k not in lookup]
+            assert not _absent, (
+                f"display line {_d['variable']!r} reads statistic(s) {_absent} that the "
+                f"row inventory never emitted"
+            )
+            _rec = {"row_order": _i, "group": _d["group"], "variable": _d["variable"]}
+            for _c in value_columns:
+                _rec[_c] = format_stat(
+                    _d["fmt"], [lookup[k][_c] for k in _d["keys"]], _d["digits"]
+                )
+            _rec["rule"] = _d["rule"]
+            _rec["unit"] = _d["unit"]
+            out.append(_rec)
+        return pl.DataFrame(out)
+
+    return build_readable, format_stat
+
+
+@app.cell
+def _(
+    PHI_DIR,
+    SHARE_DIR,
+    SITE,
+    STRATA,
+    build_readable,
+    pl,
+    publish,
+    publish_json,
+    table1_rows,
+):
     index_covariates = pl.read_parquet(PHI_DIR / "index_covariates.parquet")
 
     # Level lists are taken from the WHOLE frame, not per stratum, so every stratum
@@ -300,12 +494,17 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
         "index": "index event",
     }
 
+    # The readable table's columns, overall first: a reader compares each drug against
+    # the whole cohort, so the reference column belongs on the left. The long CSV keeps
+    # its existing order (strata, then overall) -- it is a join target with a pinned
+    # column list and reordering it would churn every consumer for no reader's benefit.
+    _VALUE_COLUMNS = ["overall", *STRATA]
+
     def build_table1(df, label):
         _unit = _TABLE_UNIT[label]
         _event_unit = _EVENT_UNIT[label]
-        _overall = pl.DataFrame(
-            table1_rows(df, _race, _eth, _sex, _disch, _unit, _event_unit)
-        ).rename({"value": "overall"})
+        _rows, _display = table1_rows(df, _race, _eth, _sex, _disch, _unit, _event_unit)
+        _overall = pl.DataFrame(_rows).rename({"value": "overall"})
         # `statistic` is the join key for every stratum column below, so a duplicate in
         # it fans the join out and corrupts the table rather than raising. Checked here,
         # with the offending names in the message, because the height assertion further
@@ -324,9 +523,12 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
         out = _overall
         for _stratum in STRATA:
             _sub = df.filter(pl.col("agent_stratum") == _stratum)
-            _col = pl.DataFrame(
-                table1_rows(_sub, _race, _eth, _sex, _disch, _unit, _event_unit)
-            ).select("statistic", pl.col("value").alias(_stratum))
+            # The display layout is stratum-invariant by construction, so only the
+            # overall pass's copy is kept; a stratum's would be identical.
+            _stratum_rows, _ = table1_rows(_sub, _race, _eth, _sex, _disch, _unit, _event_unit)
+            _col = pl.DataFrame(_stratum_rows).select(
+                "statistic", pl.col("value").alias(_stratum)
+            )
             assert _col.height == out.height, (
                 f"stratum {_stratum} produced {_col.height} rows against the overall "
                 f"column's {out.height} -- the row inventory is not stratum-invariant"
@@ -339,6 +541,52 @@ def _(PHI_DIR, SHARE_DIR, SITE, STRATA, pl, publish, table1_rows):
             .sort(["statistic", "unit"])
         )
         publish(out, SHARE_DIR / f"table1_by_agent_{label}.csv", f"table1_by_agent_{label}")
+
+        # The same table for a person. `row_order` is the layout, so the file survives a
+        # spreadsheet's re-sort: without it the only ordering is alphabetical by label,
+        # which interleaves the groups and puts "Age" between "ICU mortality" and
+        # "Location". It is also the tiebreak that keeps the file byte-identical across
+        # runs (commit 6c70808), since `variable` alone is unique but not stable to edit.
+        _readable = (
+            build_readable(out, _display, _VALUE_COLUMNS)
+            .with_columns(pl.lit(SITE).alias("site_name"))
+            .select("row_order", "group", "variable", *_VALUE_COLUMNS, "rule", "unit", "site_name")
+            .sort("row_order")
+        )
+        publish(
+            _readable,
+            SHARE_DIR / f"table1_by_agent_{label}_readable.csv",
+            f"table1_by_agent_{label}_readable",
+        )
+
+        # The same table for another site's merge script. `cohort_run_id` travels with
+        # it so a pooled file can be traced back to the run that produced each part, and
+        # `unit` travels with it so a block-level table can never be silently stacked on
+        # an index-level one -- the two have identical row inventories and different
+        # denominators, which is exactly the pair that merges without complaint and
+        # produces a wrong number.
+        _run_ids = df.get_column("cohort_run_id").unique().to_list()
+        assert len(_run_ids) == 1, (
+            f"[{label}] the analytic frame carries {len(_run_ids)} cohort_run_ids; a "
+            f"provenance stamp that is not single-valued cannot be published as one"
+        )
+        publish_json(
+            out,
+            SHARE_DIR / f"table1_by_agent_{label}.json",
+            f"table1_by_agent_{label}_json",
+            {
+                "schema": "venttrace/table1/1",
+                "site_name": SITE,
+                "cohort_run_id": _run_ids[0],
+                "table": f"table1_by_agent_{label}",
+                "unit": _unit,
+                "event_unit": _event_unit,
+                "source": "index_covariates.parquet",
+                "strata": STRATA,
+                "value_columns": ["overall", *STRATA],
+                "n_rows": float(df.height),
+            },
+        )
         return out
 
     table1_index = build_table1(index_covariates, "index")
@@ -374,7 +622,8 @@ def _(plt):
 def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, mark_zero, pl, plt):
     # Fixed categorical colours, never cycled: one colour per life-support modality
     # wherever it appears.
-    _COLORS = {"vasopressor": "#2a78d6", "crrt": "#eb6834", "prone": "#1baf7a"}
+    # Proning was withdrawn from the covariate set on 2026-08-14; two modalities remain.
+    _COLORS = {"vasopressor": "#2a78d6", "crrt": "#eb6834"}
 
     _t1 = pl.read_csv(SHARE_DIR / "table1_by_agent_block.csv")
 
@@ -385,7 +634,11 @@ def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, mark_zero, pl, plt):
         for _j, _h in enumerate(LOOKBACK_HOURS):
             _row = _t1.filter(pl.col("statistic") == f"{_modality}_{_h}h_pct")
             _v = _row["overall"][0] if _row.height else None
-            _x = _j + (_i - 1) * _width
+            # Centred on the tick for however many modalities there are, rather than
+            # the literal -1 that only centred three. Dropping proning would otherwise
+            # have shifted both remaining bars a third of a slot to the left of their
+            # own tick, with nothing on the figure to say it had happened.
+            _x = _j + (_i - (len(_COLORS) - 1) / 2) * _width
             if _v is None:
                 # Source table absent at this site: null, not zero. Drawn as an open
                 # marker ABOVE the baseline so it differs from the filled diamond that

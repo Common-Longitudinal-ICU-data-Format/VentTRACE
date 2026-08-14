@@ -1,5 +1,10 @@
 """Pins the CPT-to-block bridge of `06_reference_cpt.py` (spec §4, P29).
 
+The comparator is PRESENCE: all the CPT codes for all the hospitalizations in an
+encounter block are pooled, and one `31500` anywhere in that pool means the block
+has the intubation. No date is read or compared -- P30's offset distribution was
+withdrawn on 2026-08-14, and `nearest_offset_days` with it.
+
 CPT rows live on `hospitalization_id`; the analysis lives on `encounter_block`.
 A block stitches up to 4 hospitalizations (max_hosp_per_block = 4 at MIMIC), so
 "CPT present" means present on ANY member. Two things can go wrong silently:
@@ -16,7 +21,6 @@ Run:  uv run pytest tests/test_cpt_bridge.py -v
 """
 
 import ast
-import datetime
 from pathlib import Path
 
 import polars as pl
@@ -41,7 +45,6 @@ def _load_from_notebook(name, namespace=None):
 
 
 cpt_block_flag = _load_from_notebook("cpt_block_flag")
-nearest_offset_days = _load_from_notebook("nearest_offset_days")
 
 # Block 1 stitches four hospitalizations; block 2 stitches one.
 BRIDGE = pl.DataFrame(
@@ -53,22 +56,21 @@ BRIDGE = pl.DataFrame(
 )
 
 
-def _procs(pairs):
-    """pairs: list of (hospitalization_id, date)."""
+def _procs(hosp_ids):
+    """hosp_ids: one entry per CPT 31500 charge, naming the hospitalization it sits on.
+
+    No date column, because the function under test may not have one to reach for.
+    A frame that still carried `procedure_date` would let a re-introduced date
+    comparison pass this file unnoticed.
+    """
     return pl.DataFrame(
-        {
-            "hospitalization_id": [h for h, _ in pairs],
-            "procedure_date": [d for _, d in pairs],
-        },
-        schema={"hospitalization_id": pl.String, "procedure_date": pl.Date},
+        {"hospitalization_id": list(hosp_ids)},
+        schema={"hospitalization_id": pl.String},
     )
 
 
-D = datetime.date(2024, 5, 1)
-
-
 def test_code_on_the_third_member_flags_the_block():
-    got = cpt_block_flag(_procs([("h3", D)]), BRIDGE).sort("encounter_block").to_dicts()
+    got = cpt_block_flag(_procs(["h3"]), BRIDGE).sort("encounter_block").to_dicts()
     by_block = {r["encounter_block"]: r for r in got}
     assert by_block[1]["has_cpt"] is True
     assert by_block[1]["n_cpt_codes"] == 1
@@ -76,7 +78,7 @@ def test_code_on_the_third_member_flags_the_block():
 
 def test_code_on_a_hospitalization_outside_the_block_does_not_leak():
     """h9 belongs to block 2; block 1 must stay negative."""
-    got = cpt_block_flag(_procs([("h9", D)]), BRIDGE).sort("encounter_block").to_dicts()
+    got = cpt_block_flag(_procs(["h9"]), BRIDGE).sort("encounter_block").to_dicts()
     by_block = {r["encounter_block"]: r for r in got}
     assert by_block[1]["has_cpt"] is False
     assert by_block[1]["n_cpt_codes"] == 0
@@ -90,18 +92,17 @@ def test_code_on_an_unknown_hospitalization_is_dropped():
     manufactured a phantom block with has_cpt=False would satisfy the `all(...)`
     check and pass.
     """
-    got = cpt_block_flag(_procs([("h_unknown", D)]), BRIDGE).sort("encounter_block").to_dicts()
+    got = cpt_block_flag(_procs(["h_unknown"]), BRIDGE).sort("encounter_block").to_dicts()
     assert [r["encounter_block"] for r in got] == [1, 2], "a phantom block was created"
     assert all(r["has_cpt"] is False for r in got)
 
 
 def test_multiple_codes_across_members_are_counted_once_per_row():
-    got = cpt_block_flag(
-        _procs([("h1", D), ("h3", D + datetime.timedelta(days=2))]), BRIDGE
-    ).sort("encounter_block").to_dicts()
+    """Codes pool across the block's members; the block is positive either way."""
+    got = cpt_block_flag(_procs(["h1", "h3"]), BRIDGE).sort("encounter_block").to_dicts()
     by_block = {r["encounter_block"]: r for r in got}
     assert by_block[1]["n_cpt_codes"] == 2
-    assert by_block[1]["first_cpt_date"] == D
+    assert by_block[1]["has_cpt"] is True
 
 
 def test_every_block_in_the_bridge_gets_a_row():
@@ -111,94 +112,14 @@ def test_every_block_in_the_bridge_gets_a_row():
     assert got.get_column("has_cpt").to_list() == [False, False]
 
 
-# ----------------------------------------------------------------------------------
-# nearest_offset_days -- Task 7's "against every date, not the first and last" fix,
-# lifted by AST the same way cpt_block_flag is above. Untested at MIMIC, where every
-# block has at most one CPT date and the bug this function fixes cannot show up.
-# ----------------------------------------------------------------------------------
+def test_the_flag_carries_no_date_column():
+    """P30's withdrawal, pinned.
 
-
-def _events(block_dates):
-    """block_dates: list of (encounter_block, t_date)."""
-    return pl.DataFrame(
-        {
-            "encounter_block": [b for b, _ in block_dates],
-            "t_date": [d for _, d in block_dates],
-        },
-        schema={"encounter_block": pl.Int32, "t_date": pl.Date},
-    )
-
-
-def test_nearest_offset_reduces_to_the_true_nearest_not_the_extremes():
-    """t0-10, t0-2, t0+5 must reduce to -2.
-
-    `cpt_block_flag` aggregates only first_cpt_date (min) and last_cpt_date (max) for
-    its own QC columns; picking the nearer of THOSE two extremes for this block would
-    compare t0-10 against t0+5 and return +5 -- wrong in both magnitude and sign. -2 is
-    the true nearest date and the only correct answer.
+    The comparator is presence. A date column reappearing on this frame is the first
+    step back toward time-aligning a flag the study lead deliberately left unaligned,
+    and it would arrive silently -- every other test here would still pass.
     """
-    events = _events([(1, D)])
-    cpt_dates = pl.DataFrame(
-        {
-            "encounter_block": [1, 1, 1],
-            "procedure_date": [
-                D - datetime.timedelta(days=10),
-                D - datetime.timedelta(days=2),
-                D + datetime.timedelta(days=5),
-            ],
-        },
-        schema={"encounter_block": pl.Int32, "procedure_date": pl.Date},
+    got = cpt_block_flag(_procs(["h1"]), BRIDGE)
+    assert set(got.columns) == {"encounter_block", "n_cpt_codes", "has_cpt"}, (
+        f"unexpected columns on the block flag: {sorted(got.columns)}"
     )
-    got = nearest_offset_days(events, cpt_dates)
-    assert got.get_column("offset_days").to_list() == [-2]
-
-
-def test_nearest_offset_ties_break_toward_the_earlier_date():
-    """An exact tie, [-2, +2], reduces to -2 -- deterministic, and the reading P29
-    cares about: a code that predates the paralytic is the case that tells you the
-    block flag is not time-aligned."""
-    events = _events([(1, D)])
-    cpt_dates = pl.DataFrame(
-        {
-            "encounter_block": [1, 1],
-            "procedure_date": [D - datetime.timedelta(days=2), D + datetime.timedelta(days=2)],
-        },
-        schema={"encounter_block": pl.Int32, "procedure_date": pl.Date},
-    )
-    got = nearest_offset_days(events, cpt_dates)
-    assert got.get_column("offset_days").to_list() == [-2]
-
-
-def test_nearest_offset_is_null_for_a_block_with_no_cpt_date():
-    """A block with no CPT date at all yields offset_days = null, not a missing row."""
-    events = _events([(1, D), (2, D)])
-    cpt_dates = pl.DataFrame(
-        {"encounter_block": [1], "procedure_date": [D]},
-        schema={"encounter_block": pl.Int32, "procedure_date": pl.Date},
-    )
-    got = nearest_offset_days(events, cpt_dates).sort("encounter_block")
-    by_block = dict(
-        zip(got.get_column("encounter_block").to_list(), got.get_column("offset_days").to_list())
-    )
-    assert by_block[1] == 0
-    assert by_block[2] is None
-
-
-def test_nearest_offset_returns_one_row_per_block():
-    """The date join fans out to (block x its own CPT dates); the group_by must
-    collapse it back to exactly one row per block in `events`, no more and no less."""
-    events = _events([(1, D), (2, D), (3, D)])
-    cpt_dates = pl.DataFrame(
-        {
-            "encounter_block": [1, 1, 3],
-            "procedure_date": [
-                D - datetime.timedelta(days=1),
-                D + datetime.timedelta(days=1),
-                D,
-            ],
-        },
-        schema={"encounter_block": pl.Int32, "procedure_date": pl.Date},
-    )
-    got = nearest_offset_days(events, cpt_dates)
-    assert sorted(got.get_column("encounter_block").to_list()) == [1, 2, 3]
-    assert got.height == 3

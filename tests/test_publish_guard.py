@@ -16,6 +16,11 @@ row-level artifact in this study does. `publish()` is the single route into
 dtypes for datetimes), not a cell-count filter: nothing it writes is ever
 altered.
 
+`publish_json` (added 2026-08-14 for cross-site Table 1 aggregation) is a second
+SERIALIZATION behind the same guard, never a second policy. Every refusal below
+is parametrized over both writers: a JSON route that admitted what the CSV route
+refuses would be a disclosure hole shaped exactly like a convenience feature.
+
 The count-column requirement ("must have a column named `n` or starting with
 `n_`") this module originally carried is WITHDRAWN (spec P23, amended
 0992a5c): it blocked `cohort_qc.csv` (columns `stat,value`) and did not block
@@ -28,12 +33,13 @@ Run:  uv run pytest tests/test_publish_guard.py -v
 """
 
 import datetime
+import json
 from pathlib import Path
 
 import polars as pl
 import pytest
 
-from utils.suppress import publish
+from utils.suppress import publish, publish_json
 
 
 def _agg_frame():
@@ -168,3 +174,69 @@ def test_index_covariates_column_set_is_refused():
     )
     with pytest.raises(AssertionError, match="identifier column"):
         publish(frame, Path("/dev/null"), "index_covariates")
+
+
+# ----------------------------------------------------------------------------------
+# publish_json -- the aggregation route. Same guard, same refusals, or it is a hole.
+# ----------------------------------------------------------------------------------
+
+META = {"site_name": "test", "table": "t", "unit": "encounter block"}
+
+
+@pytest.mark.parametrize(
+    "id_col",
+    ["patient_id", "hospitalization_id", "encounter_block", "p_num", "provider_id"],
+)
+def test_publish_json_refuses_every_identifier_publish_refuses(id_col, tmp_path):
+    df = pl.DataFrame({id_col: [1, 2], "n": [5, 5]})
+    with pytest.raises(AssertionError, match=id_col):
+        publish_json(df, tmp_path / "out.json", "t", META)
+
+
+def test_publish_json_refuses_a_datetime_column(tmp_path):
+    df = pl.DataFrame({"t_dttm": [datetime.datetime(2024, 1, 1)], "n": [5]})
+    with pytest.raises(AssertionError, match="t_dttm"):
+        publish_json(df, tmp_path / "out.json", "t", META)
+
+
+def test_publish_json_refuses_the_analytic_frame(tmp_path):
+    """The same PHI frame `publish` refuses, refused on the JSON route too."""
+    frame = pl.DataFrame(
+        {
+            "index_paralytic_id": ["b1_P1"],
+            "patient_id": ["p1"],
+            "t_dttm": [datetime.datetime(2024, 5, 1, 12, 0)],
+            "evidence_tier": [2],
+        }
+    )
+    with pytest.raises(AssertionError, match="identifier column"):
+        publish_json(frame, tmp_path / "out.json", "index_covariates", META)
+
+
+def test_publish_json_writes_meta_and_rows_and_keeps_numbers_numeric(tmp_path):
+    """The whole point of the JSON route: a partner pools numbers, not strings."""
+    path = tmp_path / "out.json"
+    df = pl.DataFrame(
+        {"statistic": ["age_mean", "age_sd"], "overall": [63.2, 16.4], "rocuronium": [61.0, None]}
+    )
+    publish_json(df, path, "t", META)
+    payload = json.loads(path.read_text())
+    assert payload["meta"] == META
+    assert payload["rows"][0] == {"statistic": "age_mean", "overall": 63.2, "rocuronium": 61.0}
+    # A null stays a JSON null -- not 0, not "NA". Only the readable CSV renders it.
+    assert payload["rows"][1]["rocuronium"] is None
+
+
+def test_publish_json_is_byte_identical_across_two_writes(tmp_path):
+    """Determinism (commit 6c70808) covers the JSON route too: a consortium diffs
+    these files between runs to see whether anything actually changed."""
+    df = pl.DataFrame({"statistic": ["a", "b"], "overall": [1.0, 2.0]})
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    publish_json(df, first, "t", META)
+    publish_json(df, second, "t", META)
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_publish_json_returns_the_frame_unchanged(tmp_path):
+    df = _agg_frame()
+    assert publish_json(df, tmp_path / "out.json", "t", META).equals(df)

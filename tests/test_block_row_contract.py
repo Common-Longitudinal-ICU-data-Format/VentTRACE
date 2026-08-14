@@ -84,11 +84,11 @@ def cpt_cascade():
 
 
 @pytest.fixture(scope="module")
-def cpt_offset_distribution():
+def table1_block_readable():
     _, share = _dirs()
-    path = share / "cpt_offset_distribution.csv"
+    path = share / "table1_by_agent_block_readable.csv"
     if not path.exists():
-        pytest.skip("cpt_offset_distribution.csv absent; run code/06_reference_cpt.py first")
+        pytest.skip("table1_by_agent_block_readable.csv absent; run code/05_table_one.py first")
     return pl.read_csv(path)
 
 
@@ -142,18 +142,19 @@ def test_evidence_tier_is_consistent_with_its_inputs(frame):
 
 
 def test_block_and_index_artifacts_agree_on_n(
-    frame, table1_block, table1_index, cpt_cascade, cpt_offset_distribution, index_per_block
+    frame, table1_block, table1_index, cpt_cascade, index_per_block
 ):
     """FIX 10 (2026-08-12 final review): automates the reconciliation spec §8 already
     claims this file performs.
 
-    Four independently-computed block counts must be identical:
+    Three independently-computed block counts must be identical:
 
       * table1_by_agent_block.csv's own n_rows row
       * cpt_cascade.csv's n_blocks, summed across the three evidence tiers
-      * cpt_offset_distribution.csv's n, summed across every offset bin plus the
-        explicit "no cpt code" row
       * index_per_block.csv's n_blocks, summed across the >=1-index grid
+
+    A fourth, cpt_offset_distribution.csv, was checked here until 2026-08-14, when
+    P30 was withdrawn and that artifact with it.
 
     Before this test existed, that agreement was checked by hand once and never pinned
     -- exactly the kind of cross-notebook drift `04`'s single analytic frame exists to
@@ -166,13 +167,11 @@ def test_block_and_index_artifacts_agree_on_n(
     """
     _t1_block_n_rows = table1_block.filter(pl.col("statistic") == "n_rows").get_column("overall")[0]
     _cpt_cascade_n = cpt_cascade.get_column("n_blocks").sum()
-    _cpt_offset_n = cpt_offset_distribution.get_column("n").sum()
     _index_per_block_n = index_per_block.get_column("n_blocks").sum()
 
-    assert _t1_block_n_rows == _cpt_cascade_n == _cpt_offset_n == _index_per_block_n, (
-        "the four block counts disagree: table1_by_agent_block.csv n_rows="
+    assert _t1_block_n_rows == _cpt_cascade_n == _index_per_block_n, (
+        "the three block counts disagree: table1_by_agent_block.csv n_rows="
         f"{_t1_block_n_rows}, cpt_cascade.csv sum(n_blocks)={_cpt_cascade_n}, "
-        f"cpt_offset_distribution.csv sum(n)={_cpt_offset_n}, "
         f"index_per_block.csv sum(n_blocks)={_index_per_block_n}"
     )
 
@@ -192,3 +191,43 @@ def test_agent_stratum_collapses_only_combinations(frame):
     assert single.filter(pl.col("agent_label").str.contains(r"\+")).height == 0, (
         "a co-administration label was not collapsed into 'combination'"
     )
+
+
+def test_the_readable_table_restates_the_long_table(table1_block, table1_block_readable):
+    """P39: the readable CSV is a RENDERING of the long CSV, not a second computation.
+
+    Checked on the one number both files state in a form a string comparison can
+    reach -- the table's own N. If the readable table were ever rebuilt from the
+    analytic frame instead of formatted from the published long table, this is the
+    first place the two would part company, and nothing else in the suite would
+    notice: they are published side by side and read by different people.
+    """
+    _long_n = table1_block.filter(pl.col("statistic") == "n_rows").get_column("overall")[0]
+    _row = table1_block_readable.filter(pl.col("variable").str.starts_with("Total encounter block"))
+    assert _row.height == 1, (
+        f"expected exactly one 'Total encounter blocks' line in the readable table, "
+        f"found {_row.height}"
+    )
+    assert _row.get_column("overall")[0] == f"{_long_n:,.0f}"
+
+
+def test_the_readable_table_never_prints_a_bare_python_none(table1_block_readable):
+    """`NA` is the published claim "not measured"; `None` is a formatting bug.
+
+    A `None` reaching the CSV means a display line's value fell through
+    `format_stat` unformatted, which a reader would parse as a missing cell rather
+    than as the deliberate NA it was supposed to be.
+    """
+    _value_cols = [
+        c for c in table1_block_readable.columns
+        if c not in ("row_order", "group", "variable", "rule", "unit", "site_name")
+    ]
+    assert _value_cols, "the readable table has no value columns"
+    for _c in _value_cols:
+        _bad = table1_block_readable.filter(
+            pl.col(_c).is_null() | (pl.col(_c) == "None") | (pl.col(_c) == "nan")
+        )
+        assert _bad.height == 0, (
+            f"column {_c} has {_bad.height} unformatted cell(s): "
+            f"{_bad.get_column('variable').to_list()[:5]}"
+        )

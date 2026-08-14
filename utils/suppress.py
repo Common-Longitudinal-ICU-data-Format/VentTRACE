@@ -33,6 +33,8 @@ dose lists. The datetime guard below catches that construction via `t_dttm` and
 cannot be satisfied by adding a column.
 """
 
+import json
+
 import polars as pl
 
 _EXPLICIT_ID_COLUMNS = {"patient_id", "hospitalization_id", "encounter_block", "p_num"}
@@ -40,22 +42,14 @@ _ID_EXCEPTIONS = {"cohort_run_id"}  # a provenance stamp, not an identifier
 _DATETIME_DTYPES = (pl.Datetime, pl.Date)  # pl.Datetime covers naive AND tz-aware
 
 
-def publish(df, path, label):
-    """Write `df` to `path` as CSV, report what was written, and return it unchanged.
+def _assert_shareable(df, label):
+    """The disclosure boundary itself, stated once and applied by every writer here.
 
-    Every write to final_no_phi goes through this function. Writing a CSV to that
-    directory by any other route is a bug.
-
-    Refuses (raises AssertionError) rather than writes when:
-      * the frame carries an identifier column -- any of `patient_id`,
-        `hospitalization_id`, `encounter_block`, `p_num`, or any column whose name
-        ends in `_id`. `cohort_run_id` is a provenance stamp, not an identifier,
-        and is exempted.
-      * the frame carries a datetime column -- checked on dtype (`pl.Datetime`,
-        naive or timezone-aware, and `pl.Date`), never on column name. An
-        aggregate has no timestamp; every row-level artifact in this study does.
-
-    Nothing is filtered: a row with n = 3 is written, a row with n = 0 is written.
+    Factored out when `publish_json` was added (2026-08-14) so that the JSON route
+    cannot become a way around the CSV route's guard. A second writer that
+    re-implemented these two checks would be a second place for them to drift, and a
+    disclosure check that holds in one writer and not the other is the exact failure
+    P23 makes this the project's only shared module to prevent.
     """
     id_cols = sorted(
         c
@@ -77,6 +71,51 @@ def publish(df, path, label):
         "artifact in this study does (spec P21/P23)"
     )
 
+
+def publish(df, path, label):
+    """Write `df` to `path` as CSV, report what was written, and return it unchanged.
+
+    Every write to final_no_phi goes through this function. Writing a CSV to that
+    directory by any other route is a bug.
+
+    Refuses (raises AssertionError) rather than writes when:
+      * the frame carries an identifier column -- any of `patient_id`,
+        `hospitalization_id`, `encounter_block`, `p_num`, or any column whose name
+        ends in `_id`. `cohort_run_id` is a provenance stamp, not an identifier,
+        and is exempted.
+      * the frame carries a datetime column -- checked on dtype (`pl.Datetime`,
+        naive or timezone-aware, and `pl.Date`), never on column name. An
+        aggregate has no timestamp; every row-level artifact in this study does.
+
+    Nothing is filtered: a row with n = 3 is written, a row with n = 0 is written.
+    """
+    _assert_shareable(df, label)
     df.write_csv(path)
+    print(f"  [{label}] {df.height} row(s) -> {path}")
+    return df
+
+
+def publish_json(df, path, label, meta):
+    """Write `df` to `path` as `{"meta": ..., "rows": [...]}` and return it unchanged.
+
+    The aggregation route. A consortium partner merging Table 1 across sites needs the
+    numbers as numbers -- a CSV of formatted strings like `63.2 (16.4)` has to be parsed
+    back apart before it can be pooled, and the parsing is where sites diverge. This
+    writes the same frame `publish` writes, with a `meta` header naming the site, the
+    cohort run and the unit, so a merged file can never silently mix an
+    encounter-block table with an index-event one.
+
+    Guarded identically to `publish` -- same identifier check, same datetime check, same
+    module. JSON is a second serialization of a shareable frame, never a second
+    disclosure policy.
+
+    `meta` is required rather than optional: an aggregation payload whose provenance is
+    absent is worse than no payload, because it merges anyway.
+    """
+    _assert_shareable(df, label)
+    payload = {"meta": dict(meta), "rows": df.to_dicts()}
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
     print(f"  [{label}] {df.height} row(s) -> {path}")
     return df
