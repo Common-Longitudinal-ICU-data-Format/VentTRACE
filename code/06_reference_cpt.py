@@ -95,20 +95,19 @@ def _(Path, json):
 
 
 @app.cell
-def _(TIMEZONE, pl):
+def _(pl):
     def to_site_naive(series):
-        """The only correct way to get a naive site-local timestamp out of clifpy.
+        """Strip clifpy's configured site timezone while preserving local wall time.
 
-        clifpy hands back a pytz tzinfo still in its LMT state, so `.dt.tz_localize(None)`
-        drops the offset that is *attached* rather than the offset that is *correct* and
-        silently shifts every timestamp by about an hour. Defined locally (spec §4).
+        `from_file(..., timezone=TIMEZONE)` has already normalized every timestamp to the
+        site timezone. Defined locally (spec §4).
 
         Still here although this notebook computes nothing from a timestamp:
         `procedure_billed_dttm` is a REQUIRED column of the CLIF 2.1 patient_procedures
         schema, so it is read, and P19 binds on every clifpy datetime the moment it
         lands -- including one that is about to be dropped.
         """
-        return series.dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+        return series.dt.tz_localize(None)
 
     return (to_site_naive,)
 

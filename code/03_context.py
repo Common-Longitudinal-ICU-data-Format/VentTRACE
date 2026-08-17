@@ -176,16 +176,14 @@ def _(mo):
 
 
 @app.cell
-def _(TIMEZONE):
+def _():
     def to_site_naive(series):
-        """The only correct way to get a naive site-local timestamp out of clifpy.
+        """Strip clifpy's configured site timezone while preserving local wall time.
 
-        clifpy hands back a pytz tzinfo still in its LMT state, so `.dt.tz_localize(None)`
-        drops the offset that is *attached* rather than the offset that is *correct* and
-        silently shifts every timestamp by about an hour. Pinned by
-        `tests/test_clifpy_tz_boundary.py`. Defined locally, never imported (spec §4).
+        `from_file(..., timezone=TIMEZONE)` has already normalized every timestamp to the
+        site timezone. Defined locally, never imported (spec §4).
         """
-        return series.dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+        return series.dt.tz_localize(None)
 
     return (to_site_naive,)
 

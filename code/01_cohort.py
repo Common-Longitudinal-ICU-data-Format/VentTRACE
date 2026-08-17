@@ -95,19 +95,12 @@ def _(Path, json):
     APPLY_DATE_FILTER = SITE.lower() != "mimic"
 
     def to_site_naive(series):
-        """The ONLY correct way to get a naive site-local timestamp out of clifpy.
+        """Strip clifpy's configured site timezone while preserving local wall time.
 
-        clifpy returns timestamp columns carrying a pytz tzinfo still in its LMT state
-        (`DstTzInfo 'US/Eastern' LMT-1 day, 19:04:00 STD`). Calling `.dt.tz_localize(None)`
-        on such a series drops the offset that is *attached* rather than the one that is
-        *correct*, and the naive result is off by an hour. `.dt.tz_convert` re-resolves
-        the instant against the real tz database first, so its output is right.
-
-        Neither path errors or warns, and they differ by exactly one hour — so mixing them
-        across two frames silently misaligns every window computed between them.
-        See tests/test_clifpy_tz_boundary.py.
+        `from_file(..., timezone=TIMEZONE)` localizes naive input and converts aware
+        input to the configured site timezone. No second conversion belongs here.
         """
-        return series.dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+        return series.dt.tz_localize(None)
 
     return (
         to_site_naive,
@@ -569,12 +562,10 @@ def _(
         timezone=TIMEZONE,
         filters={"hospitalization_id": cohort_hosp_ids},
     )
-    # Two representations, deliberately. `process_resp_support_waterfall` builds its
-    # hourly scaffold with `pd.to_datetime(..., utc=True)` (waterfall.py:102) and then
-    # concatenates it onto the input. Feed it tz-naive timestamps and the concat produces
-    # a mixed naive/aware object column whose sort raises deep inside pandas. So the
-    # waterfall gets UTC-aware, exactly as its docstring requires, and everything else in
-    # this pipeline works in site-local naive time.
+    # Two representations, deliberately. clifpy has already converted recorded_dttm to
+    # the configured site timezone. The waterfall contract requires UTC-aware input and
+    # creates UTC-aware scaffold rows, so this branch makes the one deliberate timezone
+    # conversion in the pipeline. Everything else uses stripped site-local wall time.
     resp_raw_pd = _resp.df.copy()
     resp_utc_pd = resp_raw_pd.assign(
         recorded_dttm=resp_raw_pd["recorded_dttm"].dt.tz_convert("UTC")
@@ -721,8 +712,11 @@ def _(
         verbose=True,
     )
 
-    # Back to site-local naive, matching every other timestamp in the pipeline.
-    _waterfalled["recorded_dttm"] = to_site_naive(_waterfalled["recorded_dttm"])
+    # The waterfall preserves UTC on input rows and creates UTC scaffold rows. Convert its
+    # result back to the configured site timezone before stripping the timezone.
+    _waterfalled["recorded_dttm"] = (
+        _waterfalled["recorded_dttm"].dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+    )
 
     resp_waterfall = (
         pl.from_pandas(
@@ -753,8 +747,7 @@ def _(
     # Defense in depth for the timezone boundary. The waterfall only ever ADDS rows, at
     # HH:59:59 scaffold positions; it never invents a timestamp anywhere else. So every
     # non-scaffold waterfall timestamp must exist in the raw table. If the two frames were
-    # converted by different paths — see to_site_naive — this subset relation breaks
-    # immediately, which is exactly how the one-hour pytz/LMT bug was caught.
+    # mishandled at the UTC waterfall boundary, this subset relation breaks immediately.
     # Compared per (hospitalization_id, recorded_dttm), not on a pooled set of timestamps:
     # a pooled comparison passes as long as SOME hospitalization happens to have that
     # instant, which would let a row orphaned within one encounter slip through.
@@ -771,7 +764,7 @@ def _(
     assert _orphans.height == 0, (
         f"{_orphans.height:,} waterfalled rows have no raw counterpart in their own "
         f"hospitalization (e.g. {_orphans.head(3).to_dicts()}). The raw and waterfall "
-        "frames are on different time bases — check that both went through to_site_naive."
+        "frames are on different time bases — check the UTC waterfall round trip."
     )
     print(f"timestamp alignment OK: {_wf_real.height:,} non-scaffold rows all match raw")
 

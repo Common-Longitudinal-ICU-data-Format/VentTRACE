@@ -476,19 +476,23 @@ is now the one thing `publish()` checks.
 
 Things that have already bitten this codebase once.
 
-**The pytz LMT trap.** `clifpy` returns timezone-aware columns whose `tzinfo` is
-`DstTzInfo 'US/Eastern' LMT-1 day, 19:04:00 STD` — a *pre-standardisation* offset. Calling
-`.dt.tz_localize(None)` drops the attached offset rather than the correct one and shifts
-everything by about an hour, silently. The only correct move is:
+**The clifpy timezone boundary.** `from_file(..., timezone=TIMEZONE)` normalizes naive,
+UTC-aware, and other aware inputs to the configured site timezone. Downstream code must not
+repeat that conversion. It removes the timezone while preserving clifpy's site-local wall clock:
 
 ```python
 def to_site_naive(series):
-    return series.dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+    return series.dt.tz_localize(None)
 ```
 
-Pinned by `tests/test_clifpy_tz_boundary.py`. Defined locally in every notebook that needs it,
-never imported — a bug in a shared datetime helper would corrupt every consumer identically, and
-identical corruption is the hardest kind to see.
+The respiratory waterfall is the deliberate exception. Its input contract is UTC, it creates UTC
+scaffold rows, and it returns UTC. Notebook `01` converts clifpy's site-aware timestamps to UTC
+before the call, then converts the result back to `TIMEZONE` before stripping. Relabeling stripped
+local time as UTC is forbidden because that changes the represented instant.
+
+Pinned by `tests/test_clifpy_tz_boundary.py`. `to_site_naive` is defined locally in every notebook
+that needs it, never imported — a bug in a shared datetime helper would corrupt every consumer
+identically, and identical corruption is the hardest kind to see.
 
 **The same trap on the way out: `datetime.timestamp()`.** The timezone always comes from
 `config["timezone"]`, and no code path may ask the operating system. `run_all.sh` gets this

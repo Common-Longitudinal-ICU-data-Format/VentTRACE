@@ -1,25 +1,13 @@
-"""Regression test for the clifpy timezone boundary.
+"""Regression tests for the clifpy and respiratory-waterfall timezone boundaries.
 
-clifpy returns timestamp columns carrying a **pytz** tzinfo object that is still in
-its LMT (Local Mean Time) state:
+clifpy normalizes every `*_dttm` column to the configured site timezone. The analytic
+pipeline then strips that timezone without another conversion so calculations use the
+site-local wall clock. The respiratory waterfall is the deliberate exception: its input
+contract is UTC, it creates UTC scaffold rows, and its output remains UTC. Notebook 01
+therefore converts to UTC before the call, then converts back to the site timezone before
+stripping.
 
-    <DstTzInfo 'US/Eastern' LMT-1 day, 19:04:00 STD>
-
-This is the classic pytz footgun. Calling `.dt.tz_localize(None)` on such a series
-drops the offset that is *attached* rather than the offset that is *correct*, and the
-resulting naive wall time is off by roughly an hour. `.dt.tz_convert(tz)` first
-re-resolves the instant against the real tz database, so the naive value it produces
-is right.
-
-The two paths do not error, do not warn, and differ by exactly one hour — so mixing
-them inside one pipeline silently misaligns every window computed across the two
-frames. `01_cohort.py` did exactly that: `resp_raw` used path A while the waterfall
-path used path B, which put the raw-vs-waterfall QC comparison an hour out.
-
-RULE: never call `.dt.tz_localize(None)` directly on a clifpy column.
-Always `.dt.tz_convert(TIMEZONE).dt.tz_localize(None)`.
-
-Run:  uv run python tests/test_clifpy_tz_boundary.py
+Run:  uv run pytest tests/test_clifpy_tz_boundary.py
 """
 
 import json
@@ -28,53 +16,82 @@ from pathlib import Path
 import pandas as pd
 
 from clifpy.tables import RespiratorySupport
+from clifpy.utils.waterfall import process_resp_support_waterfall
 
 CONFIG = json.loads((Path(__file__).parent.parent / "config" / "config.json").read_text())
 TIMEZONE = CONFIG["timezone"]
 
 
-def to_site_naive(series: pd.Series, timezone: str = TIMEZONE) -> pd.Series:
-    """The only correct way to get a naive site-local timestamp out of clifpy."""
-    return series.dt.tz_convert(timezone).dt.tz_localize(None)
+def to_site_naive(series: pd.Series) -> pd.Series:
+    """Strip clifpy's configured site timezone without shifting wall time."""
+    return series.dt.tz_localize(None)
 
 
-def test_naive_paths_disagree_and_convert_is_correct():
-    """Pin the bug: the two paths differ, and tz_convert is the one that matches UTC."""
+def test_clifpy_strip_and_waterfall_utc_roundtrip():
+    fixture = RespiratorySupport.from_file(
+        data_directory=CONFIG["data_directory"],
+        filetype=CONFIG["filetype"],
+        timezone=TIMEZONE,
+        columns=["hospitalization_id"],
+        sample_size=1,
+    )
+    assert not fixture.df.empty, "configured respiratory_support table is empty"
+    fixture_hospitalization_id = fixture.df["hospitalization_id"].iloc[0]
+
     table = RespiratorySupport.from_file(
         data_directory=CONFIG["data_directory"],
         filetype=CONFIG["filetype"],
         timezone=TIMEZONE,
-        columns=["hospitalization_id", "recorded_dttm", "device_category"],
-        filters={"hospitalization_id": ["25598069"]},
+        filters={"hospitalization_id": [fixture_hospitalization_id]},
     )
-    s = table.df["recorded_dttm"]
-    assert len(s) > 0, "fixture hospitalization returned no rows"
-
-    path_a = s.dt.tz_localize(None)          # WRONG — drops the pytz LMT offset
-    path_b = to_site_naive(s)                # RIGHT — re-resolves against the tz database
-
-    # 1. The two paths disagree. If this ever stops being true, clifpy fixed its
-    #    tzinfo handling and the workaround below can be simplified.
-    delta_hours = (path_b - path_a).dt.total_seconds().div(3600).unique()
-    assert len(delta_hours) == 1 and delta_hours[0] != 0, (
-        f"expected a constant nonzero offset between the two paths, got {delta_hours}"
+    local = table.df["recorded_dttm"]
+    assert len(local) > 0, "fixture hospitalization returned no rows"
+    assert str(local.dt.tz) == TIMEZONE, (
+        f"clifpy returned {local.dt.tz!s}, expected configured site timezone {TIMEZONE}"
     )
-    print(f"paths differ by {delta_hours[0]:+.0f} h  (tz object: {s.dt.tz!r})")
 
-    # 2. tz_convert is the correct one: reinterpreting its output in the site
-    #    timezone must reproduce the original UTC instant exactly.
-    utc = s.dt.tz_convert("UTC")
-    roundtrip = path_b.dt.tz_localize(TIMEZONE).dt.tz_convert("UTC")
-    assert roundtrip.equals(utc), "tz_convert path does not round-trip to the original instant"
+    local_naive = to_site_naive(local)
+    assert local_naive.dt.strftime("%Y-%m-%d %H:%M:%S.%f").equals(
+        local.dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+    ), "stripping the timezone changed clifpy's site-local wall clock"
 
-    # 3. ...and tz_localize(None) is not.
-    bad_roundtrip = path_a.dt.tz_localize(TIMEZONE).dt.tz_convert("UTC")
-    assert not bad_roundtrip.equals(utc), (
-        "tz_localize(None) unexpectedly round-tripped; the bug may be fixed upstream"
+    resp_utc = table.df.copy()
+    resp_utc["recorded_dttm"] = resp_utc["recorded_dttm"].dt.tz_convert("UTC")
+    waterfalled = process_resp_support_waterfall(resp_utc, verbose=False)
+    assert str(waterfalled["recorded_dttm"].dt.tz) == "UTC", (
+        "the respiratory waterfall did not preserve its documented UTC time base"
     )
-    print("confirmed: tz_convert round-trips, tz_localize(None) does not")
+
+    waterfall_local_naive = (
+        waterfalled["recorded_dttm"].dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+    )
+    waterfall_real = pd.DataFrame(
+        {
+            "hospitalization_id": waterfalled["hospitalization_id"],
+            "recorded_dttm": waterfall_local_naive,
+        }
+    )
+    waterfall_real = waterfall_real.loc[
+        waterfall_real["recorded_dttm"].dt.second != 59
+    ].drop_duplicates()
+    raw = pd.DataFrame(
+        {
+            "hospitalization_id": table.df["hospitalization_id"],
+            "recorded_dttm": local_naive,
+        }
+    ).drop_duplicates()
+    orphans = waterfall_real.merge(
+        raw,
+        on=["hospitalization_id", "recorded_dttm"],
+        how="left",
+        indicator=True,
+    )
+    orphans = orphans.loc[orphans["_merge"] == "left_only"]
+    assert orphans.empty, (
+        f"{len(orphans):,} non-scaffold waterfall rows failed the UTC-to-site round trip"
+    )
 
 
 if __name__ == "__main__":
-    test_naive_paths_disagree_and_convert_is_correct()
+    test_clifpy_strip_and_waterfall_utc_roundtrip()
     print("PASS")
