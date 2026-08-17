@@ -103,12 +103,18 @@ def _(Path, json):
         "propofol": "mg",
         "fentanyl": "mcg",
     }
-    # P42. The study lead determined that these charted values are absolute-mg
-    # doses carrying an erroneous /kg suffix. The raw unit is retained for QC and
-    # P41; only the copy sent to clifpy uses the assumed calculation unit.
+    # P42. The study lead determined that mg/kg values for every study medication
+    # are absolute-mg doses carrying an erroneous /kg suffix. The raw unit is
+    # retained for QC and P41; only the copy sent to clifpy uses the assumed unit.
     DOSE_UNIT_OVERRIDES = {
         ("rocuronium", "mg/kg"): "mg",
         ("succinylcholine", "mg/kg"): "mg",
+        ("vecuronium", "mg/kg"): "mg",
+        ("midazolam", "mg/kg"): "mg",
+        ("etomidate", "mg/kg"): "mg",
+        ("ketamine", "mg/kg"): "mg",
+        ("propofol", "mg/kg"): "mg",
+        ("fentanyl", "mg/kg"): "mg",
     }
 
     COLLAPSE_GAP_MINUTES = config["collapse_gap_minutes"]
@@ -1144,10 +1150,9 @@ def _(mo):
         unit converter is the single most likely place in this codebase to violate that
         silently, and there is no reason for a dose converter to see a timestamp at all.
 
-        P42 adds two explicit global exceptions: rocuronium and succinylcholine charted
-        as `mg/kg` are treated as mislabeled absolute `mg` doses for calculation. Their
-        raw units remain untouched in the source frame, the raw-unit outputs, and the
-        correction-count CSV. Every other `/kg` unit is still refused before pandas.
+        P42 treats `mg/kg` as mislabeled absolute `mg` for every medication in this
+        study. Raw units remain untouched in the source frame, raw-unit outputs, and
+        correction-count CSVs. Every other `/kg` unit is still refused before pandas.
 
         Rows without a finite dose and non-null unit are not doses that clifpy can
         standardise. They remain in administration counts and raw-unit QC, but are
@@ -1319,16 +1324,26 @@ def _(index_paralytic):
 
 
 @app.cell
-def _(DOSE_UNIT_OVERRIDES, SHARE_DIR, pl, publish, raw_doses):
+def _(DOSE_UNIT_OVERRIDES, PARALYTICS, SHARE_DIR, pl, publish, raw_doses):
+    _rules = [
+        (key, value)
+        for key, value in DOSE_UNIT_OVERRIDES.items()
+        if key[0] in PARALYTICS
+    ]
     _grid = pl.DataFrame(
         {
-            "med_category": [key[0] for key in DOSE_UNIT_OVERRIDES],
-            "med_dose_unit": [key[1] for key in DOSE_UNIT_OVERRIDES],
-            "assumed_med_dose_unit": list(DOSE_UNIT_OVERRIDES.values()),
+            "med_category": [key[0] for key, _ in _rules],
+            "med_dose_unit": [key[1] for key, _ in _rules],
+            "assumed_med_dose_unit": [value for _, value in _rules],
         }
     )
     _observed = (
-        raw_doses.group_by(["med_category", "med_dose_unit"])
+        raw_doses.with_columns(
+            pl.col("med_category").str.strip_chars().str.to_lowercase(),
+            pl.col("med_dose_unit").str.strip_chars().str.to_lowercase(),
+        )
+        .filter(pl.col("med_dose_unit") == "mg/kg")
+        .group_by(["med_category", "med_dose_unit"])
         .agg(n_administrations=pl.len())
     )
     paralytic_dose_unit_corrections = (

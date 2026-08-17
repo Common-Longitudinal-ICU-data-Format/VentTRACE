@@ -97,6 +97,12 @@ PREFERRED_UNITS = {
 UNIT_OVERRIDES = {
     ("rocuronium", "mg/kg"): "mg",
     ("succinylcholine", "mg/kg"): "mg",
+    ("vecuronium", "mg/kg"): "mg",
+    ("midazolam", "mg/kg"): "mg",
+    ("etomidate", "mg/kg"): "mg",
+    ("ketamine", "mg/kg"): "mg",
+    ("propofol", "mg/kg"): "mg",
+    ("fentanyl", "mg/kg"): "mg",
 }
 
 CONVERTERS = {
@@ -173,8 +179,7 @@ def test_mixed_units_convert_to_the_preferred_unit_with_correct_arithmetic(label
 
 @pytest.mark.parametrize("label", LABELS)
 def test_an_unapproved_kg_unit_raises_before_the_converter_ever_runs(label):
-    """P42 is an exact two-category exception, not permission to discard /kg
-    from genuinely weight-based dosing."""
+    """P42 applies only to exact mg/kg, not genuinely weight-based rate units."""
     convert = CONVERTERS[label]
     df = pl.DataFrame(
         {
@@ -202,8 +207,8 @@ def test_a_kg_unit_is_detected_case_insensitively(label):
 
 
 @pytest.mark.parametrize("label", LABELS)
-@pytest.mark.parametrize("med_category", ["rocuronium", "succinylcholine"])
-def test_approved_mg_per_kg_is_assumed_to_be_absolute_mg(label, med_category):
+@pytest.mark.parametrize("med_category", PREFERRED_UNITS)
+def test_mg_per_kg_is_assumed_to_be_absolute_mg_for_every_med(label, med_category):
     convert = CONVERTERS[label]
     df = pl.DataFrame(
         {
@@ -216,8 +221,11 @@ def test_approved_mg_per_kg_is_assumed_to_be_absolute_mg(label, med_category):
 
     assert out.get_column("med_dose").to_list() == [50.0]
     assert out.get_column("med_dose_unit").to_list() == ["mg/kg"]
-    assert out.get_column("med_dose_converted").to_list() == [50.0]
-    assert out.get_column("med_dose_unit_converted").to_list() == ["mg"]
+    expected_dose = 50_000.0 if med_category == "fentanyl" else 50.0
+    assert out.get_column("med_dose_converted").to_list() == [expected_dose]
+    assert out.get_column("med_dose_unit_converted").to_list() == [
+        PREFERRED_UNITS[med_category]
+    ]
     assert out.get_column("_convert_status").to_list() == ["success"]
 
 
@@ -226,12 +234,12 @@ def test_override_matching_is_case_insensitive(label):
     convert = CONVERTERS[label]
     df = pl.DataFrame(
         {
-            "med_category": ["ROCURONIUM"],
+            "med_category": ["PROPOFOL"],
             "med_dose": [50.0],
             "med_dose_unit": ["MG/KG"],
         }
     )
-    out = convert(df, {**PREFERRED_UNITS, "ROCURONIUM": "mg"})
+    out = convert(df, {**PREFERRED_UNITS, "PROPOFOL": "mg"})
 
     assert out.get_column("med_dose_unit").to_list() == ["MG/KG"]
     assert out.get_column("med_dose_converted").to_list() == [50.0]

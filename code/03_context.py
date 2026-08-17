@@ -120,11 +120,17 @@ def _(Path, json):
         "propofol": "mg",
         "fentanyl": "mcg",
     }
-    # P42. Kept identical to 02 even though E filters to sedatives and therefore
-    # cannot currently encounter either category.
+    # P42. Kept identical to 02: exact mg/kg values for every study medication
+    # are treated as absolute mg for calculation while their raw units remain visible.
     DOSE_UNIT_OVERRIDES = {
         ("rocuronium", "mg/kg"): "mg",
         ("succinylcholine", "mg/kg"): "mg",
+        ("vecuronium", "mg/kg"): "mg",
+        ("midazolam", "mg/kg"): "mg",
+        ("etomidate", "mg/kg"): "mg",
+        ("ketamine", "mg/kg"): "mg",
+        ("propofol", "mg/kg"): "mg",
+        ("fentanyl", "mg/kg"): "mg",
     }
 
     print(f"site           : {SITE}")
@@ -1098,10 +1104,9 @@ def _(mo):
         alone and a tz-aware timestamp round-tripping through pandas is the likeliest
         place in this codebase to violate that silently.
 
-        P42's rocuronium and succinylcholine `mg/kg` → `mg` calculation overrides are
-        carried here too so the duplicated conversion boundaries remain identical.
-        E filters to sedatives, so neither override currently applies; every other
-        `/kg` unit still fails loudly rather than guessing.
+        P42 treats exact `mg/kg` values as mislabeled absolute `mg` for every medication
+        in this study. The raw values and units remain unchanged for QC, while every
+        other `/kg` unit still fails loudly rather than guessing.
         """
     )
     return
@@ -1246,9 +1251,10 @@ def _(mo):
         ### Publishing E
 
         `index_context.parquet` is written first — the canonical artifact, PHI, never
-        shared. Then four released tables, each at its true count (P21):
+        shared. Then five released tables, each at its true count (P21):
         `sedation_summary.csv`, `sedation_offset_distribution.csv`,
-        `sedation_dose.csv` and `sedation_dose_units.csv`.
+        `sedation_dose.csv`, `sedation_dose_units.csv`, and
+        `sedation_dose_unit_corrections.csv`.
 
         Every bin of the offset grid is emitted for every agent, including the empty ones: an
         explicit published zero is what lets a reader tell an empty bin from one with no
@@ -1338,6 +1344,49 @@ def _(
         "sedation_offset_distribution",
     )
     return sedation_offsets, sedation_summary
+
+
+@app.cell
+def _(
+    DOSE_UNIT_OVERRIDES,
+    SEDATIVES,
+    SHARE_DIR,
+    pl,
+    publish,
+    sed_in_window,
+):
+    _rules = [
+        (key, value)
+        for key, value in DOSE_UNIT_OVERRIDES.items()
+        if key[0] in SEDATIVES
+    ]
+    _grid = pl.DataFrame(
+        {
+            "med_category": [key[0] for key, _ in _rules],
+            "med_dose_unit": [key[1] for key, _ in _rules],
+            "assumed_med_dose_unit": [value for _, value in _rules],
+        }
+    )
+    _observed = (
+        sed_in_window.with_columns(
+            pl.col("med_category").str.strip_chars().str.to_lowercase(),
+            pl.col("med_dose_unit").str.strip_chars().str.to_lowercase(),
+        )
+        .filter(pl.col("med_dose_unit") == "mg/kg")
+        .group_by(["med_category", "med_dose_unit"])
+        .agg(n_admin_windows=pl.len())
+    )
+    sedation_dose_unit_corrections = (
+        _grid.join(_observed, on=["med_category", "med_dose_unit"], how="left")
+        .with_columns(pl.col("n_admin_windows").fill_null(0))
+        .sort(["med_category", "med_dose_unit"])
+    )
+    publish(
+        sedation_dose_unit_corrections,
+        SHARE_DIR / "sedation_dose_unit_corrections.csv",
+        "sedation_dose_unit_corrections",
+    )
+    return (sedation_dose_unit_corrections,)
 
 
 @app.cell
