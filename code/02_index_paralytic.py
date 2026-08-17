@@ -103,6 +103,13 @@ def _(Path, json):
         "propofol": "mg",
         "fentanyl": "mcg",
     }
+    # P42. The study lead determined that these charted values are absolute-mg
+    # doses carrying an erroneous /kg suffix. The raw unit is retained for QC and
+    # P41; only the copy sent to clifpy uses the assumed calculation unit.
+    DOSE_UNIT_OVERRIDES = {
+        ("rocuronium", "mg/kg"): "mg",
+        ("succinylcholine", "mg/kg"): "mg",
+    }
 
     COLLAPSE_GAP_MINUTES = config["collapse_gap_minutes"]
 
@@ -135,9 +142,11 @@ def _(Path, json):
     print(f"gap bins       : {len(GAP_BIN_LABELS)}  {GAP_BIN_LABELS}")
     print(f"max pairs      : {MAX_TOTAL_PAIRS:,}")
     print(f"preferred units: {PREFERRED_DOSE_UNITS}   (P18)")
+    print(f"unit overrides : {DOSE_UNIT_OVERRIDES}   (P42)")
     return (
         COLLAPSE_GAP_MINUTES,
         DATA_DIR,
+        DOSE_UNIT_OVERRIDES,
         FIG_DIR,
         FILETYPE,
         GAP_CUT_BREAKS,
@@ -1135,12 +1144,14 @@ def _(mo):
         unit converter is the single most likely place in this codebase to violate that
         silently, and there is no reason for a dose converter to see a timestamp at all.
 
-        `/kg` dosing is detected and refused **before** anything crosses into pandas --
-        no `/kg` unit is observed at this site, and this notebook must not assume that
-        holds everywhere. A site whose paralytic is charted per kilogram needs the
-        vitals table for `weight_kg`, and this pipeline does not currently load one;
-        that is a scope decision for the study lead, not something to default into
-        silently, so the notebook fails loudly instead.
+        P42 adds two explicit global exceptions: rocuronium and succinylcholine charted
+        as `mg/kg` are treated as mislabeled absolute `mg` doses for calculation. Their
+        raw units remain untouched in the source frame, the raw-unit outputs, and the
+        correction-count CSV. Every other `/kg` unit is still refused before pandas.
+
+        Rows without a finite dose and non-null unit are not doses that clifpy can
+        standardise. They remain in administration counts and raw-unit QC, but are
+        reported and excluded from converted dose statistics.
         """
     )
     return
@@ -1148,11 +1159,12 @@ def _(mo):
 
 @app.cell
 def _(convert_dose_units_by_med_category, pl):
-    def convert_doses_to_preferred_units(df, preferred_units):
+    def convert_doses_to_preferred_units(df, preferred_units, unit_overrides):
         """Standardise `med_dose` to one preferred unit per `med_category` via clifpy.
 
         `df` needs `med_category`, `med_dose`, `med_dose_unit` and nothing else --
-        never a datetime column. Returns `df` with `med_dose_converted`,
+        never a datetime column. Rows without a finite dose and non-null unit are
+        reported and excluded. Returns the remaining rows with `med_dose_converted`,
         `med_dose_unit_converted`, `_unit_class` and `_convert_status` joined back on,
         at the identical height and row order as `df`.
 
@@ -1162,16 +1174,42 @@ def _(convert_dose_units_by_med_category, pl):
         a converter that silently dropped an unrecognised unit would otherwise change
         a denominator without anything raising.
         """
-        _kg_units = sorted(
-            df.filter(
-                pl.col("med_dose_unit").str.to_lowercase().str.contains("/kg", literal=True)
+        _usable = df.filter(
+            pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & pl.col("med_dose_unit").is_not_null()
+        )
+        _dropped = df.height - _usable.height
+        if _dropped:
+            print(
+                f"  [dose conversion] {_dropped:,} row(s) excluded for a null or "
+                "non-finite med_dose, or a null med_dose_unit"
             )
+        df = _usable
+
+        _normal_category = pl.col("med_category").str.strip_chars().str.to_lowercase()
+        _normal_unit = pl.col("med_dose_unit").str.strip_chars().str.to_lowercase()
+        _override_expr = pl.lit(False)
+        _calculation_unit = pl.col("med_dose_unit")
+        for (_category, _raw_unit), _assumed_unit in unit_overrides.items():
+            _matches = (_normal_category == _category) & (_normal_unit == _raw_unit)
+            _override_expr = _override_expr | _matches
+            _calculation_unit = (
+                pl.when(_matches)
+                .then(pl.lit(_assumed_unit))
+                .otherwise(_calculation_unit)
+            )
+
+        _kg_units = sorted(
+            df.filter(_normal_unit.str.contains("/kg", literal=True) & ~_override_expr)
             .get_column("med_dose_unit")
             .unique()
             .to_list()
         )
         assert not _kg_units, (
-            f"weight-based dosing observed ({_kg_units}) but this pipeline does not load "
+            f"unapproved weight-based dosing observed ({_kg_units}); only the explicit "
+            f"study overrides {unit_overrides} may discard a /kg suffix. This pipeline "
+            "does not load "
             "the vitals table clifpy needs for weight_kg. Converting on a missing weight "
             "would be worse than not converting -- adding a vitals load is a scope "
             "decision the study lead has not made, so this stops here instead of "
@@ -1186,7 +1224,10 @@ def _(convert_dose_units_by_med_category, pl):
             pl.col("_dose_row_key").cast(pl.Int64)
         )
         _pd = _keyed.select(
-            "_dose_row_key", "med_category", "med_dose", "med_dose_unit"
+            "_dose_row_key",
+            "med_category",
+            "med_dose",
+            _calculation_unit.alias("med_dose_unit"),
         ).to_pandas()
         _pd["weight_kg"] = None
 
@@ -1272,22 +1313,60 @@ def _(mo):
 
 
 @app.cell
-def _(PREFERRED_DOSE_UNITS, convert_doses_to_preferred_units, index_paralytic, pl):
-    _raw_doses = index_paralytic.explode("doses").unnest("doses")
+def _(index_paralytic):
+    raw_doses = index_paralytic.explode("doses").unnest("doses")
+    return (raw_doses,)
 
+
+@app.cell
+def _(DOSE_UNIT_OVERRIDES, SHARE_DIR, pl, publish, raw_doses):
+    _grid = pl.DataFrame(
+        {
+            "med_category": [key[0] for key in DOSE_UNIT_OVERRIDES],
+            "med_dose_unit": [key[1] for key in DOSE_UNIT_OVERRIDES],
+            "assumed_med_dose_unit": list(DOSE_UNIT_OVERRIDES.values()),
+        }
+    )
+    _observed = (
+        raw_doses.group_by(["med_category", "med_dose_unit"])
+        .agg(n_administrations=pl.len())
+    )
+    paralytic_dose_unit_corrections = (
+        _grid.join(_observed, on=["med_category", "med_dose_unit"], how="left")
+        .with_columns(pl.col("n_administrations").fill_null(0))
+        .sort(["med_category", "med_dose_unit"])
+    )
+    publish(
+        paralytic_dose_unit_corrections,
+        SHARE_DIR / "paralytic_dose_unit_corrections.csv",
+        "paralytic_dose_unit_corrections",
+    )
+    return (paralytic_dose_unit_corrections,)
+
+
+@app.cell
+def _(
+    DOSE_UNIT_OVERRIDES,
+    PREFERRED_DOSE_UNITS,
+    convert_doses_to_preferred_units,
+    pl,
+    raw_doses,
+):
     # The sanity check that the conversion actually happened, not a silent no-op:
     # printed per (med_category, med_dose_unit) BEFORE conversion, and per
     # med_category AFTER. Ketamine is the one case at this site where folding
     # changes a published number materially -- see the report for the reading.
     _before = (
-        _raw_doses.group_by(["med_category", "med_dose_unit"])
+        raw_doses.group_by(["med_category", "med_dose_unit"])
         .agg(n=pl.len(), median_dose=pl.col("med_dose").median())
         .sort(["med_category", "med_dose_unit"])
     )
     print("BEFORE conversion -- n and median dose per (med_category, med_dose_unit):")
     print(_before)
 
-    dose_converted = convert_doses_to_preferred_units(_raw_doses, PREFERRED_DOSE_UNITS)
+    dose_converted = convert_doses_to_preferred_units(
+        raw_doses, PREFERRED_DOSE_UNITS, DOSE_UNIT_OVERRIDES
+    )
 
     _after = (
         dose_converted.group_by("med_category")
@@ -1326,10 +1405,8 @@ def _(SHARE_DIR, dose_converted, pl, publish):
         .agg(
             n=pl.len(),
             # How many administrations were ALREADY in the preferred unit, before
-            # conversion touched anything -- taken from the identical pre-conversion
-            # frame that feeds paralytic_dose_units.csv, so the two files cannot
-            # disagree. Materially below n means the row's median pools two unit
-            # populations rather than one; see the markdown above.
+            # conversion touched anything, among the usable rows represented by n.
+            # Materially below n means the row pools converted or assumed units.
             n_in_preferred_unit=(
                 pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")
             ).sum(),
@@ -1349,11 +1426,11 @@ def _(SHARE_DIR, dose_converted, pl, publish):
 
 
 @app.cell
-def _(SHARE_DIR, dose_converted, pl, publish):
+def _(SHARE_DIR, pl, publish, raw_doses):
     # Counts only -- no dose statistics. This is where the raw charting
     # heterogeneity the conversion folds together is still published (P18).
     paralytic_dose_units = (
-        dose_converted.group_by(["med_category", "med_dose_unit"])
+        raw_doses.group_by(["med_category", "med_dose_unit"])
         .agg(n=pl.len())
         .sort(["med_category", "n"], descending=[False, True])
     )
@@ -1389,9 +1466,9 @@ def _(mo):
         that split is visible directly instead of by cross-referencing
         `sedation_dose_units.csv` and inferring it.
 
-        This is **additive**. `index_paralytic_dose.csv` and `paralytic_dose_units.csv`
-        are unchanged, and `n_total` here equals that file's `n` by construction --
-        both are grouped from the same frame on the same keys.
+        `n_total` equals `paralytic_dose_units.csv`'s `n` for fully dosed groups. A
+        null-dose group remains in the counts table but has no ECDF position; that
+        difference is printed explicitly.
         """
     )
     return
@@ -1458,11 +1535,10 @@ def _(pl):
 
 
 @app.cell
-def _(SHARE_DIR, dose_converted, ecdf_by_group, pl, publish):
-    # dose_converted is the SAME frame that feeds paralytic_dose_units.csv two cells
-    # below, grouped on the SAME keys -- so n_total here and n there cannot disagree
-    # without one of them being edited to stop using it.
-    paralytic_dose_ecdf = ecdf_by_group(dose_converted)
+def _(SHARE_DIR, ecdf_by_group, pl, publish, raw_doses):
+    # The ECDF and unit-count table consume the same raw frame. The ECDF excludes
+    # missing/non-finite doses while the unit table retains them as charting QC.
+    paralytic_dose_ecdf = ecdf_by_group(raw_doses)
 
     # Reconciliation, asserted rather than trusted -- but asserted against the SAME
     # population ecdf_by_group actually counts. n_total is net of the nulls that
@@ -1472,7 +1548,7 @@ def _(SHARE_DIR, dose_converted, ecdf_by_group, pl, publish):
     # carry a dose: a mismatch there means the grouping keys drifted apart, which is
     # the bug this assert exists to catch.
     _expected = (
-        dose_converted.filter(
+        raw_doses.filter(
             pl.col("med_dose").is_not_null()
             & pl.col("med_dose").is_finite()
             & pl.col("med_dose_unit").is_not_null()
@@ -1488,7 +1564,7 @@ def _(SHARE_DIR, dose_converted, ecdf_by_group, pl, publish):
     )
     assert _expected.equals(_got), (
         "paralytic_dose_ecdf n_total does not reconcile with the dosed rows of "
-        f"dose_converted:\nexpected:\n{_expected}\ngot:\n{_got}"
+        f"raw_doses:\nexpected:\n{_expected}\ngot:\n{_got}"
     )
 
     # The gap against paralytic_dose_units.csv's own count: reported, never fatal (spec §4).
@@ -1497,7 +1573,7 @@ def _(SHARE_DIR, dose_converted, ecdf_by_group, pl, publish):
     # group that is entirely null-dosed vanishes from the ECDF and shows n = 0 here
     # rather than disappearing silently.
     _units = (
-        dose_converted.group_by(["med_category", "med_dose_unit"])
+        raw_doses.group_by(["med_category", "med_dose_unit"])
         .agg(n_units=pl.len())
         .sort(["med_category", "med_dose_unit"])
     )

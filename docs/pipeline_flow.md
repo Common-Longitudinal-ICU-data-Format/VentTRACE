@@ -130,7 +130,9 @@ and a site whose extract lacks professional billing sees an empty cascade —
 `02` and `03` also write `paralytic_dose_ecdf.csv` and `sedation_dose_ecdf.csv` with figures
 `B1_paralytic_dose_ecdf.png` and `E3_sedation_dose_ecdf.png` (P41) — the full empirical CDF of
 charted dose per `(med_category, med_dose_unit)`, on the raw unit rather than the converted one,
-so P18's unit fold is visible rather than inferred.
+so P18's unit fold is visible rather than inferred. `02` additionally writes
+`paralytic_dose_unit_corrections.csv`, the per-agent count of charted `mg/kg` rows treated as
+absolute `mg` for P42's converted calculation.
 
 ---
 
@@ -469,6 +471,7 @@ is now the one thing `publish()` checks.
 | P20 | every `*_category` column lower-cased on load; every literal in the codebase written lower case | everywhere | |
 | P21 / P23 | the disclosure boundary is row-level vs. aggregate; `publish()` refuses an identifier or a datetime column; nothing else is filtered | `utils/suppress.py` | see §6 |
 | P41 | **added 2026-08-15** — dose distributions also published as full ECDFs keyed on the raw charted `(med_category, med_dose_unit)` pair; one row per distinct dose with `n_at_dose`, `n_cum`, `n_total`, `ecdf`. Amount units only. Additive to P18 | `02`, `03` | 118 + 81 rows; ketamine's `mcg`/`mg` split visible without conversion |
+| P42 | rocuronium and succinylcholine charted as `mg/kg` are treated as mislabeled absolute `mg` for calculation; raw-unit outputs remain unchanged and correction counts are published | `02` (`03` carries the identical boundary) | every other `/kg` unit still fails |
 
 ---
 

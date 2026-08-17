@@ -120,15 +120,23 @@ def _(Path, json):
         "propofol": "mg",
         "fentanyl": "mcg",
     }
+    # P42. Kept identical to 02 even though E filters to sedatives and therefore
+    # cannot currently encounter either category.
+    DOSE_UNIT_OVERRIDES = {
+        ("rocuronium", "mg/kg"): "mg",
+        ("succinylcholine", "mg/kg"): "mg",
+    }
 
     print(f"site           : {SITE}")
     print(f"window         : +/- {CONTEXT_WINDOW_MINUTES:.0f} min   (P15)")
     print(f"sedatives      : {' | '.join(SEDATIVES)}")
     print(f"mar actions    : {' | '.join(MAR_ACTIONS)}")
     print(f"preferred units: {PREFERRED_DOSE_UNITS}   (P18)")
+    print(f"unit overrides : {DOSE_UNIT_OVERRIDES}   (P42)")
     return (
         CONTEXT_WINDOW_MINUTES,
         DATA_DIR,
+        DOSE_UNIT_OVERRIDES,
         FIG_DIR,
         FILETYPE,
         MAR_ACTIONS,
@@ -1090,11 +1098,10 @@ def _(mo):
         alone and a tz-aware timestamp round-tripping through pandas is the likeliest
         place in this codebase to violate that silently.
 
-        `/kg` dosing is detected and refused before anything crosses into pandas: no
-        `/kg` unit is observed at this site, and a site that charts sedation per
-        kilogram needs the vitals table for `weight_kg`, which this pipeline does not
-        currently load. That is a scope decision for the study lead, so the notebook
-        fails loudly rather than guessing.
+        P42's rocuronium and succinylcholine `mg/kg` → `mg` calculation overrides are
+        carried here too so the duplicated conversion boundaries remain identical.
+        E filters to sedatives, so neither override currently applies; every other
+        `/kg` unit still fails loudly rather than guessing.
         """
     )
     return
@@ -1102,12 +1109,13 @@ def _(mo):
 
 @app.cell
 def _(convert_dose_units_by_med_category, pl):
-    def convert_doses_to_preferred_units(df, preferred_units):
+    def convert_doses_to_preferred_units(df, preferred_units, unit_overrides):
         """Standardise `med_dose` to one preferred unit per `med_category` via clifpy.
 
         A deliberate duplicate of `02`'s function of the same name (spec §4, P23):
         `df` needs `med_category`, `med_dose`, `med_dose_unit` and nothing else --
-        never a datetime column. Returns `df` with `med_dose_converted`,
+        never a datetime column. Rows without a finite dose and non-null unit are
+        reported and excluded. Returns the remaining rows with `med_dose_converted`,
         `med_dose_unit_converted`, `_unit_class` and `_convert_status` joined back on,
         at the identical height and row order as `df`.
 
@@ -1117,16 +1125,42 @@ def _(convert_dose_units_by_med_category, pl):
         a converter that silently dropped an unrecognised unit would otherwise change
         a denominator without anything raising.
         """
-        _kg_units = sorted(
-            df.filter(
-                pl.col("med_dose_unit").str.to_lowercase().str.contains("/kg", literal=True)
+        _usable = df.filter(
+            pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & pl.col("med_dose_unit").is_not_null()
+        )
+        _dropped = df.height - _usable.height
+        if _dropped:
+            print(
+                f"  [dose conversion] {_dropped:,} row(s) excluded for a null or "
+                "non-finite med_dose, or a null med_dose_unit"
             )
+        df = _usable
+
+        _normal_category = pl.col("med_category").str.strip_chars().str.to_lowercase()
+        _normal_unit = pl.col("med_dose_unit").str.strip_chars().str.to_lowercase()
+        _override_expr = pl.lit(False)
+        _calculation_unit = pl.col("med_dose_unit")
+        for (_category, _raw_unit), _assumed_unit in unit_overrides.items():
+            _matches = (_normal_category == _category) & (_normal_unit == _raw_unit)
+            _override_expr = _override_expr | _matches
+            _calculation_unit = (
+                pl.when(_matches)
+                .then(pl.lit(_assumed_unit))
+                .otherwise(_calculation_unit)
+            )
+
+        _kg_units = sorted(
+            df.filter(_normal_unit.str.contains("/kg", literal=True) & ~_override_expr)
             .get_column("med_dose_unit")
             .unique()
             .to_list()
         )
         assert not _kg_units, (
-            f"weight-based dosing observed ({_kg_units}) but this pipeline does not load "
+            f"unapproved weight-based dosing observed ({_kg_units}); only the explicit "
+            f"study overrides {unit_overrides} may discard a /kg suffix. This pipeline "
+            "does not load "
             "the vitals table clifpy needs for weight_kg. Converting on a missing weight "
             "would be worse than not converting -- adding a vitals load is a scope "
             "decision the study lead has not made, so this stops here instead of "
@@ -1141,7 +1175,10 @@ def _(convert_dose_units_by_med_category, pl):
             pl.col("_dose_row_key").cast(pl.Int64)
         )
         _pd = _keyed.select(
-            "_dose_row_key", "med_category", "med_dose", "med_dose_unit"
+            "_dose_row_key",
+            "med_category",
+            "med_dose",
+            _calculation_unit.alias("med_dose_unit"),
         ).to_pandas()
         _pd["weight_kg"] = None
 
@@ -1304,7 +1341,13 @@ def _(
 
 
 @app.cell
-def _(PREFERRED_DOSE_UNITS, convert_doses_to_preferred_units, pl, sed_in_window):
+def _(
+    DOSE_UNIT_OVERRIDES,
+    PREFERRED_DOSE_UNITS,
+    convert_doses_to_preferred_units,
+    pl,
+    sed_in_window,
+):
     # The sanity check that the conversion actually happened, not a silent no-op:
     # printed per (med_category, med_dose_unit) BEFORE conversion, and per
     # med_category AFTER. Ketamine is the one case at this site where folding
@@ -1318,7 +1361,7 @@ def _(PREFERRED_DOSE_UNITS, convert_doses_to_preferred_units, pl, sed_in_window)
     print(_before)
 
     sedation_dose_converted = convert_doses_to_preferred_units(
-        sed_in_window, PREFERRED_DOSE_UNITS
+        sed_in_window, PREFERRED_DOSE_UNITS, DOSE_UNIT_OVERRIDES
     )
 
     _after = (
@@ -1362,10 +1405,8 @@ def _(SHARE_DIR, pl, publish, sedation_dose_converted):
         .agg(
             n_admin_windows=pl.len(),
             # How many administrations were ALREADY in the preferred unit, before
-            # conversion touched anything -- taken from the identical pre-conversion
-            # frame that feeds sedation_dose_units.csv, so the two files cannot
-            # disagree. Materially below n_admin_windows means the row's median pools
-            # two unit populations rather than one; see the markdown above.
+            # conversion touched anything, among the usable rows represented by
+            # n_admin_windows. Materially below it means the row pools converted units.
             n_in_preferred_unit=(
                 pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")
             ).sum(),
@@ -1385,11 +1426,11 @@ def _(SHARE_DIR, pl, publish, sedation_dose_converted):
 
 
 @app.cell
-def _(SHARE_DIR, pl, publish, sedation_dose_converted):
+def _(SHARE_DIR, pl, publish, sed_in_window):
     # Counts only -- no dose statistics. This is where the raw charting
     # heterogeneity the conversion folds together is still published (P18).
     sedation_dose_units = (
-        sedation_dose_converted.group_by(["med_category", "med_dose_unit"])
+        sed_in_window.group_by(["med_category", "med_dose_unit"])
         .agg(n=pl.len())
         .sort(["med_category", "n"], descending=[False, True])
     )
@@ -1425,9 +1466,9 @@ def _(mo):
         that split is visible directly instead of by cross-referencing
         `sedation_dose_units.csv` and inferring it.
 
-        This is **additive**. `sedation_dose.csv` and `sedation_dose_units.csv` are
-        unchanged, and `n_total` here equals that file's `n` by construction -- both
-        are grouped from the same frame on the same keys.
+        `n_total` equals `sedation_dose_units.csv`'s `n` for fully dosed groups. A
+        null-dose group remains in the counts table but has no ECDF position; that
+        difference is printed explicitly.
         """
     )
     return
@@ -1494,14 +1535,12 @@ def _(pl):
 
 
 @app.cell
-def _(SHARE_DIR, ecdf_by_group, pl, publish, sedation_dose_converted):
-    # sedation_dose_converted is the SAME frame that feeds sedation_dose_units.csv,
-    # grouped on the SAME keys -- so n_total here and n there cannot disagree without
-    # one of them being edited to stop using it. A row here is an (index paralytic,
+def _(SHARE_DIR, ecdf_by_group, pl, publish, sed_in_window):
+    # The ECDF and unit-count table consume the same raw frame. A row here is an (index paralytic,
     # administration) pair, not a distinct administration: a sedative charted inside
     # two index paralytics' windows is counted in both, exactly as sedation_dose.csv's
     # n_admin_windows already is.
-    sedation_dose_ecdf = ecdf_by_group(sedation_dose_converted)
+    sedation_dose_ecdf = ecdf_by_group(sed_in_window)
 
     # Reconciliation, asserted rather than trusted -- but asserted against the SAME
     # population ecdf_by_group actually counts. n_total is net of the nulls that
@@ -1511,7 +1550,7 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, sedation_dose_converted):
     # carry a dose: a mismatch there means the grouping keys drifted apart, which is
     # the bug this assert exists to catch.
     _expected = (
-        sedation_dose_converted.filter(
+        sed_in_window.filter(
             pl.col("med_dose").is_not_null()
             & pl.col("med_dose").is_finite()
             & pl.col("med_dose_unit").is_not_null()
@@ -1527,7 +1566,7 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, sedation_dose_converted):
     )
     assert _expected.equals(_got), (
         "sedation_dose_ecdf n_total does not reconcile with the dosed rows of "
-        f"sedation_dose_converted:\nexpected:\n{_expected}\ngot:\n{_got}"
+        f"sed_in_window:\nexpected:\n{_expected}\ngot:\n{_got}"
     )
 
     # The gap against sedation_dose_units.csv's own count: reported, never fatal (spec §4).
@@ -1536,7 +1575,7 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, sedation_dose_converted):
     # group that is entirely null-dosed vanishes from the ECDF and shows n = 0 here
     # rather than disappearing silently.
     _units = (
-        sedation_dose_converted.group_by(["med_category", "med_dose_unit"])
+        sed_in_window.group_by(["med_category", "med_dose_unit"])
         .agg(n_units=pl.len())
         .sort(["med_category", "med_dose_unit"])
     )
