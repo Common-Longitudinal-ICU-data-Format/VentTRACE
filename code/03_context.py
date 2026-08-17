@@ -1407,6 +1407,94 @@ def _(SHARE_DIR, pl, publish, sedation_dose_converted):
 def _(mo):
     mo.md(
         """
+        ### The whole dose distribution, on the unit the site actually charted
+
+        P18 publishes a dose as three numbers on a converted scale. That is thinner
+        than the data supports, and the cell above says why in its own margin: polars
+        places the q-th quantile at fractional index `(n-1)*q`, so whenever `(n-1)` is
+        a multiple of 4 the published p25, median and p75 **are** three charted doses
+        rather than statistics computed from them.
+
+        P41 publishes the distribution instead of three points standing in for it: for
+        every `(med_category, med_dose_unit)` pair, one row per distinct charted dose,
+        carrying how many administrations sat at it, the running count and the
+        cumulative proportion. Any quantile, any threshold count and any cross-site
+        pooled distribution is recoverable from that, so nobody has to ask a site to
+        re-run for a statistic that was not thought of first.
+
+        Keyed on the **raw charted unit**, deliberately, not the converted one. P18's
+        conversion folds ketamine's `mcg` rows in with its `mg` rows; on the raw unit
+        that split is visible directly instead of by cross-referencing
+        `sedation_dose_units.csv` and inferring it.
+
+        This is **additive**. `sedation_dose.csv` and `sedation_dose_units.csv` are
+        unchanged, and `n_total` here equals that file's `n` by construction -- both
+        are grouped from the same frame on the same keys.
+        """
+    )
+    return
+
+
+@app.cell
+def _(pl):
+    def ecdf_by_group(df):
+        """Empirical CDF of `med_dose` within each (med_category, med_dose_unit) group.
+
+        `df` needs `med_category`, `med_dose_unit` and `med_dose`; any other column is
+        ignored. Returns one row per distinct charted dose with `n_at_dose`, `n_cum`,
+        `n_total` and `ecdf`, sorted (med_category, med_dose_unit, dose) ascending.
+
+        The RAW charted unit and dose are read, never `med_dose_unit_converted` /
+        `med_dose_converted` -- both pairs are present on the frames this is called
+        with, and P41 is defined on the raw pair.
+
+        Rate-charted rows cannot appear here: they are filtered upstream, before the
+        bridge join, so every frame reaching this function is amount-only already
+        (commit 305de1f). This function must not re-assert that -- a second filter
+        would be a second place for the definition of "rate" to live.
+
+        A null `med_dose` or `med_dose_unit` is DROPPED and the count printed. A null
+        has no position in a cumulative distribution; sorting it to either end would
+        place it at the 0th or 100th percentile of a distribution it is not part of.
+        Dropping changes `n_total`, so it is reported rather than absorbed.
+
+        The sort is applied BEFORE the cumulative sum: `group_by().agg()` returns rows
+        in an unspecified order, and `cum_sum().over()` accumulates in whatever order
+        it is handed. Sorting after would produce a correctly-ordered frame carrying
+        a cumulative column computed down the wrong sequence.
+        """
+        _group = ["med_category", "med_dose_unit"]
+
+        _clean = df.filter(
+            pl.col("med_dose").is_not_null() & pl.col("med_dose_unit").is_not_null()
+        )
+        _dropped = df.height - _clean.height
+        if _dropped:
+            print(
+                f"  [ecdf] {_dropped:,} row(s) dropped for a null med_dose or "
+                "med_dose_unit -- n_total below is net of them"
+            )
+
+        return (
+            _clean.group_by([*_group, "med_dose"])
+            .agg(n_at_dose=pl.len())
+            .sort([*_group, "med_dose"])
+            .with_columns(
+                n_cum=pl.col("n_at_dose").cum_sum().over(_group),
+                n_total=pl.col("n_at_dose").sum().over(_group),
+            )
+            .with_columns(ecdf=(pl.col("n_cum") / pl.col("n_total")).round(6))
+            .rename({"med_dose": "dose"})
+            .select([*_group, "dose", "n_at_dose", "n_cum", "n_total", "ecdf"])
+        )
+
+    return (ecdf_by_group,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
         ## Figures D.1, E.1 and E.2
 
         All three read the **published CSVs and nothing else** (P21), so a figure cannot
