@@ -1987,5 +1987,88 @@ def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
     return
 
 
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    _BLUE = "#2a78d6"
+    _INK = "#0b0b0b"
+    _MUTED = "#898781"
+    _GRID = "#e1e0d9"
+
+    # Read the PUBLISHED csv, never the in-memory frame (P21).
+    _e3 = pl.read_csv(SHARE_DIR / "sedation_dose_ecdf.csv")
+
+    _groups = (
+        _e3.select("med_category", "med_dose_unit")
+        .unique()
+        .sort(["med_category", "med_dose_unit"])
+        .rows()
+    )
+
+    if not _groups:
+        # No sedative administration falls inside any index paralytic's window at
+        # this site. plt.subplots(0, 1, ...) would raise; skip with a clear message.
+        print(
+            "E3_sedation_dose_ecdf.png skipped -- sedation_dose_ecdf.csv has zero "
+            "rows at this site (no sedative administration in any index window)"
+        )
+    else:
+        _n_panels = len(_groups)
+        _FIG_H = 1.3 + 2.1 * _n_panels
+        _fig, _axes = plt.subplots(
+            _n_panels, 1, figsize=(9, _FIG_H), squeeze=False,
+        )
+        _axes = [_a[0] for _a in _axes]
+
+        for _ax, (_cat, _unit) in zip(_axes, _groups):
+            _p = _e3.filter(
+                (pl.col("med_category") == _cat) & (pl.col("med_dose_unit") == _unit)
+            ).sort("dose")
+            _x = _p.get_column("dose").to_list()
+            _y = _p.get_column("ecdf").to_list()
+            _n_total = _p.get_column("n_total").first()
+
+            # where="post": an ECDF is right-continuous -- F(x) holds from this charted
+            # dose until the next one is reached. A plain line, or where="pre", draws
+            # mass at doses nobody charted.
+            _ax.step(_x, _y, where="post", color=_BLUE, linewidth=1.6)
+            _ax.plot(
+                _x, _y, marker="o", markersize=3.5, linestyle="None", color=_BLUE,
+            )
+
+            _ax.set_ylim(0, 1.02)
+            _ax.set_xlim(left=0)
+            _ax.margins(x=0.04)
+            _ax.set_axisbelow(True)
+            _ax.grid(axis="x", color=_GRID, linewidth=0.8)
+            for _side in ("top", "right"):
+                _ax.spines[_side].set_visible(False)
+            _ax.tick_params(labelsize=8, colors=_MUTED)
+            _ax.set_ylabel("cumulative\nproportion", fontsize=8, color=_MUTED)
+            _ax.set_title(
+                f"{_cat}  ·  charted in {_unit}  ·  n = {_n_total:,}  ·  "
+                f"{_p.height} distinct dose(s)",
+                fontsize=9, loc="left", color=_INK,
+            )
+
+        _axes[-1].set_xlabel(
+            "dose, in the unit the site charted — panels do NOT share an axis (P41)   ·   "
+            "n counts (index paralytic, administration) pairs",
+            fontsize=9, color=_INK,
+        )
+        _fig.suptitle(
+            "E.3 — sedative dose, empirical CDF by agent and charted unit\n"
+            "one panel per (agent, raw charted unit); ketamine's mcg/mg split is the "
+            "fold P18 makes invisible (P41)\n"
+            f"{_e3.height} row(s) published",
+            fontsize=11, color=_INK,
+        )
+        _fig.tight_layout()
+        _fig.subplots_adjust(top=1 - 1.7 / _FIG_H, hspace=0.55)
+        _fig.savefig(FIG_DIR / "E3_sedation_dose_ecdf.png", dpi=150)
+        plt.close(_fig)
+        print(f"E3_sedation_dose_ecdf.png -> {FIG_DIR}")
+    return
+
+
 if __name__ == "__main__":
     app.run()
