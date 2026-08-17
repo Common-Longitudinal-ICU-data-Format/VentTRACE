@@ -127,6 +127,10 @@ encounter block**: all the codes for all the block's member hospitalizations are
 [`superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md`](superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md)),
 and a site whose extract lacks professional billing sees an empty cascade —
 `cpt_cascade_qc.csv`'s `pct_blocks_with_any_cpt_format_row` says so before the cascade itself does.
+`02` and `03` also write `paralytic_dose_ecdf.csv` and `sedation_dose_ecdf.csv` with figures
+`B1_paralytic_dose_ecdf.png` and `E3_sedation_dose_ecdf.png` (P41) — the full empirical CDF of
+charted dose per `(med_category, med_dose_unit)`, on the raw unit rather than the converted one,
+so P18's unit fold is visible rather than inferred.
 
 ---
 
@@ -265,7 +269,9 @@ asserted:
   (1,582 already charted in `mg`, 3 charted in `mcg` folded in by the conversion), median 50
   (IQR 50–100). Vecuronium: `mg` only, n=575, median 10 (IQR 6–10). The raw unit mix that the
   withdrawn version of P18 published as separate rows is now a counts-only table with no dose
-  statistics attached — `paralytic_dose_units.csv`.
+  statistics attached — `paralytic_dose_units.csv`. `paralytic_dose_ecdf.csv` carries the same
+  counts with the whole distribution attached: `n_total` there equals `n` here by construction,
+  since both are grouped from one frame on one pair of keys.
 
 ### C — the gap between index paralytics
 
@@ -362,7 +368,9 @@ units into one row: n=13 (8 charted in `mcg`, 5 in `mg`), median 0.15, IQR 0.03�
 p25/median/p75 indices land exactly on charted observations rather than an interpolated value —
 see the quantile note in `02`/`03`. The raw unit mix that the withdrawn version of P18 published
 as separate rows is now a counts-only table with no dose statistics attached —
-`sedation_dose_units.csv`.
+`sedation_dose_units.csv`. `sedation_dose_ecdf.csv` is the same population with the distribution
+attached, and is where ketamine's 8 `mcg` and 5 `mg` administrations appear as two distributions
+rather than one pooled median.
 
 **What E's counts count: pairs, not administrations.** A block can hold several index
 paralytics, and a single physical administration inside two overlapping ±60-minute windows
@@ -457,6 +465,7 @@ is now the one thing `publish()` checks.
 | P19 | the timezone always comes from `config["timezone"]`; no code path consults the OS zone | everywhere | |
 | P20 | every `*_category` column lower-cased on load; every literal in the codebase written lower case | everywhere | |
 | P21 / P23 | the disclosure boundary is row-level vs. aggregate; `publish()` refuses an identifier or a datetime column; nothing else is filtered | `utils/suppress.py` | see §6 |
+| P41 | **added 2026-08-15** — dose distributions also published as full ECDFs keyed on the raw charted `(med_category, med_dose_unit)` pair; one row per distinct dose with `n_at_dose`, `n_cum`, `n_total`, `ecdf`. Amount units only. Additive to P18 | `02`, `03` | 118 + 81 rows; ketamine's `mcg`/`mg` split visible without conversion |
 
 ---
 
