@@ -1456,6 +1456,39 @@ def _(pl):
 
 
 @app.cell
+def _(SHARE_DIR, dose_converted, ecdf_by_group, pl, publish):
+    # dose_converted is the SAME frame that feeds paralytic_dose_units.csv two cells
+    # below, grouped on the SAME keys -- so n_total here and n there cannot disagree
+    # without one of them being edited to stop using it.
+    paralytic_dose_ecdf = ecdf_by_group(dose_converted)
+
+    # Reconciliation, asserted rather than trusted: the per-group n_total must equal
+    # the per-group row count of the frame it came from. A mismatch means either a
+    # null was dropped (which prints above) or the grouping keys drifted apart.
+    _expected = (
+        dose_converted.group_by(["med_category", "med_dose_unit"])
+        .agg(n=pl.len())
+        .sort(["med_category", "med_dose_unit"])
+    )
+    _got = (
+        paralytic_dose_ecdf.group_by(["med_category", "med_dose_unit"])
+        .agg(n=pl.col("n_total").first())
+        .sort(["med_category", "med_dose_unit"])
+    )
+    assert _expected.equals(_got), (
+        "paralytic_dose_ecdf n_total does not reconcile with paralytic_dose_units:\n"
+        f"expected:\n{_expected}\ngot:\n{_got}"
+    )
+
+    publish(
+        paralytic_dose_ecdf,
+        SHARE_DIR / "paralytic_dose_ecdf.csv",
+        "paralytic_dose_ecdf",
+    )
+    return (paralytic_dose_ecdf,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         r"""
