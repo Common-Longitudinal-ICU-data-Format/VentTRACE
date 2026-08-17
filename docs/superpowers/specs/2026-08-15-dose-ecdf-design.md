@@ -160,15 +160,17 @@ New `tests/test_dose_ecdf.py`, following `tests/test_dose_conversion.py` exactly
 
 | test | pins |
 |---|---|
+| `test_both_notebooks_define_the_function` | extraction actually returned a callable, so the rest cannot vacuously pass |
+| `test_output_carries_exactly_the_published_columns` | the seven columns, in order |
 | `test_ecdf_reaches_one` | the last row of every group has `ecdf == 1.0` and `n_cum == n_total` |
 | `test_n_cum_is_monotone` | `n_cum` never decreases within a group |
 | `test_counts_sum_to_total` | `sum(n_at_dose) == n_total` for every group |
 | `test_ties_collapse_to_one_row` | ten administrations at one dose produce one row with `n_at_dose == 10`, not ten rows |
 | `test_groups_do_not_bleed` | a dose in one `(med_category, med_dose_unit)` group never contributes to another's `n_cum` |
-| `test_sort_is_total_and_stable` | output is sorted `(med_category, med_dose_unit, dose)` and the key triple is unique |
+| `test_sort_is_total_and_stable` | output is sorted `(med_category, med_dose_unit, dose)`, the key triple is unique, and reversing the input row order produces an identical frame |
 | `test_null_dose_rows_are_dropped_not_ranked` | a null `med_dose` is excluded from the group and from `n_total`, never sorted to an end |
 | `test_empty_input_yields_empty_frame_with_schema` | an empty input frame returns an empty frame carrying all seven columns, not an error |
-| `test_ecdf_rounds_to_six_dp_and_is_recoverable` | `ecdf == round(n_cum / n_total, 6)` on every row |
+| `test_ecdf_is_recoverable_from_the_two_integers` | `abs(ecdf - n_cum / n_total) <= 5e-7` on every row. Asserted as a tolerance, not as equality against Python's `round()`: polars rounds half **away from zero** and Python rounds half **to even**, so an exact-equality test would pin an agreement between two rounding conventions rather than the 6-dp contract itself |
 
 ------------------------------------------------------------------------
 
