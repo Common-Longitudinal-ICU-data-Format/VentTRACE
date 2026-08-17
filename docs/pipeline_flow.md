@@ -379,6 +379,9 @@ contributes a row to each. That is intentional — the administration genuinely 
 publish **3,570 (index paralytic, administration) pairs**, not 3,570 distinct drug
 administrations. The column is named `n_admin_windows` for exactly this reason, and reading it
 as a count of doses given would overstate the true administration count by an unstated margin.
+`sedation_dose_ecdf.csv`'s `n_total` is drawn from the same pairs, for the same reason — it is
+not comparable row-for-row with `paralytic_dose_ecdf.csv`'s `n_total`, which counts
+administrations, despite the two files sharing a column name and schema.
 
 **Output:** `index_context.parquet` — `index_paralytic.parquet` plus D's and E's columns, one
 row per index paralytic, written to `output/intermediate_phi/`. It carries raw timestamps

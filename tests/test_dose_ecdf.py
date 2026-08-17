@@ -200,6 +200,27 @@ def test_null_dose_rows_are_dropped_not_ranked(label):
 
 
 @pytest.mark.parametrize("label", LABELS)
+def test_nan_dose_is_dropped_like_a_null(label):
+    """polars reports NaN as NON-null, so `is_not_null()` alone lets it through.
+    A NaN would then sort last and publish at ecdf = 1.0 -- a value with no position
+    in a cumulative distribution pinned at its 100th percentile. This is the form the
+    null case actually takes in a float column, so it is pinned separately."""
+    out = ECDFS[label](
+        _frame(
+            [
+                ("rocuronium", "mg", 10.0),
+                ("rocuronium", "mg", float("nan")),
+                ("rocuronium", "mg", 20.0),
+            ]
+        )
+    )
+    assert out.height == 2
+    assert out.get_column("dose").to_list() == [10.0, 20.0]
+    assert out.get_column("n_total").to_list() == [2, 2]
+    assert out.get_column("ecdf").to_list() == [0.5, 1.0]
+
+
+@pytest.mark.parametrize("label", LABELS)
 def test_empty_input_yields_empty_frame_with_schema(label):
     """A site with no qualifying administration publishes a header-only CSV,
     not a crash and not a missing file."""

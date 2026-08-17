@@ -1417,9 +1417,11 @@ def _(pl):
         (commit 305de1f). This function must not re-assert that -- a second filter
         would be a second place for the definition of "rate" to live.
 
-        A null `med_dose` or `med_dose_unit` is DROPPED and the count printed. A null
-        has no position in a cumulative distribution; sorting it to either end would
-        place it at the 0th or 100th percentile of a distribution it is not part of.
+        A null or non-finite `med_dose`, or a null `med_dose_unit`, is DROPPED and the
+        count printed. `is_not_null()` alone is not enough: polars reports NaN as
+        non-null, so a NaN dose would sort last, publish at `ecdf` = 1.0 and inflate
+        `n_total` -- a value with no position in a cumulative distribution pinned at
+        its 100th percentile, which is the exact failure this guard exists to prevent.
         Dropping changes `n_total`, so it is reported rather than absorbed.
 
         The sort is applied BEFORE the cumulative sum: `group_by().agg()` returns rows
@@ -1430,13 +1432,15 @@ def _(pl):
         _group = ["med_category", "med_dose_unit"]
 
         _clean = df.filter(
-            pl.col("med_dose").is_not_null() & pl.col("med_dose_unit").is_not_null()
+            pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & pl.col("med_dose_unit").is_not_null()
         )
         _dropped = df.height - _clean.height
         if _dropped:
             print(
-                f"  [ecdf] {_dropped:,} row(s) dropped for a null med_dose or "
-                "med_dose_unit -- n_total below is net of them"
+                f"  [ecdf] {_dropped:,} row(s) dropped for a null or non-finite "
+                "med_dose, or a null med_dose_unit -- n_total below is net of them"
             )
 
         return (
@@ -1471,7 +1475,9 @@ def _(SHARE_DIR, dose_converted, ecdf_by_group, pl, publish):
     # the bug this assert exists to catch.
     _expected = (
         dose_converted.filter(
-            pl.col("med_dose").is_not_null() & pl.col("med_dose_unit").is_not_null()
+            pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & pl.col("med_dose_unit").is_not_null()
         )
         .group_by(["med_category", "med_dose_unit"])
         .agg(n=pl.len())
