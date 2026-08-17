@@ -1492,6 +1492,72 @@ def _(pl):
 
 
 @app.cell
+def _(SHARE_DIR, ecdf_by_group, pl, publish, sedation_dose_converted):
+    # sedation_dose_converted is the SAME frame that feeds sedation_dose_units.csv,
+    # grouped on the SAME keys -- so n_total here and n there cannot disagree without
+    # one of them being edited to stop using it. A row here is an (index paralytic,
+    # administration) pair, not a distinct administration: a sedative charted inside
+    # two index paralytics' windows is counted in both, exactly as sedation_dose.csv's
+    # n_admin_windows already is.
+    sedation_dose_ecdf = ecdf_by_group(sedation_dose_converted)
+
+    # Reconciliation, asserted rather than trusted -- but asserted against the SAME
+    # population ecdf_by_group actually counts. n_total is net of the nulls that
+    # function drops, so comparing it to the unfiltered row count would turn a
+    # documented, REPORTED condition (spec §4) into a fatal error at any site with a
+    # single null dose. What must never differ is the count over the rows that DO
+    # carry a dose: a mismatch there means the grouping keys drifted apart, which is
+    # the bug this assert exists to catch.
+    _expected = (
+        sedation_dose_converted.filter(
+            pl.col("med_dose").is_not_null() & pl.col("med_dose_unit").is_not_null()
+        )
+        .group_by(["med_category", "med_dose_unit"])
+        .agg(n=pl.len())
+        .sort(["med_category", "med_dose_unit"])
+    )
+    _got = (
+        sedation_dose_ecdf.group_by(["med_category", "med_dose_unit"])
+        .agg(n=pl.col("n_total").first())
+        .sort(["med_category", "med_dose_unit"])
+    )
+    assert _expected.equals(_got), (
+        "sedation_dose_ecdf n_total does not reconcile with the dosed rows of "
+        f"sedation_dose_converted:\nexpected:\n{_expected}\ngot:\n{_got}"
+    )
+
+    # The gap against sedation_dose_units.csv's own count: reported, never fatal (spec §4).
+    # That file counts every administration in the group; this one counts only those
+    # carrying a dose, so where the two differ the difference IS the null count. A
+    # group that is entirely null-dosed vanishes from the ECDF and shows n = 0 here
+    # rather than disappearing silently.
+    _units = (
+        sedation_dose_converted.group_by(["med_category", "med_dose_unit"])
+        .agg(n_units=pl.len())
+        .sort(["med_category", "med_dose_unit"])
+    )
+    _gap = (
+        _units.join(_got, on=["med_category", "med_dose_unit"], how="left")
+        .with_columns(n=pl.col("n").fill_null(0))
+        .with_columns(n_null_dose=pl.col("n_units") - pl.col("n"))
+        .filter(pl.col("n_null_dose") > 0)
+    )
+    if _gap.height:
+        print(
+            "  [sedation_dose_ecdf] n_total sits below sedation_dose_units.csv's n for the "
+            "groups below -- the difference is rows carrying a null dose:"
+        )
+        print(_gap)
+
+    publish(
+        sedation_dose_ecdf,
+        SHARE_DIR / "sedation_dose_ecdf.csv",
+        "sedation_dose_ecdf",
+    )
+    return (sedation_dose_ecdf,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
