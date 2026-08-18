@@ -57,10 +57,10 @@ Two notebooks touched, `02` and `03`. `01`, `04`, `05` and `06` are not modified
 
 ### 3.1 Source frames — reconciliation by construction
 
-| notebook | source frame | defined at | rows at this site |
+| notebook | source frame | defined at | rows |
 |---|---|---|---|
-| `02` | `dose_converted` | `code/02_index_paralytic.py:1292` | 2,160 doses |
-| `03` | `sedation_dose_converted` | `code/03_context.py:1322` | 3,570 (index paralytic, administration) pairs |
+| `02` | `dose_converted` | `code/02_index_paralytic.py` | qualifying index doses |
+| `03` | `sedation_dose_converted` | `code/03_context.py` | qualifying pairs in the configured sedation window |
 
 These are the **same frames**, grouped on the **same keys**, that already produce `step02__paralytic_dose_raw_unit_counts.csv` and `step03__sedation_dose_raw_unit_counts.csv`. `n_total` for a group is therefore identical to that group's `n` in those files, by construction rather than by agreement — the two cannot disagree without one of them being edited to stop using the frame.
 
@@ -106,7 +106,7 @@ vecuronium,mg,100.0,7,575,575,1.0
 | `n_total` | u32 | administrations in the group; equals this group's `n` in the matching `*_dose_units.csv` |
 | `ecdf` | f64 | `n_cum / n_total`, rounded to 6 dp |
 
-**A row with a null `med_dose` or a null `med_dose_unit` is dropped before grouping, and the count of dropped rows is printed to the run log.** Neither occurs at this site — both null counts are 0 across all 2,160 paralytic doses and 3,570 sedative pairs — but a null dose has no position in a cumulative distribution, and silently sorting it to one end would put it at the 0th or 100th percentile of a distribution it is not part of. Dropping it changes `n_total`, so it is reported rather than absorbed: a site whose `n_total` sits below the matching `*_dose_units.csv` count learns why from the log instead of filing a discrepancy.
+**A row with a null `med_dose` or a null `med_dose_unit` is dropped before grouping, and the count of dropped rows is printed to the run log.** A null dose has no position in a cumulative distribution, and silently sorting it to one end would put it at the 0th or 100th percentile of a distribution it is not part of. Dropping it changes `n_total`, so it is reported rather than absorbed: a site whose `n_total` sits below the matching raw-unit count learns why from the log instead of filing a discrepancy.
 
 **`n_cum` and `n_total` are authoritative; `ecdf` is a convenience column.** The rounding is for readability, and the exact value is recoverable from the two integers. A consortium partner pooling sites should sum `n_at_dose` across sites and recompute, never average `ecdf`.
 
@@ -114,28 +114,11 @@ vecuronium,mg,100.0,7,575,575,1.0
 
 **Empty input yields an empty frame carrying the full schema**, published as a header-only CSV rather than skipped. A file that is present and empty says "we looked, there were none"; a missing file is indistinguishable from a notebook that failed.
 
-### 4.1 Expected size at this site
+### 4.1 Expected size
 
-`fig_B1__paralytic_dose_ecdf.csv` — **118 rows** over 2,160 doses:
-
-| med_category | med_dose_unit | n | distinct doses |
-|---|---|---|---|
-| rocuronium | mcg | 3 | 2 |
-| rocuronium | mg | 1,582 | 87 |
-| vecuronium | mg | 575 | 29 |
-
-`fig_E3__sedation_dose_ecdf.csv` — **81 rows** over 3,570 pairs:
-
-| med_category | med_dose_unit | n | distinct doses |
-|---|---|---|---|
-| fentanyl | mcg | 1,514 | 16 |
-| ketamine | mcg | 8 | 7 |
-| ketamine | mg | 5 | 5 |
-| midazolam | mg | 610 | 13 |
-| propofol | mcg | 6 | 4 |
-| propofol | mg | 1,427 | 36 |
-
-Both are smaller than several artifacts already published. Row count scales with distinct charted values, not with n — the 1,582-administration rocuronium group needs 87 rows because a site charts doses on a coarse grid.
+Row count scales with distinct charted values, not with the number of administrations. The
+sedation ECDF is regenerated from only the pairs inside `sedation_window_minutes`; changing that
+parameter therefore changes its `n_total` without changing the ECDF schema.
 
 ------------------------------------------------------------------------
 

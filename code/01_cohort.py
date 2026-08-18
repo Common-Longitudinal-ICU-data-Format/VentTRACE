@@ -159,8 +159,8 @@ def _(
     TRACH_WINDOW_HOURS,
 ):
     # Every parameter that affects a result is echoed before anything runs (spec §4).
-    # collapse_gap_minutes and context_window_minutes are NOT echoed here: they belong to
-    # 02 and 03, and echoing a parameter this notebook cannot act on is the "silent
+    # collapse_gap_minutes, imv_window_minutes, and sedation_window_minutes are NOT echoed
+    # here: they belong to 02 and 03, and echoing a parameter this notebook cannot act on is the "silent
     # default" confusion §4 exists to prevent.
     import datetime as _dt
 
@@ -704,7 +704,7 @@ def _(mo):
         in time and manufacture an IMV row earlier than the first real charting. Under the
         superseded design that slid t0 itself; under the paralytic anchor it instead
         manufactures a *device transition* — `03` would read a non-IMV→IMV change that the
-        chart never recorded, inside the ±`context_window_minutes` window around the index
+        chart never recorded, inside the ±`imv_window_minutes` window around the index
         paralytic. The hazard moved; it did not go away.
 
         The waterfall runs per `hospitalization_id`, but rows are then mapped to

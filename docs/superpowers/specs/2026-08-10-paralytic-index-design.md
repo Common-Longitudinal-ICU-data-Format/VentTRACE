@@ -16,8 +16,8 @@ The deliverable answers four questions:
 
 1. **How are paralytic administrations distributed in time relative to one another?** Two paralytics two minutes apart are one clinical act; two paralytics two days apart are two. The distribution of those gaps is the evidence for where the boundary between them lies.
 2. **Given a 15-minute boundary, how many distinct index paralytic events does a hospitalization have, and how far apart are they?**
-3. **Does the ventilator record show a transition onto invasive ventilation around the index paralytic?** Not "was IMV charted" — a patient already ventilated satisfies that without anything having happened — but *did the device change*, within ±60 minutes.
-4. **Was a sedative charted in the same ±60 minutes, and at what dose?**
+3. **Does the ventilator record show a transition onto invasive ventilation around the index paralytic?** Not "was IMV charted" — a patient already ventilated satisfies that without anything having happened — but *did the device change*, within the configured ±60-minute IMV window.
+4. **Was a sedative charted within the configured ±5-minute sedation window, and at what dose?**
 
 There is no second method, no reference standard and no agreement statistic. There is one index definition and four sub-analyses hanging off it.
 
@@ -51,7 +51,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | P12 | **Sub-analysis D detects a *transition*, not a state.** A waterfalled row is a transition when `device_category == 'imv'` and either there is no preceding row in the block or the preceding row's `device_category != 'imv'`. `null` is not `imv`, so `null → imv` is a transition; a block whose first row is `imv` has that row as a transition. | Set by the study lead, twice and explicitly. "Was IMV charted in ±60 min" is satisfied by a patient who has been on the ventilator for a week — it reports the state of the airway, not an event. A transition reports an event. The block-opens-on-IMV case counts because a patient whose record begins on a ventilator did have an airway secured; that it happened before the extract's first row is a property of the extract, not evidence that nothing occurred. Sub-analysis D publishes `prior_device_category` so this case is countable and separable at read time. |
 | P13 | **The transition is computed on the waterfalled timeline, not on raw `respiratory_support`.** | Two reasons. **Mechanical:** a transition needs "the row before", and only the waterfall's gap-free hourly scaffold makes that well defined; on raw charting the previous non-null row may be many hours back. **Clinical:** the waterfall relabels a null-device row to `imv` when the ventilator settings on it look like a ventilator, and the superseded build measured that inference as landing at or before the human device entry in 100% of cases — exactly zero delay in 77.3% of episodes, but 55 min at p95 and 540 min at p99. An intubation is a high-stress event and nobody stops to fill in the device field; the ventilator's settings reach the chart the moment it is connected. The waterfall is therefore the record closer to the event. |
 | P14 | **No de-bouncing rule is applied to transitions. `n_transitions_in_window` is published instead.** | The waterfall's hourly scaffold means a brief non-IMV blip manufactures a spurious transition, and the superseded design had a "sustained" test to suppress exactly that. Reintroducing it here would be a second threshold with no evidence behind it — the sub-analysis A distribution says nothing about device continuity — so the effect is measured and left visible rather than tuned away. A reader who wants a stricter reading can compute it from the published counts. |
-| P15 | **Sub-analyses D and E share one window predicate, implemented once in `03_context.py`.** | This is the single exception to the no-shared-helper posture inherited from the old design, and it is narrow on purpose. D and E must ask about the *same* ±60 minutes; two independent implementations of an interval test drift at the boundary condition, and a one-row disagreement between "IMV was near" and "sedation was near" is invisible in aggregate and fatal to the joint reading. Detection logic stays separate; only the interval is shared. |
+| P15 | **AMENDED 2026-08-18: sub-analyses D and E share one inclusive symmetric-window predicate but supply independent configured widths.** D uses `imv_window_minutes = 60`; E uses `sedation_window_minutes = 5`. | Set by the study lead. Sharing boundary semantics prevents one implementation from excluding an endpoint the other includes, while independent parameters prevent a change to the sedation definition from changing IMV detection. Detection logic and histogram grids remain separate. |
 | P16 | **The sedative list is `midazolam`, `etomidate`, `ketamine`, `propofol`, `fentanyl`.** Sedation is a **covariate of the index paralytic, not a detector.** | Set by the study lead, unchanged from the superseded `SED` list. These are the induction agents, and the question the window asks is whether the paralytic was given as part of an induction or to a patient already sedated. Benzodiazepine and opioid adjuncts (`lorazepam`, `diazepam`, `morphine`, `hydromorphone`) were considered and declined: they would blur "induction happened here" with "this patient was comfortable", and `fentanyl` already straddles that line. |
 | P17 | **Every sedative administration in the window is kept, not only the nearest per agent.** | The superseded design deduplicated by `med_category` because it was building a *rank ladder* and one patient redosed six times would have dominated a timing distribution of ranks. This study publishes an offset *histogram*, where every administration is a legitimate observation of when sedation was charted. Deduplicating would delete the redosing pattern the histogram is meant to show. |
 | P18 | **AMENDED 2026-08-10 by the study lead: doses are standardised with clifpy, not published raw.** `clifpy.utils.unit_converter.convert_dose_units_by_med_category` converts every intermittent dose to one preferred unit per `med_category` — `mcg` for fentanyl, `mg` for every other agent in this study, matching how each is conventionally charted. Dose statistics are then keyed on `med_category` **alone**. The raw `med_dose_unit` mix is not discarded: it is published separately, as a count of administrations per `(med_category, med_dose_unit)` with no dose statistics attached. **Extended, not superseded, by P41 (2026-08-15):** the converted median/IQR published here stays exactly as it is; the full ECDF on the *raw* charted unit is published alongside it. | **Supersedes the original decision, which forbade conversion anywhere.** That decision rested on two objections and the amendment answers both. *Heterogeneity would be hidden* — it is not; it moves to a table whose only job is to show it, which is a better instrument than a dose statistic that happens to be split by unit. *It cannot be done correctly without a weight the study does not carry* — clifpy takes `weight_kg` from the vitals table for `/kg` dosing, and for this study the question does not arise: every unit observed is a plain amount (`mg`, `mcg`), because only `medication_admin_intermittent` is opened and a discrete push is charted as a quantity, not a rate. A site that charts a paralytic per kilogram must supply vitals or the notebook fails loudly rather than converting on a missing weight. The concrete cost of the original decision: propofol was published as `mg, n = 1,427` beside `mcg, n = 6`, two rows a reader must combine by hand and cannot, since 6 doses charged in micrograms are almost certainly a charting artifact rather than a thousand-fold smaller dose. Keying on the unit made a data-quality signal look like a clinical finding. One consequence worth stating: standardising folds every small unit-fragment group into its parent — propofol `mcg` n = 6 into propofol n = 1,433, rocuronium `mcg` n = 3 into n = 1,585 — so the published quartiles are no longer computed over groups small enough for the triple to be inverted back to individual charted doses. That was an open concern under P21 and this decision closes it as a side effect rather than by suppression. |
@@ -82,7 +82,7 @@ code/
   01_cohort.py            qualifying-paralytic cohort + stitch + CONSORT + waterfall
   02_index_paralytic.py   paralytic administrations → sub-analyses A, B, C
                           → index_paralytic.parquet
-  03_context.py           index paralytic ± 60 min → sub-analyses D, E
+  03_context.py           index paralytic ± 60 min → D; ± 5 min → E
                           → index_context.parquet
 utils/
   config.py               UNCHANGED
@@ -242,7 +242,7 @@ Worked example, `collapse_gap_minutes = 15`:
 
 Note what anchoring buys: the 12:20 administration is within 15 minutes of the 12:10 one, and a transitive rule would have merged all three. Under P6 it does not, and `span_minutes ≤ 15` holds for every event without exception.
 
-Every administration belongs to **exactly one** index event. There is no eligibility filter at this step — the index set is a partition of the administration set, and `Σ n_admins` over all index events equals the administration count. `02` asserts that.
+Every administration belongs to **exactly one** index event. There is no eligibility filter at this step — the index set is a partition of the administration set, and `Σ n_before_merge_admin` over all index events equals the source administration count. Only after each index is formed are repeated medications within that index merged. `02` asserts both boundaries.
 
 ### 6.4 `step02__index_paralytic.parquet` — the contract
 
@@ -256,19 +256,20 @@ One row per index paralytic, written to `output/intermediate_phi/`.
 | `cohort_run_id` | str | provenance; `03` asserts it matches |
 | `p_num` | int | 1 = first index paralytic of the block |
 | `t_dttm` | datetime, site-naive | **the study clock** (P8) |
-| `n_admins` | int | administrations folded into this event |
+| `n_before_merge_admin` | int | source administrations folded into this event before same-medication merging |
+| `n_admins` | int | medication entries after same-medication doses are merged within the formed index |
 | `span_minutes` | float | last − first; **asserted ≤ 15** |
 | `is_coadmin` | bool | `n_admins > 1` |
 | `agents` | list\[str\] | sorted distinct `med_category` |
 | `n_agents` | int | |
 | `agent_label` | str | `agents` joined with `+`, e.g. `rocuronium+vecuronium` |
-| `doses` | list\[struct\] | one per administration: `med_category`, `med_dose`, `med_dose_unit`, `mar_action_category`, `offset_minutes` |
+| `doses` | list\[struct\] | one per distinct medication in the formed index: `med_category`, summed finite known `med_dose`, `med_dose_unit`, earliest `mar_action_category`, earliest `offset_minutes` |
 
-`offset_minutes` inside `doses` is measured from `t_dttm`, so it is `0.0` for the anchor and in `(0, 15]` for the rest.
+`offset_minutes` inside `doses` is measured from `t_dttm` and retains the earliest source offset for that medication. Same medications in different formed indexes are never merged. If some repeated rows have missing or non-finite doses, known finite values are summed; a medication with no known finite value retains a null dose.
 
 `agent_label` is sorted alphabetically so one combination is one row of any downstream table rather than several orderings of itself.
 
-**Assertions on write:** `index_paralytic_id` unique; `span_minutes ≤ collapse_gap_minutes` for every row; `Σ n_admins` equals the administration count; `p_num` contiguous from 1 within each block; no null in any non-`doses` column.
+**Assertions on write:** `index_paralytic_id` unique; `span_minutes ≤ collapse_gap_minutes` for every row; `Σ n_before_merge_admin` equals the source administration count; `n_admins == n_agents == len(doses)`; `p_num` contiguous from 1 within each block; no null in any non-`doses` column.
 
 ------------------------------------------------------------------------
 
@@ -322,9 +323,9 @@ Defined in §6.3–6.4. Published aggregates:
 
 | table | contents |
 |---|---|
-| `step02__index_paralytic_summary.csv` | one row per `agent_label`: n index paralytics, n blocks, n patients, `n_coadmin` (index events folding more than one administration of that label), `span_minutes` median and max |
+| `step02__index_paralytic_summary.csv` | one row per `agent_label`: n index paralytics, n blocks, n patients, `n_coadmin` (formed indexes containing more than one distinct medication), `span_minutes` median and max |
 | `step02__index_paralytic_dose_summary.csv` | `med_category` → cleaned n, mean, SD, median, p25, p75, in the standardised unit (P18, P43) |
-| `step02__paralytic_dose_raw_unit_counts.csv` | `med_category` × raw `med_dose_unit` → n administrations. Counts only — no dose statistics, so the table shows charting heterogeneity without reintroducing the split it replaced. |
+| `step02__paralytic_dose_raw_unit_counts.csv` | `med_category` × configured `med_dose_unit` → n merged formed-index medication doses. Counts only; source administration QC remains in sub-analysis A. |
 
 Doses retain the exact configured unit and numeric value without conversion (P47). The unit-count file documents the selected analysis population; missing doses remain there but do not inflate the summary `n`.
 
@@ -354,7 +355,7 @@ block opens on imv  →  that first row IS a transition
 imv → imv  →  not a transition
 ```
 
-For each index paralytic, scan `[t − context_window_minutes, t + context_window_minutes]` — inclusive at both ends — and keep the **earliest** transition inside it.
+For each index paralytic, scan `[t − imv_window_minutes, t + imv_window_minutes]` — inclusive at both ends — and keep the **earliest** transition inside it.
 
 Recorded per index paralytic:
 
@@ -376,7 +377,7 @@ Recorded per index paralytic:
 | table | contents |
 |---|---|
 | `step03__imv_transition_summary.csv` | `imv_transition` × `no_transition_reason` → n; and `prior_device_category` → n among transitions |
-| `fig_D1__imv_transition_offset.csv` | 5-minute bins across `[−60, +60]` → n |
+| `fig_D1__imv_transition_offset.csv` | 5-minute bins across the configured IMV window (`[−60, +60]`) → n |
 | `step03__imv_prior_device.csv` | `prior_device_category` × `transition_opens_block` → n, among transitions |
 | `step03__imv_transitions_per_window.csv` | `n_transitions_in_window` → n, contiguous from 1 to the observed maximum (the P14 de-bouncing evidence, one row per index paralytic that had a transition) |
 
@@ -384,11 +385,11 @@ Recorded per index paralytic:
 
 Offset bins are `[−60,−55)`, … , `[55, 60]` — 24 bins, left-closed and right-open except the last, which is closed so an offset of exactly `+60` has a home.
 
-**Assertions:** `|imv_offset_minutes| ≤ context_window_minutes` on every recorded transition; `imv_transition` true implies `imv_transition_dttm` and `imv_offset_minutes` non-null and `no_transition_reason` null, and false implies the converse.
+**Assertions:** `|imv_offset_minutes| ≤ imv_window_minutes` on every recorded transition; `imv_transition` true implies `imv_transition_dttm` and `imv_offset_minutes` non-null and `no_transition_reason` null, and false implies the converse.
 
-### 7.5 E — sedation in the same window
+### 7.5 E — sedation in its configured window
 
-The identical window predicate as D (P15). Source: `medication_admin_intermittent`, `med_category ∈ {midazolam, etomidate, ketamine, propofol, fentanyl}` (P16), `mar_action_category == given`, and the exact configured unit (P47). **Every qualifying** administration in the window is kept (P17).
+The same inclusive predicate as D, supplied with `sedation_window_minutes = 5` (P15). Source: `medication_admin_intermittent`, `med_category ∈ {midazolam, etomidate, ketamine, propofol, fentanyl}` (P16), `mar_action_category == given`, and the exact configured unit (P47). **Every qualifying** administration in the window is kept (P17).
 
 Recorded per index paralytic:
 
@@ -406,11 +407,11 @@ Ties on \|offset\| for `nearest_sedative_med` break alphabetically by `med_categ
 | table | contents |
 |---|---|
 | `step03__sedation_summary.csv` | `any_sedative` × `agent_set` (the sorted, `+`-joined `sedative_agents`) → n, `median_n_admins` |
-| `fig_E1__sedation_offset.csv` | 5-minute bins across `[−60, +60]` × `med_category` → n |
+| `fig_E1__sedation_offset.csv` | 5-minute bins across the configured sedation window (`[−5, +5]`) × `med_category` → n |
 | `fig_E2__sedation_dose_summary.csv` | `med_category` → cleaned n_admin_windows, mean, SD, median, p25, p75, in the standardised unit (P18, P43) |
 | `step03__sedation_dose_raw_unit_counts.csv` | `med_category` × raw `med_dose_unit` → n administrations, counts only |
 
-**Figure E.1** — offset histogram across ±60 min, one series per agent, drawn from `fig_E1__sedation_offset.csv`. **Figure E.2** — dose distribution per `med_category` in its standardised unit, drawn from `fig_E2__sedation_dose_summary.csv`. Each is written to a same-stem PNG. One panel per unit is retained, because fentanyl standardises to `mcg` and every other agent to `mg` (P18), and mg and mcg on a shared axis is a dual-axis chart in disguise. The raw unit mix is a table, not a figure.
+**Figure E.1** — offset histogram across the configured ±5 min, one series per agent, drawn from `fig_E1__sedation_offset.csv`. **Figure E.2** — dose distribution per `med_category` in its configured unit, drawn from `fig_E2__sedation_dose_summary.csv`. Each is written to a same-stem PNG. One panel per unit is retained because mg and mcg on a shared axis is a dual-axis chart in disguise.
 
 ------------------------------------------------------------------------
 
@@ -454,7 +455,8 @@ output/final_no_phi/              shareable aggregates — no row-level records 
     "timezone": "US/Eastern",
     "output_directory": "./output",
     "collapse_gap_minutes": 15,
-    "context_window_minutes": 60,
+    "imv_window_minutes": 60,
+    "sedation_window_minutes": 5,
     "stitch_hours": 6,
     "trach_window_hours": 24,
     "min_age": 18,

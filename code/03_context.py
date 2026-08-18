@@ -35,21 +35,21 @@ def _(mo):
         """
         # 03 — what surrounds the index paralytic
 
-        Two questions over the same ±60 minutes, asked with the **same window predicate**:
+        Two questions over independently configured symmetric windows, asked with the
+        **same inclusive window predicate**:
 
         | | |
         |---|---|
         | **D** | did the device transition from non-IMV to IMV? |
         | **E** | was a sedative charted, and at what dose? |
 
-        D detects a **transition, not a state** (P12). "Was IMV charted in ±60 min" is
+        D detects a **transition, not a state** (P12). "Was IMV charted nearby" is
         satisfied by a patient who has been on the ventilator for a week — it reports the
         condition of the airway, not an event. A transition reports an event.
 
-        The window predicate is shared between D and E and is the single exception to this
-        project's duplicate-don't-share posture (P15). Two implementations of an interval
-        test drift at the boundary, and a one-row disagreement between "IMV was near" and
-        "sedation was near" is invisible in aggregate and fatal to the joint reading.
+        The predicate is shared between D and E, while each analysis supplies its own
+        configured width (P15). One implementation keeps both windows inclusive at their
+        front and back boundaries without coupling their clinical definitions.
 
         Design: `docs/superpowers/specs/2026-08-10-paralytic-index-design.md` §7.4–7.5
         """
@@ -64,10 +64,10 @@ def _(mo):
         ## Configuration
 
         Every site-specific value is read from `config/config.json` and nothing is
-        hard-coded against this site. `context_window_minutes` is the ±window both D and E
-        measure against; the sedative list, the MAR actions and the offset bin width are
-        analysis constants rather than site parameters, so they live here in the notebook
-        where a reader can see them.
+        hard-coded against this site. `imv_window_minutes` and
+        `sedation_window_minutes` independently set D's and E's symmetric windows. The
+        sedative list, MAR actions, and offset bin width are analysis constants rather than
+        site parameters, so they live here in the notebook where a reader can see them.
         """
     )
     return
@@ -89,7 +89,8 @@ def _(Path, json):
     FIG_DIR = SHARE_DIR / "figures"
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    CONTEXT_WINDOW_MINUTES = float(config["context_window_minutes"])
+    IMV_WINDOW_MINUTES = float(config["imv_window_minutes"])
+    SEDATION_WINDOW_MINUTES = float(config["sedation_window_minutes"])
 
     # P16. Sedation is a COVARIATE of the index paralytic, not a detector -- the question
     # is whether the paralytic was given as part of an induction or to a patient already
@@ -113,9 +114,22 @@ def _(Path, json):
         unit in _valid_units[med] for med, unit in MEDICATION_DOSE_UNITS.items()
     ), "invalid medication_dose_units; use mg[/kg], or mcg[/kg] for fentanyl"
 
-    # 5-minute bins across the full 120 minutes: 24 bins, left-closed and right-open
-    # except the last, which is closed so an offset of exactly +60 has a home.
+    # Both configured windows must divide into a whole number of this shared analysis bin.
+    # Bins are left-closed and right-open except the final bin, which includes the positive
+    # boundary.
     OFFSET_BIN_WIDTH = 5
+
+    _windows = {
+        "imv_window_minutes": IMV_WINDOW_MINUTES,
+        "sedation_window_minutes": SEDATION_WINDOW_MINUTES,
+    }
+    assert all(_window > 0 for _window in _windows.values()), (
+        "imv_window_minutes and sedation_window_minutes must be positive"
+    )
+    assert all(
+        (2 * _window / OFFSET_BIN_WIDTH).is_integer()
+        for _window in _windows.values()
+    ), f"configured windows must divide into {OFFSET_BIN_WIDTH}-minute bins"
 
     # P18, amended 2026-08-10: doses are standardised with clifpy to one preferred
     # unit per med_category before any statistic is taken. mg for every agent
@@ -135,21 +149,23 @@ def _(Path, json):
         "vecuronium": 30.0,
     }
     print(f"site           : {SITE}")
-    print(f"window         : +/- {CONTEXT_WINDOW_MINUTES:.0f} min   (P15)")
+    print(f"imv window     : +/- {IMV_WINDOW_MINUTES:.0f} min")
+    print(f"sedation window: +/- {SEDATION_WINDOW_MINUTES:.0f} min")
     print(f"sedatives      : {' | '.join(SEDATIVES)}")
     print(f"mar actions    : {' | '.join(MAR_ACTIONS)}")
     print(f"configured units: {MEDICATION_DOSE_UNITS}")
     print(f"summary bounds : {DOSE_SUMMARY_UPPER_BOUNDS}")
     return (
-        CONTEXT_WINDOW_MINUTES,
         DATA_DIR,
         DOSE_SUMMARY_UPPER_BOUNDS,
         FIG_DIR,
         FILETYPE,
+        IMV_WINDOW_MINUTES,
         MAR_ACTIONS,
         MEDICATION_DOSE_UNITS,
         OFFSET_BIN_WIDTH,
         PHI_DIR,
+        SEDATION_WINDOW_MINUTES,
         SEDATIVES,
         SHARE_DIR,
         TIMEZONE,
@@ -164,8 +180,9 @@ def _(mo):
 
         `to_site_naive` is the only correct way to turn a clifpy timestamp column into a
         naive site-local one. `epoch_minutes` is the only way this notebook may turn a
-        timestamp into a number of minutes. `in_window_expr` is the ±window itself, defined
-        once and used by both D and E. The first two are defined **locally and never
+        timestamp into a number of minutes. `in_window_expr` defines the inclusive
+        symmetric predicate once; D and E pass their independent configured widths. The
+        first two are defined **locally and never
         imported** (spec §4) — a bug in a shared datetime helper corrupts every consumer
         identically, and identical corruption is the hardest kind to see.
         """
@@ -202,7 +219,7 @@ def _(pl):
 @app.cell
 def _(pl):
     def in_window_expr(offset_col, window_minutes):
-        """The +/- window, defined ONCE and used by both D and E (P15).
+        """An inclusive symmetric window, defined once and used by D and E (P15).
 
         Inclusive at both ends. A null offset means no candidate row was found at all and
         must not pass -- absence of a candidate is not presence at the boundary.
@@ -377,7 +394,8 @@ def _(mo):
         ### `context_d` — one row per index paralytic, with its transition or its reason
 
         The whole timeline is marked, the transitions are pulled out, and each is offset
-        against every index paralytic in the same block. Those inside ±60 minutes are
+        against every index paralytic in the same block. Those inside the configured IMV
+        window are
         candidates; the **earliest** of them is taken, not the nearest to `t` — "first" is
         what was asked for, and the two differ whenever a transition precedes `t` and
         another follows it.
@@ -401,7 +419,7 @@ def _(mo):
 
 @app.cell
 def _(
-    CONTEXT_WINDOW_MINUTES,
+    IMV_WINDOW_MINUTES,
     epoch_minutes,
     in_window_expr,
     index_paralytic,
@@ -426,7 +444,7 @@ def _(
     _candidates = (
         _idx.join(_transitions, on="encounter_block", how="inner")
         .with_columns(imv_offset_minutes=(pl.col("_tr_min") - pl.col("_t_min")).round(3))
-        .filter(in_window_expr("imv_offset_minutes", CONTEXT_WINDOW_MINUTES))
+        .filter(in_window_expr("imv_offset_minutes", IMV_WINDOW_MINUTES))
     )
 
     # The EARLIEST transition in the window, not the nearest to t. "First" is what was
@@ -480,7 +498,7 @@ def _(
     )
 
     _bad = context_d.filter(
-        pl.col("imv_transition") & (pl.col("imv_offset_minutes").abs() > CONTEXT_WINDOW_MINUTES)
+        pl.col("imv_transition") & (pl.col("imv_offset_minutes").abs() > IMV_WINDOW_MINUTES)
     )
     assert _bad.height == 0, f"{_bad.height:,} transitions sit outside the window"
     assert context_d.filter(
@@ -491,7 +509,7 @@ def _(
     ).height == 0, "a non-detection carries no reason"
     assert context_d.height == index_paralytic.height, "the join changed the row count"
 
-    print(f"index paralytics with a transition in +/-{CONTEXT_WINDOW_MINUTES:.0f} min : "
+    print(f"index paralytics with a transition in +/-{IMV_WINDOW_MINUTES:.0f} min : "
           f"{context_d.get_column('imv_transition').sum():,} / {context_d.height:,} "
           f"({100 * context_d.get_column('imv_transition').mean():.1f}%)")
     print(context_d.group_by("no_transition_reason").agg(n=pl.len()).sort("n", descending=True))
@@ -613,8 +631,8 @@ def _(mo):
         """
         ### `fig_D1__imv_transition_offset.csv` — where in the window the transition sat
 
-        Twenty-four five-minute bins across the full 120 minutes, left-closed and right-open
-        except the last, which is closed so an offset of exactly +60 has a home. Every bin
+        Five-minute bins across the configured IMV window, left-closed and right-open
+        except the last, which includes the positive boundary. Every bin
         is emitted, including the empty ones — an explicit published zero is what lets a
         reader tell an empty bin from a bin with no observations at all.
         """
@@ -624,36 +642,31 @@ def _(mo):
 
 @app.cell
 def _(
-    CONTEXT_WINDOW_MINUTES,
+    IMV_N_OFFSET_BINS,
+    IMV_OFFSET_BIN_LABELS,
+    IMV_WINDOW_MINUTES,
     OFFSET_BIN_WIDTH,
     SHARE_DIR,
     context_d,
     pl,
     publish,
 ):
-    # 24 five-minute bins across the full 120 minutes, left-closed and right-open except
-    # the last, which is closed so an offset of exactly +60 has a home.
-    _n_bins = int(2 * CONTEXT_WINDOW_MINUTES // OFFSET_BIN_WIDTH)
-    _edges = [
-        -CONTEXT_WINDOW_MINUTES + OFFSET_BIN_WIDTH * i for i in range(_n_bins + 1)
-    ]
-    _labels = [f"[{_edges[i]:.0f},{_edges[i + 1]:.0f})" for i in range(_n_bins)]
-    _labels[-1] = f"[{_edges[-2]:.0f},{_edges[-1]:.0f}]"
-
     _binned = (
         context_d.filter(pl.col("imv_transition"))
         .with_columns(
             _b=(
-                ((pl.col("imv_offset_minutes") + CONTEXT_WINDOW_MINUTES) // OFFSET_BIN_WIDTH)
+                ((pl.col("imv_offset_minutes") + IMV_WINDOW_MINUTES) // OFFSET_BIN_WIDTH)
                 .cast(pl.Int32)
-                .clip(0, _n_bins - 1)
+                .clip(0, IMV_N_OFFSET_BINS - 1)
             )
         )
         .group_by("_b")
         .agg(n=pl.len())
     )
     offset_distribution = (
-        pl.DataFrame({"_b": list(range(_n_bins)), "offset_bin": _labels})
+        pl.DataFrame(
+            {"_b": list(range(IMV_N_OFFSET_BINS)), "offset_bin": IMV_OFFSET_BIN_LABELS}
+        )
         .with_columns(pl.col("_b").cast(pl.Int32))
         .join(_binned, on="_b", how="left")
         .with_columns(pl.col("n").fill_null(0))
@@ -677,7 +690,7 @@ def _(mo):
         This is the table P14 rests on. Declining to de-bounce is only defensible if the
         size of the effect being declined is **measurable from the released output**, and
         `n_transitions_in_window` is that measurement: how many distinct non-IMV → IMV
-        transitions fell inside ±60 minutes of the index paralytic, for the index paralytics
+        transitions fell inside the configured IMV window, for the index paralytics
         that had at least one. A count of 1 is an unambiguous airway event. A count of 2 or
         more is either a genuine extubation-and-reintubation inside the hour or the hourly
         scaffold blipping off IMV and back — this table does not distinguish them, and does
@@ -736,10 +749,11 @@ def _(SHARE_DIR, context_d, pl, publish):
 def _(mo):
     mo.md(
         r"""
-        ## E — sedation in the same window
+        ## E — sedation in its configured window
 
-        The **identical** window predicate as D (P15), applied to
-        `medication_admin_intermittent` over the five induction agents.
+        The same inclusive predicate as D (P15), supplied with E's independent
+        `sedation_window_minutes`, is applied to `medication_admin_intermittent` over the
+        five induction agents.
 
         Every `given` administration in the configured unit is kept, not just the nearest
         per agent (P17). The superseded design deduplicated by `med_category` because
@@ -757,21 +771,13 @@ def _(mo):
         (`step02__index_paralytics_per_block.csv`). A
         single physical administration that falls inside two index windows therefore
         contributes **two** rows — once to each window. That is correct and intended: the
-        administration genuinely happened within ±60 minutes of both paralytics, and the
+        administration genuinely happened inside both configured windows, and the
         same fan-out is what `02`'s bridge relies on. Deduplicating would have to pick one
         index paralytic to attribute it to, and there is no principled way to choose.
 
-        But it means every count E publishes is a count of **(index paralytic,
-        administration) pairs**, and at this site the two numbers differ:
-
-        | | |
-        |---|---|
-        | pairs inside a window | **3,570** |
-        | distinct administrations behind them | **3,297** |
-        | pairs that are a re-count of an administration already seen | **273 — 7.6% of the total** |
-
-        Calling that column `n` and its axis "administrations" would overstate the number of
-        drug administrations by that margin, so the published column is named
+        Therefore every count E publishes remains a count of **(index paralytic,
+        administration) pairs**. Calling that column `n` and its axis "administrations"
+        could overstate the number of physical administrations, so the published column is named
         **`n_admin_windows`** and E.1's y-axis and E.2's row labels say the same. A patient
         redosed inside a block with several index paralytics contributes more than once, on
         purpose, and the column name is where a reader finds that out.
@@ -782,13 +788,13 @@ def _(mo):
 
 @app.cell
 def _(
-    CONTEXT_WINDOW_MINUTES,
     DATA_DIR,
     FILETYPE,
     MAR_ACTIONS,
     MEDICATION_DOSE_UNITS,
     MedicationAdminIntermittent,
     PHI_DIR,
+    SEDATION_WINDOW_MINUTES,
     SEDATIVES,
     TIMEZONE,
     context_d,
@@ -921,8 +927,9 @@ def _(
             on="encounter_block",
             how="inner",
         )
-        .with_columns(offset_minutes=(pl.col("_s_min") - pl.col("_t_min")).round(3))
-        .filter(in_window_expr("offset_minutes", CONTEXT_WINDOW_MINUTES))
+        .with_columns(_offset_minutes_raw=pl.col("_s_min") - pl.col("_t_min"))
+        .filter(in_window_expr("_offset_minutes_raw", SEDATION_WINDOW_MINUTES))
+        .with_columns(offset_minutes=pl.col("_offset_minutes_raw").round(3))
         .select(
             "index_paralytic_id",
             "encounter_block",
@@ -937,23 +944,31 @@ def _(
 
     # hospitalization_id is dropped at the bridge (P5), so the finest identity available
     # for a physical administration is the block plus the charted row itself.
-    _distinct_admins = sed_in_window.select(
+    _admin_identity = [
         "encounter_block",
         "admin_dttm",
         "med_category",
         "med_dose",
         "med_dose_unit",
         "mar_action_category",
+    ]
+    _distinct_admins = sed_in_window.select(_admin_identity).unique().height
+    _distinct_pairs = sed_in_window.select(
+        "index_paralytic_id", *_admin_identity
     ).unique().height
     print(
         f"(index paralytic, administration) pairs in a window : {sed_in_window.height:,}"
     )
-    print(
-        f"distinct administrations behind them                : {_distinct_admins:,}  "
-        f"({sed_in_window.height - _distinct_admins:,} pairs, "
-        f"{100 * (sed_in_window.height - _distinct_admins) / sed_in_window.height:.1f}% of "
-        "the total, are an administration counted again in a second index window)"
-    )
+    _window_fanout = _distinct_pairs - _distinct_admins
+    _duplicate_source_pairs = sed_in_window.height - _distinct_pairs
+    if sed_in_window.height:
+        print(
+            f"distinct administration identities behind them      : {_distinct_admins:,}\n"
+            f"additional pairs from one identity in multiple windows: {_window_fanout:,}\n"
+            f"duplicate source rows within the same pair identity   : {_duplicate_source_pairs:,}"
+        )
+    else:
+        print("distinct administration identities behind them      : 0")
     return sed_admin, sed_in_window
 
 
@@ -1051,33 +1066,54 @@ def _(context_d, pl, sed_in_window):
 def _(mo):
     mo.md(
         """
-        ### The offset bin grid, defined once for E's table and E's figure
+        ### Independent offset grids for D and E
 
-        Twenty-four five-minute bins across the full 120 minutes, on exactly the same edges
-        D's distribution uses: left-closed and right-open except the last, which is closed
-        so an offset of exactly +60 has a home. The labels are exported rather than rebuilt
-        inside each figure, because a figure that reconstructs its own bin grid can drift
-        from the table it is drawing.
+        Each configured window gets its own five-minute grid. Bins are left-closed and
+        right-open except the last, which includes the positive boundary. Labels are
+        exported rather than rebuilt inside each figure, so a figure cannot drift from its
+        source table.
         """
     )
     return
 
 
 @app.cell
-def _(CONTEXT_WINDOW_MINUTES, OFFSET_BIN_WIDTH):
-    N_OFFSET_BINS = int(2 * CONTEXT_WINDOW_MINUTES // OFFSET_BIN_WIDTH)
-    _edges = [
-        -CONTEXT_WINDOW_MINUTES + OFFSET_BIN_WIDTH * i for i in range(N_OFFSET_BINS + 1)
-    ]
-    OFFSET_BIN_LABELS = [
-        f"[{_edges[i]:.0f},{_edges[i + 1]:.0f})" for i in range(N_OFFSET_BINS)
-    ]
-    OFFSET_BIN_LABELS[-1] = f"[{_edges[-2]:.0f},{_edges[-1]:.0f}]"
+def _(IMV_WINDOW_MINUTES, OFFSET_BIN_WIDTH, SEDATION_WINDOW_MINUTES):
+    def offset_bin_grid(window_minutes, bin_width):
+        """Build a symmetric grid whose final bin includes the positive boundary."""
+        _n_bins_float = 2 * window_minutes / bin_width
+        assert _n_bins_float.is_integer(), (
+            f"+/-{window_minutes:g} minutes does not divide into {bin_width:g}-minute bins"
+        )
+        _n_bins = int(_n_bins_float)
+        _edges = [
+            -window_minutes + bin_width * i for i in range(_n_bins + 1)
+        ]
+        _labels = [
+            f"[{_edges[i]:.0f},{_edges[i + 1]:.0f})" for i in range(_n_bins)
+        ]
+        _labels[-1] = f"[{_edges[-2]:.0f},{_edges[-1]:.0f}]"
+        return _n_bins, _labels, _n_bins // 2
 
-    # The bin whose left edge is t itself -- the dashed rule in every offset figure sits
-    # immediately to its left, so "before" and "after" are never read off a tick label.
-    ZERO_BIN = N_OFFSET_BINS // 2
-    return N_OFFSET_BINS, OFFSET_BIN_LABELS, ZERO_BIN
+    (
+        IMV_N_OFFSET_BINS,
+        IMV_OFFSET_BIN_LABELS,
+        IMV_ZERO_BIN,
+    ) = offset_bin_grid(IMV_WINDOW_MINUTES, OFFSET_BIN_WIDTH)
+    (
+        SEDATION_N_OFFSET_BINS,
+        SEDATION_OFFSET_BIN_LABELS,
+        SEDATION_ZERO_BIN,
+    ) = offset_bin_grid(SEDATION_WINDOW_MINUTES, OFFSET_BIN_WIDTH)
+    return (
+        IMV_N_OFFSET_BINS,
+        IMV_OFFSET_BIN_LABELS,
+        IMV_ZERO_BIN,
+        SEDATION_N_OFFSET_BINS,
+        SEDATION_OFFSET_BIN_LABELS,
+        SEDATION_ZERO_BIN,
+        offset_bin_grid,
+    )
 
 
 @app.cell
@@ -1196,11 +1232,11 @@ def _(mo):
 
 @app.cell
 def _(
-    CONTEXT_WINDOW_MINUTES,
-    N_OFFSET_BINS,
-    OFFSET_BIN_LABELS,
     OFFSET_BIN_WIDTH,
     PHI_DIR,
+    SEDATION_N_OFFSET_BINS,
+    SEDATION_OFFSET_BIN_LABELS,
+    SEDATION_WINDOW_MINUTES,
     SHARE_DIR,
     index_context,
     pl,
@@ -1234,7 +1270,10 @@ def _(
 
     _grid = (
         pl.DataFrame(
-            {"bin_order": list(range(N_OFFSET_BINS)), "offset_bin": OFFSET_BIN_LABELS}
+            {
+                "bin_order": list(range(SEDATION_N_OFFSET_BINS)),
+                "offset_bin": SEDATION_OFFSET_BIN_LABELS,
+            }
         )
         .with_columns(pl.col("bin_order").cast(pl.Int32))
         .join(sed_in_window.select("med_category").unique(), how="cross")
@@ -1243,9 +1282,9 @@ def _(
     _binned = (
         sed_in_window.with_columns(
             bin_order=(
-                ((pl.col("offset_minutes") + CONTEXT_WINDOW_MINUTES) // OFFSET_BIN_WIDTH)
+                ((pl.col("offset_minutes") + SEDATION_WINDOW_MINUTES) // OFFSET_BIN_WIDTH)
                 .cast(pl.Int32)
-                .clip(0, N_OFFSET_BINS - 1)
+                .clip(0, SEDATION_N_OFFSET_BINS - 1)
             )
         )
         .group_by(["bin_order", "med_category"])
@@ -1311,10 +1350,8 @@ def _(SHARE_DIR, pl, publish, sedation_dose_summary_clean):
     # (n-1)*q, and whenever that index is a whole number the "interpolated" value
     # IS one of the charted observations -- not a rare edge case, but guaranteed
     # whenever (n-1) is a multiple of 4, since p25, median and p75 then land at
-    # indices (n-1)/4, (n-1)/2 and 3(n-1)/4 all at once. That is live in this
-    # pipeline: ketamine's sedation dose is n=13 here, so indices 3, 6 and 9 are
-    # exact, and the published p25/median/p75 (0.03 / 0.15 / 16.0 this run) are
-    # three specific charted doses, not synthesised values. Linear interpolation
+    # indices (n-1)/4, (n-1)/2 and 3(n-1)/4 all at once. In those cases the
+    # p25/median/p75 are specific charted doses, not synthesised values. Linear interpolation
     # buys smoother behaviour as n changes; it does not buy a guarantee of never
     # equaling an individual observation.
     sedation_dose = (
@@ -1621,10 +1658,10 @@ def _(mo):
 @app.cell
 def _(
     FIG_DIR,
-    N_OFFSET_BINS,
-    OFFSET_BIN_LABELS,
+    IMV_N_OFFSET_BINS,
+    IMV_OFFSET_BIN_LABELS,
+    IMV_ZERO_BIN,
     SHARE_DIR,
-    ZERO_BIN,
     mark_zero,
     pl,
     plt,
@@ -1646,9 +1683,9 @@ def _(
         else:
             mark_zero(_ax, _row["bin_order"], _BLUE)
 
-    _ax.set_xticks(list(range(N_OFFSET_BINS)))
-    _ax.set_xticklabels(OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)
-    _ax.set_xlim(-0.8, N_OFFSET_BINS - 0.2)
+    _ax.set_xticks(list(range(IMV_N_OFFSET_BINS)))
+    _ax.set_xticklabels(IMV_OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)
+    _ax.set_xlim(-0.8, IMV_N_OFFSET_BINS - 0.2)
     _ax.set_ylim(bottom=0)
     _ax.set_axisbelow(True)
     _ax.grid(axis="y", color=_GRID, linewidth=0.8)
@@ -1660,9 +1697,9 @@ def _(
     )
     _ax.set_ylabel("index paralytics", color=_INK)
 
-    _ax.axvline(ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
+    _ax.axvline(IMV_ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
     _ax.text(
-        ZERO_BIN - 0.4, _ax.get_ylim()[1] * 0.96, "t\n(the index paralytic)",
+        IMV_ZERO_BIN - 0.4, _ax.get_ylim()[1] * 0.96, "t\n(the index paralytic)",
         fontsize=8, va="top", color=_INK,
     )
 
@@ -1713,10 +1750,10 @@ def _(mo):
 @app.cell
 def _(
     FIG_DIR,
-    N_OFFSET_BINS,
-    OFFSET_BIN_LABELS,
+    SEDATION_N_OFFSET_BINS,
+    SEDATION_OFFSET_BIN_LABELS,
+    SEDATION_ZERO_BIN,
     SHARE_DIR,
-    ZERO_BIN,
     mark_zero,
     pl,
     plt,
@@ -1730,8 +1767,8 @@ def _(
     _agents = sorted(figure_e1_df.get_column("med_category").unique().to_list())
 
     if not _agents:
-        # No sedative administration falls inside any index paralytic's ±60-minute
-        # window at this site -- fig_E1__sedation_offset.csv is published with
+        # No sedative administration falls inside any index paralytic's configured
+        # sedation window at this site -- fig_E1__sedation_offset.csv is published with
         # zero rows (see the cross-join that builds it) and there is nothing to plot.
         # plt.subplots(0, 1, ...) below would raise; skip with a clear message instead.
         print(
@@ -1758,8 +1795,8 @@ def _(
                 else:
                     mark_zero(_ax, _row["bin_order"], _BLUE)
 
-            _ax.axvline(ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
-            _ax.set_xlim(-0.8, N_OFFSET_BINS - 0.2)
+            _ax.axvline(SEDATION_ZERO_BIN - 0.5, color=_INK, linestyle="--", linewidth=1)
+            _ax.set_xlim(-0.8, SEDATION_N_OFFSET_BINS - 0.2)
             _ax.set_ylim(bottom=0)
             _ax.set_axisbelow(True)
             _ax.grid(axis="y", color=_GRID, linewidth=0.8)
@@ -1781,8 +1818,10 @@ def _(
                 transform=_ax.transAxes, ha="left", va="top", fontsize=8, color=_INK,
             )
 
-        _axes[-1].set_xticks(list(range(N_OFFSET_BINS)))
-        _axes[-1].set_xticklabels(OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED)
+        _axes[-1].set_xticks(list(range(SEDATION_N_OFFSET_BINS)))
+        _axes[-1].set_xticklabels(
+            SEDATION_OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED
+        )
         _axes[-1].set_xlabel(
             "minutes from the index paralytic  (dashed rule = t)", color=_INK
         )

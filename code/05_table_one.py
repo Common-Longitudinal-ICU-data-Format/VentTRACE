@@ -27,10 +27,10 @@ def _(mo):
         """
         # 05 — Table 1
 
-        Published twice from one frame (P34): once per **encounter block**, at its
-        `p_num = 1` event, and once per **index paralytic event**. Identical row
-        inventory, different unit, so the two are directly comparable and the difference
-        between them measures what re-paralysis contributes.
+        Restricted to **valid index events**: an index paralytic with both a configured-window
+        IMV transition and configured-window sedation. Published twice from that frame (P34):
+        once per **encounter block**, represented by its first valid index, and once per
+        **valid index paralytic event**. Identical statistic inventory, different unit.
 
         Every row carries a `rule` and a `unit` (P35). These CSVs are merged across
         consortium sites and pasted into manuscripts, arriving detached from the notebook
@@ -82,6 +82,8 @@ def _(Path, json):
     SHARE_DIR = OUTPUT_DIR / "final_no_phi"
     FIG_DIR = SHARE_DIR / "figures"
     FIG_DIR.mkdir(parents=True, exist_ok=True)
+    IMV_WINDOW_MINUTES = float(config["imv_window_minutes"])
+    SEDATION_WINDOW_MINUTES = float(config["sedation_window_minutes"])
 
     # P34/§6. Every stratum column is emitted even when structurally empty --
     # succinylcholine is absent from MIMIC entirely, and a column present at one site and
@@ -126,9 +128,11 @@ def _(Path, json):
     return (
         FIG_DIR,
         ICU_TYPES,
+        IMV_WINDOW_MINUTES,
         LOOKBACK_HOURS,
         PHI_DIR,
         RESPIRATORY_DEVICES,
+        SEDATION_WINDOW_MINUTES,
         SHARE_DIR,
         SITE,
         STRATA,
@@ -258,8 +262,10 @@ def _(pl):
 @app.cell
 def _(
     ICU_TYPES,
+    IMV_WINDOW_MINUTES,
     LOOKBACK_HOURS,
     RESPIRATORY_DEVICES,
+    SEDATION_WINDOW_MINUTES,
     VASOPRESSORS,
     binary_rows,
     categorical_rows,
@@ -273,9 +279,9 @@ def _(
         """The full row inventory (spec §6), evaluated over whichever unit `df` carries.
 
         `table_unit` is the unit of THIS table's rows -- "encounter block" for the
-        p_num = 1 view, "index event" for the full view. It is a parameter rather than a
+        first-valid-index view, "index event" for the full valid-event view. It is a parameter rather than a
         constant because `n_rows` counts exactly those rows, so hard-coding it labels the
-        block table's 1,547 as index events. That is the one failure the `unit` column
+        block table's blocks as index events. That is the one failure the `unit` column
         exists to prevent, so getting it wrong on the row that reports the table's own
         size would undermine every other row's label.
 
@@ -284,10 +290,8 @@ def _(
         life support, evidence category. It used to be the module constant EVENT
         unconditionally, which is correct for the index table (each row IS an index
         event) but wrong for the block table, where each row is measured at the block's
-        p_num = 1 event and stands for the block. Publishing "index event" there made
-        `table1_by_agent_block`'s evidence_tier[1]_n = 1084 carry a unit that
-        contradicts both `fig_F1__cpt_cascade.csv` (the identical 1,084 published as n_blocks)
-        and this same file's own n_rows row (which already said "encounter block"). A
+        first valid index and stands for the block. Publishing "index event" there would
+        contradict this same file's own n_rows row, which says "encounter block". A
         unit column that is wrong is worse than no unit column at all, because a reader
         trusts it exactly where it lies.
 
@@ -370,11 +374,23 @@ def _(
             _show(group, f"{label} — missing, n", "count", [f"{column}_missing_n"],
                   f"rows with an absent (null) {column}, not the literal string", unit, digits=0)
 
-        _count("n_rows", COHORT, f"Total {table_unit}s", "rows in this table's unit", table_unit, float(df.height))
+        _total_label = (
+            "Total encounter blocks with a valid index"
+            if table_unit == "encounter block"
+            else "Total valid index events"
+        )
+        _count(
+            "n_rows",
+            COHORT,
+            _total_label,
+            "valid index requires both an IMV transition and sedation in their configured windows",
+            table_unit,
+            float(df.height),
+        )
         _block_label = (
             "Distinct encounter blocks (QC; equals total above)"
             if table_unit == "encounter block"
-            else "Distinct encounter blocks"
+            else "Distinct encounter blocks with a valid index"
         )
         _count(
             "n_blocks",
@@ -456,8 +472,22 @@ def _(
                     show_missing=False,
                 )
 
-        _bin("imv_transition", CONTEXT, "New transition onto IMV at the index paralytic", "device change onto imv within +/-60 min of t0 (sub-analysis D)", event_unit)
-        _bin("any_sedative", CONTEXT, "Sedative within +/-60 min of the index paralytic", "sedative charted within +/-60 min of t0 (sub-analysis E)", event_unit)
+        _bin(
+            "imv_transition",
+            CONTEXT,
+            "New transition onto IMV at the index paralytic",
+            f"device change onto imv within +/-{IMV_WINDOW_MINUTES:g} min of t0 "
+            "(sub-analysis D)",
+            event_unit,
+        )
+        _bin(
+            "any_sedative",
+            CONTEXT,
+            f"Sedative within +/-{SEDATION_WINDOW_MINUTES:g} min of the index paralytic",
+            f"sedative charted within +/-{SEDATION_WINDOW_MINUTES:g} min of t0 "
+            "(sub-analysis E)",
+            event_unit,
+        )
         _cat("no_transition_reason", CONTEXT, "Reason no IMV transition was found", "why sub-analysis D found no transition", event_unit, ["already_on_imv", "no_transition_in_window", "no_device_record"])
         _location_rule = "adt row where in_dttm <= t0 < out_dttm"
         _location_levels = ["ed", "icu", "ward", "procedural", "other", "unknown"]
@@ -540,7 +570,13 @@ def _(
         _cat("discharge_category", OUTCOME, "Discharge disposition", "hospitalization containing t0", event_unit, discharge_levels)
         _cont("los_hospital_days", OUTCOME, "Hospital length of stay, days", "sum of member hospitalization LOS in the block (P38)", _block_unit)
         _cont("los_icu_days", OUTCOME, "ICU length of stay, days", "sum of adt icu intervals in the block", _block_unit)
-        _cont("n_index_in_block", OUTCOME, "Index paralytics in the block", "index paralytics in the block", _block_unit)
+        _cont(
+            "n_index_in_block",
+            OUTCOME,
+            "Valid index paralytics in the block",
+            "index events in the block with both an IMV transition and sedation in their configured windows",
+            _block_unit,
+        )
 
         return rows, display
 
@@ -664,11 +700,11 @@ def _(
 
     _TABLE_UNIT = {"block": "encounter block", "index": "index event"}
     # FIX 3: the substantive per-event rows' unit. The block table's rows are measured
-    # at the block's first index paralytic (p_num = 1), never repeated within the row --
+    # at the block's first valid index paralytic, never repeated within the row --
     # so "index event" alone would understate what the row actually represents.
     _EVENT_UNIT = {
-        "block": "encounter block (measured at the block's first index paralytic, p_num = 1)",
-        "index": "index event",
+        "block": "encounter block (measured at the block's first valid index paralytic)",
+        "index": "valid index event",
     }
 
     # The readable table's columns, overall first: a reader compares each drug against
@@ -767,6 +803,10 @@ def _(
                 "unit": _unit,
                 "event_unit": _event_unit,
                 "source": "step04__index_covariates.parquet",
+                "valid_index_definition": "imv_transition and any_sedative",
+                "block_selection": (
+                    "first valid index in encounter_block" if label == "block" else None
+                ),
                 "strata": STRATA,
                 "value_columns": ["overall", *STRATA],
                 "n_rows": float(df.height),
@@ -774,8 +814,28 @@ def _(
         )
         return out
 
-    table1_index = build_table1(index_covariates, "index")
-    table1_block = build_table1(index_covariates.filter(pl.col("p_num") == 1), "block")
+    _valid_predicate = pl.col("imv_transition") & pl.col("any_sedative")
+    assert index_covariates.filter(
+        _valid_predicate != (pl.col("evidence_tier") == 3)
+    ).height == 0, "valid-index flags disagree with evidence category 3"
+
+    _valid_index_covariates = (
+        index_covariates.filter(_valid_predicate)
+        .with_columns(
+            pl.len().over("encounter_block").cast(pl.Int32).alias("n_index_in_block")
+        )
+        .sort(["encounter_block", "p_num", "index_paralytic_id"])
+    )
+    _block_covariates = _valid_index_covariates.unique(
+        subset="encounter_block", keep="first", maintain_order=True
+    )
+    assert _block_covariates.get_column("encounter_block").is_unique().all()
+    assert _block_covariates.height == _valid_index_covariates.get_column(
+        "encounter_block"
+    ).n_unique(), "the first-valid-index selection lost or duplicated a block"
+
+    table1_index = build_table1(_valid_index_covariates, "index")
+    table1_block = build_table1(_block_covariates, "block")
 
     assert table1_block.height == table1_index.height, (
         "the two Table 1s have different row inventories and are not comparable"
@@ -863,7 +923,7 @@ def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, json, mark_zero, pl, plt, publish):
 
     _ax.set_xticks(list(range(len(LOOKBACK_HOURS))))
     _ax.set_xticklabels([f"{_h} h before t0" for _h in LOOKBACK_HOURS])
-    _ax.set_ylabel("% of encounter blocks")
+    _ax.set_ylabel("% of blocks with a valid index")
     _ax.set_ylim(bottom=0)
     _ax.set_axisbelow(True)
     _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
@@ -876,7 +936,7 @@ def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, json, mark_zero, pl, plt, publish):
                              label="source table absent (not measured)")[0])
     _ax.legend(handles=_handles, loc="upper left", fontsize=8, framealpha=0.9)
     _ax.set_title(
-        "T.1 — life support before the index paralytic, encounter blocks\n"
+        "T.1 — life support before each block's first valid index paralytic\n"
         "the 1 h to 24 h ramp is where 'already shocked' separates from 'crashed at intubation'"
     )
     _fig.tight_layout()

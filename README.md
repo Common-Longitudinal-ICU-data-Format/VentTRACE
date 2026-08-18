@@ -19,9 +19,9 @@ within 15 minutes of one another), the study asks:
 1. How are paralytic administrations distributed in time relative to one another?
 2. How many distinct index paralytic events does a hospitalization have, and how far apart are
    they?
-3. Does the ventilator record show a transition onto invasive ventilation within ±60 minutes of
-   the index paralytic — a device *change*, not merely "was IMV charted"?
-4. Was a sedative charted in the same ±60 minutes, and at what dose?
+3. Does the ventilator record show a transition onto invasive ventilation within the configured
+   ±60-minute IMV window — a device *change*, not merely "was IMV charted"?
+4. Was a sedative charted within the configured ±5-minute sedation window, and at what dose?
 
 This is **intubation-adjacent, not intubation-confirming** — the study describes what surrounds a
 paralytic, and does not adjudicate whether an intubation occurred.

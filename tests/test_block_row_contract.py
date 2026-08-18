@@ -4,8 +4,10 @@ Three notebooks consume one frame and the whole no-drift argument rests on them
 agreeing about which rows exist. What can go wrong without announcing itself:
 
   * the p_num = 1 subset drifting from the number of blocks that have an index
-    paralytic, which would make Table 1's N disagree with
+    paralytic, which would make the CPT denominator disagree with
     step02__index_paralytics_per_block.csv;
+  * Table 1 including an index without both an IMV transition and sedation, or
+    selecting anything other than a block's first valid index;
   * a block-level column (LOS, mortality) varying WITHIN a block, which would
     mean it was computed per event instead of per block and would make the
     index-level table's outcome rows meaningless;
@@ -183,44 +185,81 @@ def test_evidence_tier_is_consistent_with_its_inputs(frame):
     assert bad.height == 0, f"{bad.height:,} rows have a tier inconsistent with D/E"
 
 
-def test_block_and_index_artifacts_agree_on_n(
+def test_full_block_artifacts_and_valid_table1_denominators(
     frame, table1_block, table1_index, cpt_cascade, index_per_block
 ):
-    """FIX 10 (2026-08-12 final review): automates the reconciliation spec §8 already
-    claims this file performs.
+    """The CPT cohort stays full while both Table 1s use valid index events only.
 
-    Three independently-computed block counts must be identical:
+    The full-cohort block counts remain identical:
 
-      * table1_by_agent_block.json's own n_rows row
       * fig_F1__cpt_cascade.csv's n_blocks, summed across the four evidence categories
       * step02__index_paralytics_per_block.csv's n_blocks, summed across the >=1-index grid
+      * step04__index_covariates.parquet's distinct encounter blocks
 
-    A fourth, cpt_offset_distribution.csv, was checked here until 2026-08-14, when
-    P30 was withdrawn and that artifact with it.
-
-    Before this test existed, that agreement was checked by hand once and never pinned
-    -- exactly the kind of cross-notebook drift `04`'s single analytic frame exists to
-    prevent, left unguarded at the one point three separately-published CSVs are
-    supposed to restate the same number.
-
-    table1_by_agent_index.json's n_rows is checked separately against the analytic
-    frame's own height, since the index-level table's unit is the event, not the
-    block, and has no equivalent in the other three artifacts.
+    Table 1 is narrower by design: its index denominator is every event carrying both
+    contextual signals, and its block denominator is every block with at least one such
+    event. This deliberately no longer reconciles to the full CPT denominator.
     """
     _t1_block_n_rows = table1_block.filter(pl.col("statistic") == "n_rows").get_column("overall")[0]
     _cpt_cascade_n = cpt_cascade.get_column("n_blocks").sum()
     _index_per_block_n = index_per_block.get_column("n_blocks").sum()
+    _all_blocks_n = frame.get_column("encounter_block").n_unique()
 
-    assert _t1_block_n_rows == _cpt_cascade_n == _index_per_block_n, (
-        "the three block counts disagree: table1_by_agent_block.json n_rows="
-        f"{_t1_block_n_rows}, fig_F1__cpt_cascade.csv sum(n_blocks)={_cpt_cascade_n}, "
-        f"step02__index_paralytics_per_block.csv sum(n_blocks)={_index_per_block_n}"
+    assert _cpt_cascade_n == _index_per_block_n == _all_blocks_n, (
+        "the full-cohort block counts disagree: "
+        f"fig_F1__cpt_cascade.csv sum(n_blocks)={_cpt_cascade_n}, "
+        f"step02__index_paralytics_per_block.csv sum(n_blocks)={_index_per_block_n}, "
+        f"step04__index_covariates.parquet distinct blocks={_all_blocks_n}"
     )
 
+    _valid = frame.filter(pl.col("imv_transition") & pl.col("any_sedative"))
     _t1_index_n_rows = table1_index.filter(pl.col("statistic") == "n_rows").get_column("overall")[0]
-    assert _t1_index_n_rows == frame.height, (
+    assert _t1_index_n_rows == _valid.height, (
         f"table1_by_agent_index.json reports n_rows={_t1_index_n_rows} but "
-        f"step04__index_covariates.parquet has {frame.height:,} rows"
+        f"the valid-index frame has {_valid.height:,} rows"
+    )
+    assert _t1_block_n_rows == _valid.get_column("encounter_block").n_unique(), (
+        f"table1_by_agent_block.json reports n_rows={_t1_block_n_rows} but "
+        "the valid-index frame has a different number of encounter blocks"
+    )
+
+
+def test_table1_contains_only_valid_indexes(table1_block, table1_index):
+    for _label, _table in (("block", table1_block), ("index", table1_index)):
+        _values = dict(
+            _table.select("statistic", "overall").iter_rows()
+        )
+        _n = _values["n_rows"]
+        assert _values["imv_transition_n"] == _n, _label
+        assert _values["any_sedative_n"] == _n, _label
+        assert _values["evidence_tier[3]_n"] == _n, _label
+        for _tier in (1, 2, 4):
+            assert _values[f"evidence_tier[{_tier}]_n"] == 0, _label
+
+
+def test_block_table_uses_first_valid_index_and_valid_counts(frame, table1_block):
+    _valid = (
+        frame.filter(pl.col("imv_transition") & pl.col("any_sedative"))
+        .sort(["encounter_block", "p_num", "index_paralytic_id"])
+        .with_columns(pl.len().over("encounter_block").alias("n_valid_in_block"))
+    )
+    _first_valid = _valid.unique(
+        subset="encounter_block", keep="first", maintain_order=True
+    )
+    _n_row = table1_block.filter(pl.col("statistic") == "n_rows").row(
+        0, named=True
+    )
+    _stratum_counts = dict(
+        _first_valid.group_by("agent_stratum").len().iter_rows()
+    )
+    for _stratum in ("rocuronium", "succinylcholine", "vecuronium", "combination"):
+        assert _n_row[_stratum] == _stratum_counts.get(_stratum, 0)
+
+    _published_mean = table1_block.filter(
+        pl.col("statistic") == "n_index_in_block_mean"
+    ).get_column("overall")[0]
+    assert _published_mean == round(
+        float(_first_valid.get_column("n_valid_in_block").mean()), 3
     )
 
 

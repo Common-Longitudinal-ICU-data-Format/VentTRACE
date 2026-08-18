@@ -755,20 +755,92 @@ def _(mo):
         """
         ### `index_paralytic` — one row per index event
 
-        Each administration is attached to its event, the event's first administration
-        supplies `t_dttm`, and every other administration is recorded relative to it as an
-        `offset_minutes` inside `doses`. The assertions below are the partition property
-        re-checked on the *rebuilt* frame (`sum(n_admins)` still equals the number of
-        administrations loaded), P6's invariant (`span_minutes <= 15`), uniqueness of the
-        id, every event having a patient, and `p_num` running contiguously from 1 within
-        each block — the ways this frame could be quietly wrong.
+        Each administration is first attached to its event. Only after that event exists,
+        repeated entries for the same medication are merged and their finite known doses
+        summed. `n_before_merge_admin` preserves the source count; `n_admins` is the number
+        of medication entries after that within-index merge. The event's first source
+        administration still supplies `t_dttm`, and `span_minutes` still describes all
+        source administrations folded into the event.
         """
     )
     return
 
 
 @app.cell
-def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, med_admin, pl):
+def _(pl):
+    def merge_formed_index_doses(index_paralytic):
+        """Merge repeated medications within already-formed index events."""
+        _dose_rows = (
+            index_paralytic.select("index_paralytic_id", "doses")
+            .explode("doses", empty_as_null=True)
+            .unnest("doses")
+            .sort(["index_paralytic_id", "med_category", "offset_minutes"])
+        )
+
+        # One configured unit reaches index construction for each medication. Keep this
+        # assertion here so a future upstream change cannot silently add unlike units.
+        _bad_units = (
+            _dose_rows.group_by(["index_paralytic_id", "med_category"])
+            .agg(_n_units=pl.col("med_dose_unit").n_unique())
+            .filter(pl.col("_n_units") != 1)
+        )
+        assert _bad_units.height == 0, (
+            "one medication has multiple units inside a formed index event"
+        )
+
+        _known = pl.col("med_dose").is_not_null() & pl.col("med_dose").is_finite()
+        _by_medication = (
+            _dose_rows.group_by(
+                ["index_paralytic_id", "med_category"], maintain_order=True
+            )
+            .agg(
+                _known_dose=pl.col("med_dose").filter(_known).sum(),
+                _n_known=_known.sum(),
+                med_dose_unit=pl.col("med_dose_unit").first(),
+                mar_action_category=pl.col("mar_action_category").first(),
+                offset_minutes=pl.col("offset_minutes").first(),
+            )
+            .with_columns(
+                med_dose=pl.when(pl.col("_n_known") > 0)
+                .then(pl.col("_known_dose"))
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+            )
+            .sort(["index_paralytic_id", "med_category"])
+        )
+        _merged = _by_medication.group_by(
+            "index_paralytic_id", maintain_order=True
+        ).agg(
+            doses=pl.struct(
+                med_category="med_category",
+                med_dose="med_dose",
+                med_dose_unit="med_dose_unit",
+                mar_action_category="mar_action_category",
+                offset_minutes="offset_minutes",
+            )
+        )
+
+        return (
+            index_paralytic.rename({"n_admins": "n_before_merge_admin"})
+            .drop("doses")
+            .join(_merged, on="index_paralytic_id", how="left")
+            .with_columns(n_admins=pl.col("doses").list.len().cast(pl.Int32))
+            .with_columns(is_coadmin=pl.col("n_admins") > 1)
+        )
+
+    return (merge_formed_index_doses,)
+
+
+@app.cell
+def _(
+    COHORT_RUN_ID,
+    COLLAPSE_GAP_MINUTES,
+    positioned,
+    cohort_index,
+    fold,
+    med_admin,
+    merge_formed_index_doses,
+    pl,
+):
     # Attach every administration to its index event, then aggregate.
     _members = (
         positioned.join(
@@ -785,7 +857,7 @@ def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, med_a
         "index_paralytic_id", t_dttm="admin_dttm", _t0_min="_t_min"
     )
 
-    index_paralytic = (
+    _formed_index = (
         _members.join(_anchor, on="index_paralytic_id", how="inner")
         .with_columns(offset_minutes=(pl.col("_t_min") - pl.col("_t0_min")).round(3))
         .group_by(["encounter_block", "index_paralytic_id", "p_num", "t_dttm"], maintain_order=True)
@@ -803,11 +875,16 @@ def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, med_a
         )
         .with_columns(
             n_agents=pl.col("agents").list.len().cast(pl.Int32),
-            is_coadmin=pl.col("n_admins") > 1,
             agent_label=pl.col("agents").list.join("+"),
             cohort_run_id=pl.lit(COHORT_RUN_ID),
         )
         .join(cohort_index.select("encounter_block", "patient_id"), on="encounter_block", how="left")
+    )
+
+    # This is deliberately downstream of event formation: administrations in different
+    # index events are never eligible to merge, even when they are the same medication.
+    index_paralytic = (
+        merge_formed_index_doses(_formed_index)
         .select(
             "index_paralytic_id",
             "encounter_block",
@@ -815,6 +892,7 @@ def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, med_a
             "cohort_run_id",
             "p_num",
             "t_dttm",
+            "n_before_merge_admin",
             "n_admins",
             "span_minutes",
             "is_coadmin",
@@ -834,7 +912,7 @@ def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, med_a
     # counted twice. Nothing else in this cell would notice: the span check only bounds
     # spans, is_unique only checks ids, and the p_num check below catches an event that
     # vanished whole, not one that quietly lost half its rows.
-    _rebuilt = index_paralytic.get_column("n_admins").sum()
+    _rebuilt = index_paralytic.get_column("n_before_merge_admin").sum()
     assert _rebuilt == med_admin.height, (
         f"the reconstruction accounts for {_rebuilt:,} administrations but {med_admin.height:,} "
         "were loaded. The fold itself balanced, so the loss or duplication is in the "
@@ -852,6 +930,14 @@ def _(COHORT_RUN_ID, COLLAPSE_GAP_MINUTES, positioned, cohort_index, fold, med_a
     assert index_paralytic.get_column("index_paralytic_id").is_unique().all()
     assert index_paralytic.get_column("patient_id").null_count() == 0, (
         "an index paralytic has no patient -- a block in med_admin is absent from cohort_index"
+    )
+    _bad_merge = index_paralytic.filter(
+        (pl.col("n_before_merge_admin") < pl.col("n_admins"))
+        | (pl.col("n_admins") != pl.col("n_agents"))
+        | (pl.col("n_admins") != pl.col("doses").list.len())
+    )
+    assert _bad_merge.height == 0, (
+        "formed-index dose merging produced inconsistent administration or agent counts"
     )
     _gap = index_paralytic.filter(
         pl.col("p_num") != pl.col("p_num").cum_count().over("encounter_block")
@@ -1017,10 +1103,8 @@ def _(mo):
         ### The index paralytic summary, by agent
 
         One row per `agent_label` -- the sorted, `+`-joined set of agents folded into an
-        index event. At a site where every multi-administration index event is a
-        same-agent redose (no cross-agent co-administration survives the fold), this table
-        has exactly one row per agent actually charted; that is a site fact, not a defect
-        in the aggregation.
+        index event. Repeated administrations of one medication have already been merged,
+        so `n_coadmin` counts indexes containing more than one distinct medication.
         """
     )
     return
@@ -1058,23 +1142,14 @@ def _(mo):
         """
         ### The composition of an index event
 
-        `n_admins` and `n_agents` answer two different questions and are published as
-        separate columns because at some sites they diverge and at others they do not.
+        `n_before_merge_admin` records how many source administrations the fold absorbed.
+        `n_admins` records how many medication entries remain after same-medication doses
+        are merged inside that formed index. It therefore equals `n_agents`: one is a solo
+        index and values above one are genuine multi-medication co-administrations.
 
-        - `n_admins` is how many pushes the fold absorbed. `n_admins == 1` is a **solo**
-          index paralytic; anything above it is a multi-administration event.
-        - `n_agents` is how many *distinct* drugs those pushes were. `n_agents > 1` is a
-          genuine **co-administration**; `n_agents == 1` with `n_admins > 1` is a
-          **redose** of one agent inside the fold window.
-
-        A site can have hundreds of multi-administration events and zero
-        co-administrations, and the distinction changes what the fifteen-minute window is
-        doing there. Reporting only `is_coadmin` (defined as `n_admins > 1`) would call
-        both cases co-administration and hide that.
-
-        Only observed combinations are emitted. Unlike the gap bins and the agent-pair
-        grid, `n_admins` has no upper bound to build a grid from, so an absent row means
-        no index event had that shape rather than a suppressed count.
+        Only observed combinations are emitted. Including both the pre-merge and merged
+        counts makes same-medication redosing visible without allowing those source rows to
+        enter the downstream index-dose distributions separately.
         """
     )
     return
@@ -1082,17 +1157,18 @@ def _(mo):
 
 @app.cell
 def _(SHARE_DIR, index_paralytic, pl, publish):
-    # Grouped on (n_admins, n_agents), which are the group keys and therefore jointly
-    # unique -- no tiebreak is needed for the sort to be byte-identical across runs.
+    # All three count columns are group keys, so no tiebreak is needed for the sort to be
+    # byte-identical across runs.
     index_composition = (
-        index_paralytic.group_by(["n_admins", "n_agents"])
+        index_paralytic.group_by(["n_before_merge_admin", "n_admins", "n_agents"])
         .agg(
             n_index=pl.len(),
             n_administrations=pl.col("n_admins").sum(),
+            n_administrations_before_merge=pl.col("n_before_merge_admin").sum(),
             n_blocks=pl.col("encounter_block").n_unique(),
             n_patients=pl.col("patient_id").n_unique(),
         )
-        .sort(["n_admins", "n_agents"])
+        .sort(["n_before_merge_admin", "n_admins", "n_agents"])
     )
     publish(
         index_composition,
@@ -1104,8 +1180,8 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
     _multi = index_composition.filter(pl.col("n_admins") > 1).get_column("n_index").sum()
     _coadmin = index_composition.filter(pl.col("n_agents") > 1).get_column("n_index").sum()
     print(f"solo index paralytics   : {_solo:,}")
-    print(f"multi-administration    : {_multi:,}")
-    print(f"  of which co-administration (2+ distinct agents): {_coadmin:,}")
+    print(f"multi-medication indexes: {_multi:,}")
+    print(f"  with 2+ distinct agents: {_coadmin:,}")
     return (index_composition,)
 
 
@@ -1115,10 +1191,11 @@ def _(mo):
         """
         ### Configured-unit dose boundary
 
-        Every administration already passed the exact configured-unit filter before it
-        could define an event. Dose summaries retain that numeric value and unit without
-        conversion or relabeling. Rows without a finite dose remain in administration
-        counts and raw-unit QC but cannot contribute a dose statistic.
+        Every source administration already passed the exact configured-unit filter before
+        it could define an event. Repeated medications have now been merged within each
+        formed index. Dose summaries retain that summed value and configured unit without
+        conversion or relabeling. Merged rows without a finite dose remain in raw-unit QC
+        but cannot contribute a dose statistic.
         """
     )
     return
@@ -1209,10 +1286,10 @@ def _(mo):
         """
         ### Dose statistics in the configured unit
 
-        Each agent contributes only administrations whose normalized charted unit exactly
-        matches `config["medication_dose_units"]`. Values and units are not converted or
-        relabeled. The companion raw-unit count therefore documents the selected analysis
-        population rather than pooling heterogeneous units.
+        Each formed index contributes at most one dose per medication, in the normalized
+        charted unit that exactly matches `config["medication_dose_units"]`. Values and
+        units are not converted or relabeled. The companion raw-unit count documents this
+        merged index-dose population rather than pooling heterogeneous units.
         """
     )
     return
@@ -1259,16 +1336,15 @@ def _(
 @app.cell
 def _(SHARE_DIR, dose_summary_clean, pl, publish):
     # interpolation="linear" on both quantiles, explicitly: polars' default is
-    # "nearest", which at small n republishes a raw charted dose verbatim as the
-    # statistic (n=3 -> p75 IS the largest of the three charted values). Linear
+    # "nearest", which at small n republishes an observed merged dose verbatim as the
+    # statistic (n=3 -> p75 IS the largest of the three observed values). Linear
     # interpolation does not avoid that outcome, it only changes when it happens:
     # polars places the q-th quantile of n sorted values at the fractional index
     # (n-1)*q, and whenever that index is a whole number the "interpolated" value
-    # IS one of the charted observations -- not a rare edge case, but guaranteed
+    # IS one of the observations -- not a rare edge case, but guaranteed
     # whenever (n-1) is a multiple of 4, since p25, median and p75 then land at
-    # indices (n-1)/4, (n-1)/2 and 3(n-1)/4 all at once. That is live in this
-    # pipeline: ketamine's sedation dose (n=13, see fig_E2__sedation_dose_summary.csv / 03) publishes
-    # p25/median/p75 as three specific charted doses, not synthesised values. Linear
+    # indices (n-1)/4, (n-1)/2 and 3(n-1)/4 all at once. In those cases the
+    # p25/median/p75 are specific merged index doses, not synthesised values. Linear
     # interpolation buys smoother behaviour as n changes; it does not buy a guarantee
     # of never equaling an individual observation.
     index_dose = (
@@ -1321,12 +1397,12 @@ def _(mo):
         three quantiles are thinner than the data supports, and the cell above says why
         in its own margin: polars
         places the q-th quantile at fractional index `(n-1)*q`, so whenever `(n-1)` is
-        a multiple of 4 the published p25, median and p75 **are** three charted doses
+        a multiple of 4 the published p25, median and p75 **are** three observed merged doses
         rather than statistics computed from them.
 
         P41 publishes the distribution instead of three points standing in for it: for
-        every `(med_category, med_dose_unit)` pair, one row per distinct charted dose,
-        carrying how many administrations sat at it, the running count and the
+        every `(med_category, med_dose_unit)` pair, one row per distinct merged index dose,
+        carrying how many formed-index medication doses sat at it, the running count and the
         cumulative proportion. Any quantile, any threshold count and any cross-site
         pooled distribution is recoverable from that, so nobody has to ask a site to
         re-run for a statistic that was not thought of first.
@@ -1348,10 +1424,10 @@ def _(pl):
         """Empirical CDF of `med_dose` within each (med_category, med_dose_unit) group.
 
         `df` needs `med_category`, `med_dose_unit` and `med_dose`; any other column is
-        ignored. Returns one row per distinct charted dose with `n_at_dose`, `n_cum`,
+        ignored. Returns one row per distinct observed dose with `n_at_dose`, `n_cum`,
         `n_total` and `ecdf`, sorted (med_category, med_dose_unit, dose) ascending.
 
-        The RAW charted unit and dose are read, never `med_dose_unit_converted` /
+        The configured charted-unit columns are read, never `med_dose_unit_converted` /
         `med_dose_converted` -- both pairs are present on the frames this is called
         with, and P41 is defined on the raw pair.
 
@@ -1437,7 +1513,7 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, raw_doses):
 
     # The gap against step02__paralytic_dose_raw_unit_counts.csv's own count: reported,
     # never fatal (spec §4).
-    # That file counts every administration in the group; this one counts only those
+    # That file counts every merged index-dose row in the group; this one counts only those
     # carrying a dose, so where the two differ the difference IS the null count. A
     # group that is entirely null-dosed vanishes from the ECDF and shows n = 0 here
     # rather than disappearing silently.
@@ -1757,11 +1833,11 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     )
 
     if not _groups:
-        # No paralytic administration carries an amount dose at this site.
+        # No formed-index paralytic medication carries an amount dose at this site.
         # plt.subplots(0, 1, ...) would raise; skip with a clear message instead.
         print(
             "fig_B1__paralytic_dose_ecdf.png skipped -- its source CSV has zero "
-            "rows at this site (no paralytic administration carries an amount dose)"
+            "rows at this site (no formed-index paralytic medication carries an amount dose)"
         )
     else:
         _n_panels = len(_groups)
@@ -1779,10 +1855,10 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
             _y = _p.get_column("ecdf").to_list()
             _n_total = _p.get_column("n_total").first()
 
-            # where="post": an ECDF is right-continuous -- F(x) holds from this charted
+            # where="post": an ECDF is right-continuous -- F(x) holds from this observed
             # dose until the next one is reached. A plain line, or where="pre", draws
-            # mass at doses nobody charted, which is the exact misreading this figure
-            # exists to prevent.
+            # mass at doses not present in the merged inventory, the exact misreading
+            # this figure exists to prevent.
             _ax.step(_x, _y, where="post", color=_BLUE, linewidth=1.6)
             # The markers are the observations; the steps between them are the
             # function's definition, not measurement. At n_total = 3 a reader has to
@@ -1807,7 +1883,8 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
             )
 
         _axes[-1].set_xlabel(
-            "dose, in the unit the site charted — panels do NOT share an axis (P41)",
+            "formed-index dose, in the configured charted unit — "
+            "panels do NOT share an axis (P41)",
             fontsize=9, color=_INK,
         )
         _fig.suptitle(

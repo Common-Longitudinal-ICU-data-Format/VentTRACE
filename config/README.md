@@ -9,8 +9,12 @@
      for a real run.**
    - `filetype` — `"csv"` or `"parquet"`.
    - `timezone` — your data's timezone, e.g. `"US/Eastern"` (required by clifpy).
-   - `output_directory` — where clifpy writes logs and validation results (e.g. `"./output"`).
-   - `medication_dose_units` — the one exact dose unit retained for each study medication.
+    - `output_directory` — where clifpy writes logs and validation results (e.g. `"./output"`).
+    - `imv_window_minutes` — symmetric window around the index paralytic for detecting a
+      non-IMV to IMV transition. Set to `60` for this study.
+    - `sedation_window_minutes` — symmetric window around the index paralytic for retaining
+      sedative administrations. Set to `5` for this study.
+    - `medication_dose_units` — the one exact dose unit retained for each study medication.
      Use `mg` or `mg/kg` for non-fentanyl medications and `mcg` or `mcg/kg` for fentanyl.
      Units are normalized to lowercase before matching; rows in every other unit are excluded.
 

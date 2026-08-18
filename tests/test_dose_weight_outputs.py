@@ -205,6 +205,9 @@ def test_generated_site_outputs_are_reconcilable_and_poolable():
         pl.col("n_admin_windows").sum().alias("sum_n"),
         pl.col("n_total").first().alias("n_total"),
     ).filter(pl.col("sum_n") != pl.col("n_total")).is_empty()
+    assert tiers["count_unit"].unique().to_list() == [
+        "(index paralytic, administration) pairs within +/-5 min"
+    ]
     if tiers["n_total"].max() > 0:
         assert set(percentiles["percentile"].unique()) == set(range(1, 100))
     else:

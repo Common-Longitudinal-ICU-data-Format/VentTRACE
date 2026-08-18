@@ -5,7 +5,8 @@
     "timezone": "US/Eastern",
     "output_directory": "./output",
     "collapse_gap_minutes": 15,
-    "context_window_minutes": 60,
+    "imv_window_minutes": 60,
+    "sedation_window_minutes": 5,
     "medication_dose_units": {
         "rocuronium": "mg",
         "succinylcholine": "mg",

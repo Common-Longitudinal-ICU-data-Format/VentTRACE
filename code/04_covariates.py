@@ -82,6 +82,7 @@ def _(Path, json):
     SHARE_DIR = OUTPUT_DIR / "final_no_phi"
     FIG_DIR = SHARE_DIR / "figures"
     FIG_DIR.mkdir(parents=True, exist_ok=True)
+    SEDATION_WINDOW_MINUTES = float(config["sedation_window_minutes"])
 
     # P33. An ANALYSIS grid, not a site parameter -- a site that changed these windows
     # would make its Table 1 non-comparable with every other site's, which is the one
@@ -159,6 +160,7 @@ def _(Path, json):
     print(f"vasopressors   : {' | '.join(VASOPRESSORS)}")
     print(f"resp devices   : {' | '.join(RESPIRATORY_DEVICES)}")
     print(f"icu types      : {' | '.join(ICU_TYPES)}")
+    print(f"sedation window: +/- {SEDATION_WINDOW_MINUTES:g} min")
     print(f"configured units: {MEDICATION_DOSE_UNITS}")
     return (
         DATA_DIR,
@@ -173,6 +175,7 @@ def _(Path, json):
         MEDICATION_DOSE_UNITS,
         PHI_DIR,
         RESPIRATORY_DEVICES,
+        SEDATION_WINDOW_MINUTES,
         SHARE_DIR,
         SITE,
         TIMEZONE,
@@ -1863,6 +1866,7 @@ def _(
 def _(
     DOSE_SUMMARY_UPPER_BOUNDS,
     MEDICATION_DOSE_UNITS,
+    SEDATION_WINDOW_MINUTES,
     SHARE_DIR,
     SITE,
     dose_weights,
@@ -2082,9 +2086,10 @@ def _(
             .otherwise(None)
             .alias("pct"),
             pl.lit(SITE).alias("site_name"),
-            pl.lit("(index paralytic, administration) pairs within +/-60 min").alias(
-                "count_unit"
-            ),
+            pl.lit(
+                "(index paralytic, administration) pairs within "
+                f"+/-{SEDATION_WINDOW_MINUTES:g} min"
+            ).alias("count_unit"),
         )
         .select(
             "site_name",
@@ -2126,7 +2131,7 @@ def _(
     _flow_rows.extend(
         _flow(
             "paralytic",
-            "administrations",
+            "formed-index medication doses",
             [
                 ("source dose rows", paralytic_source.height),
                 ("finite dose and non-null unit", paralytic_usable.height),
@@ -2191,7 +2196,7 @@ def _():
 
 
 @app.cell
-def _(FIG_DIR, SHARE_DIR, pl, plt):
+def _(FIG_DIR, SEDATION_WINDOW_MINUTES, SHARE_DIR, pl, plt):
     def _draw_ecdf(csv_name, png_name, title):
         _df = pl.read_csv(SHARE_DIR / csv_name)
         _groups = (
@@ -2247,7 +2252,7 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         "fig_E4__sedation_dose_per_weight_ecdf.csv",
         "fig_E4__sedation_dose_per_weight_ecdf.png",
         "E.4 - sedation dose/weight empirical CDF\n"
-        "all administration-window pairs within +/-60 minutes",
+        f"all administration-window pairs within +/-{SEDATION_WINDOW_MINUTES:g} minutes",
     )
     return figure_b2_df, figure_e4_df
 

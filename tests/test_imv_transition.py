@@ -132,7 +132,7 @@ def test_rows_are_ordered_within_the_block_before_shifting():
     assert marked.get_column("is_transition").to_list() == [False, False, True]
 
 
-# ------------------------------------------------------- the shared +/- window
+# ------------------------------------------------------- the inclusive window predicate
 
 
 @pytest.mark.parametrize(
@@ -140,10 +140,7 @@ def test_rows_are_ordered_within_the_block_before_shifting():
     [(-61, False), (-60, True), (-0.5, True), (0, True), (59.9, True), (60, True), (60.1, False)],
 )
 def test_window_is_inclusive_at_both_ends(offset, inside):
-    """Sub-analyses D and E share this one predicate (P15). Two implementations of an
-    interval test drift at the boundary, and a one-row disagreement between 'IMV was
-    near' and 'sedation was near' is invisible in aggregate and fatal to the joint
-    reading."""
+    """D and E share boundary semantics while supplying independent configured widths."""
     got = (
         pl.DataFrame({"offset_minutes": [float(offset)]})
         .select(in_window_expr("offset_minutes", 60.0).alias("x"))
