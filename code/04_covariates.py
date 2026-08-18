@@ -9,6 +9,7 @@ def _():
     import json
     import sys
     from pathlib import Path
+    from tempfile import TemporaryDirectory
 
     import polars as pl
 
@@ -37,6 +38,7 @@ def _():
         MedicationAdminContinuous,
         Patient,
         Path,
+        TemporaryDirectory,
         Vitals,
         calculate_cci,
         compute_sofa_polars,
@@ -45,6 +47,136 @@ def _():
         pl,
         publish,
     )
+
+
+@app.cell
+def _(Path, pl):
+    def normalize_category_columns(df, *columns):
+        """Canonicalize source categories once before matching or grouping."""
+        return df.with_columns(
+            [
+                pl.col(column)
+                .cast(pl.String)
+                .str.strip_chars()
+                .str.to_lowercase()
+                .alias(column)
+                for column in columns
+            ]
+        )
+
+    def normalize_vital_category(df):
+        """Canonicalize supported CLIF vital spelling variants."""
+        return normalize_category_columns(df, "vital_category").with_columns(
+            pl.col("vital_category").replace(
+                {
+                    "heartrate": "heart_rate",
+                    "spo₂": "spo2",
+                    "weightkg": "weight_kg",
+                }
+            )
+        )
+
+    def prepare_sofa_inputs(data_directory, filetype, destination, hospitalization_ids):
+        """Stage cohort-scoped CLIF inputs with categories clifpy can match safely."""
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        hospitalization_ids = [str(value) for value in hospitalization_ids]
+        table_specs = {
+            "labs": (
+                [
+                    "hospitalization_id",
+                    "lab_result_dttm",
+                    "lab_category",
+                    "lab_value",
+                    "lab_value_numeric",
+                ],
+                "lab_category",
+                ["creatinine", "platelet_count", "po2_arterial", "bilirubin_total"],
+            ),
+            "vitals": (
+                ["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"],
+                "vital_category",
+                ["map", "spo2", "weight_kg"],
+            ),
+            "patient_assessments": (
+                [
+                    "hospitalization_id",
+                    "recorded_dttm",
+                    "assessment_category",
+                    "numerical_value",
+                    "categorical_value",
+                ],
+                "assessment_category",
+                ["gcs_total"],
+            ),
+            "respiratory_support": (
+                [
+                    "hospitalization_id",
+                    "recorded_dttm",
+                    "device_category",
+                    "mode_category",
+                    "fio2_set",
+                    "lpm_set",
+                    "tidal_volume_set",
+                    "resp_rate_set",
+                ],
+                None,
+                None,
+            ),
+            "medication_admin_continuous": (
+                [
+                    "hospitalization_id",
+                    "admin_dttm",
+                    "med_category",
+                    "med_dose",
+                    "med_dose_unit",
+                ],
+                "med_category",
+                ["norepinephrine", "epinephrine", "dopamine", "dobutamine"],
+            ),
+        }
+        sofa_devices = {
+            "imv": "IMV",
+            "nippv": "NIPPV",
+            "cpap": "CPAP",
+            "high flow nc": "High Flow NC",
+            "face mask": "Face Mask",
+            "trach collar": "Trach Collar",
+            "nasal cannula": "Nasal Cannula",
+            "other": "Other",
+            "room air": "Room Air",
+        }
+
+        for table_name, (columns, category_col, categories) in table_specs.items():
+            source = Path(data_directory) / f"clif_{table_name}.{filetype}"
+            if not source.exists():
+                continue
+            if filetype == "parquet":
+                frame = pl.scan_parquet(source)
+            elif filetype == "csv":
+                frame = pl.scan_csv(source)
+            else:
+                raise ValueError(f"unsupported CLIF filetype: {filetype}")
+            frame = (
+                frame.select(columns)
+                .with_columns(pl.col("hospitalization_id").cast(pl.String))
+                .filter(pl.col("hospitalization_id").is_in(hospitalization_ids))
+            )
+
+            if table_name == "vitals":
+                frame = normalize_vital_category(frame)
+            elif table_name == "respiratory_support":
+                frame = normalize_category_columns(
+                    frame, "device_category", "mode_category"
+                ).with_columns(pl.col("device_category").replace(sofa_devices))
+            elif category_col is not None:
+                frame = normalize_category_columns(frame, category_col)
+
+            if categories is not None:
+                frame = frame.filter(pl.col(category_col).is_in(categories))
+            frame.sink_parquet(destination / f"clif_{table_name}.parquet")
+
+    return normalize_category_columns, normalize_vital_category, prepare_sofa_inputs
 
 
 @app.cell
@@ -388,6 +520,7 @@ def _(
     bridge,
     bridge_hosp_ids,
     cohort_index,
+    normalize_category_columns,
     pl,
     to_site_naive,
 ):
@@ -411,8 +544,7 @@ def _(
         _hosp_pd[_c] = to_site_naive(_hosp_pd[_c])
 
     hospitalization = (
-        pl.from_pandas(_hosp_pd)
-        .with_columns(pl.col("discharge_category").str.to_lowercase())
+        normalize_category_columns(pl.from_pandas(_hosp_pd), "discharge_category")
         .join(bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner")
     )
 
@@ -435,8 +567,8 @@ def _(
     _hosp_all_pd = _hosp_all_table.df.copy()
     for _c in ("admission_dttm", "discharge_dttm"):
         _hosp_all_pd[_c] = to_site_naive(_hosp_all_pd[_c])
-    hospitalization_all = pl.from_pandas(_hosp_all_pd).with_columns(
-        pl.col("discharge_category").str.to_lowercase()
+    hospitalization_all = normalize_category_columns(
+        pl.from_pandas(_hosp_all_pd), "discharge_category"
     )
 
     print(f"hospitalizations loaded : {hospitalization.height:,}")
@@ -446,7 +578,17 @@ def _(
 
 
 @app.cell
-def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_naive):
+def _(
+    Adt,
+    DATA_DIR,
+    FILETYPE,
+    TIMEZONE,
+    bridge,
+    bridge_hosp_ids,
+    normalize_category_columns,
+    pl,
+    to_site_naive,
+):
     _adt_table = Adt.from_file(
         data_directory=DATA_DIR,
         filetype=FILETYPE,
@@ -467,11 +609,11 @@ def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_na
         _adt_pd[_c] = to_site_naive(_adt_pd[_c])
 
     adt = (
-        pl.from_pandas(_adt_pd)
-        .with_columns(
-            pl.col("hospital_type").str.to_lowercase(),
-            pl.col("location_category").str.to_lowercase(),
-            pl.col("location_type").str.to_lowercase(),
+        normalize_category_columns(
+            pl.from_pandas(_adt_pd),
+            "hospital_type",
+            "location_category",
+            "location_type",
         )
         .join(bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner")
     )
@@ -569,7 +711,16 @@ def _(pl):
 
 
 @app.cell
-def _(DATA_DIR, FILETYPE, Patient, TIMEZONE, cohort_index, pl, to_site_naive):
+def _(
+    DATA_DIR,
+    FILETYPE,
+    Patient,
+    TIMEZONE,
+    cohort_index,
+    normalize_category_columns,
+    pl,
+    to_site_naive,
+):
     # REQUIRED table (spec §4). Absent, this fails loudly rather than publishing a
     # Table 1 with no demographics -- race and ethnicity are the specific rows the
     # senior-author review asked for.
@@ -591,10 +742,11 @@ def _(DATA_DIR, FILETYPE, Patient, TIMEZONE, cohort_index, pl, to_site_naive):
     _pat_pd = _pat_table.df.copy()
     _pat_pd["death_dttm"] = to_site_naive(_pat_pd["death_dttm"])
 
-    patient = pl.from_pandas(_pat_pd).with_columns(
-        pl.col("sex_category").str.to_lowercase(),
-        pl.col("race_category").str.to_lowercase(),
-        pl.col("ethnicity_category").str.to_lowercase(),
+    patient = normalize_category_columns(
+        pl.from_pandas(_pat_pd),
+        "sex_category",
+        "race_category",
+        "ethnicity_category",
     )
 
     assert patient.get_column("patient_id").is_unique().all(), (
@@ -998,7 +1150,7 @@ def _(mo):
 
 
 @app.cell
-def _(LOOKBACK_HOURS, in_lookback, pl):
+def _(LOOKBACK_HOURS, in_lookback, normalize_category_columns, pl):
     def load_optional(loader, label, **kwargs):
         """Load an OPTIONAL clifpy table, returning None when the site does not have it.
 
@@ -1064,6 +1216,7 @@ def _(LOOKBACK_HOURS, in_lookback, pl):
         events, source, dttm_col, category_col, prefix, categories
     ):
         """Nonexclusive exposure flags for every category and look-back window."""
+        categories = [str(category).strip().lower() for category in categories]
         cols = [
             f"{prefix}_{category.replace(' ', '_')}_{h}h"
             for category in categories
@@ -1075,6 +1228,7 @@ def _(LOOKBACK_HOURS, in_lookback, pl):
                 *[pl.lit(None, dtype=pl.Boolean).alias(c) for c in cols],
             )
 
+        source = normalize_category_columns(source, category_col)
         _joined = events.select(
             "index_paralytic_id", "encounter_block", "t_dttm"
         ).join(
@@ -1111,6 +1265,7 @@ def _(
     Vitals,
     hospitalization_all,
     load_optional,
+    normalize_vital_category,
     pl,
     select_dose_weights,
     spine_resolved,
@@ -1124,27 +1279,16 @@ def _(
         filetype=FILETYPE,
         timezone=TIMEZONE,
         columns=["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"],
-        filters={
-            "hospitalization_id": _all_hosp_ids,
-            "vital_category": [
-                "weight_kg",
-                "WEIGHT_KG",
-                "Weight_Kg",
-                "Weight_kg",
-                "weightKg",
-                "WeightKg",
-            ],
-        },
+        filters={"hospitalization_id": _all_hosp_ids},
     )
     if _weight_pd is None:
         dose_weight_rows = None
     else:
         _weight_pd["recorded_dttm"] = to_site_naive(_weight_pd["recorded_dttm"])
-        dose_weight_rows = pl.from_pandas(_weight_pd).filter(
-            pl.col("vital_category")
-            .str.to_lowercase()
-            .str.replace_all("_", "")
-            == "weightkg"
+        dose_weight_rows = normalize_vital_category(
+            pl.from_pandas(_weight_pd)
+        ).filter(
+            pl.col("vital_category") == "weight_kg"
         )
 
     dose_weights = select_dose_weights(
@@ -1267,11 +1411,12 @@ def _(
     bridge,
     bridge_hosp_ids,
     load_optional,
+    normalize_category_columns,
     pl,
     to_site_naive,
 ):
     def _attach(df_pd, dttm_col, category_col=None):
-        """Naive-ify the timestamp, lower-case the category, map to encounter_block.
+        """Naive-ify the timestamp, canonicalize the category, map to encounter_block.
 
         The lower-casing is P20 and is not optional even though `exposure_flags` drops
         the category column before comparing anything: these frames are returned whole
@@ -1284,7 +1429,7 @@ def _(
         df_pd[dttm_col] = to_site_naive(df_pd[dttm_col])
         out = pl.from_pandas(df_pd)
         if category_col is not None:
-            out = out.with_columns(pl.col(category_col).str.to_lowercase())
+            out = normalize_category_columns(out, category_col)
         return out.join(
             bridge.select("hospitalization_id", "encounter_block"),
             on="hospitalization_id",
@@ -1300,13 +1445,15 @@ def _(
         filetype=FILETYPE,
         timezone=TIMEZONE,
         columns=["hospitalization_id", "admin_dttm", "med_category"],
-        # P20: casing variants enumerated at the from_file boundary.
-        filters={
-            "hospitalization_id": bridge_hosp_ids,
-            "med_category": VASOPRESSORS + [v.title() for v in VASOPRESSORS] + [v.upper() for v in VASOPRESSORS],
-        },
+        filters={"hospitalization_id": bridge_hosp_ids},
     )
-    vasopressor = _attach(_vaso_pd, "admin_dttm", "med_category") if _vaso_pd is not None else None
+    vasopressor = (
+        _attach(_vaso_pd, "admin_dttm", "med_category").filter(
+            pl.col("med_category").is_in(VASOPRESSORS)
+        )
+        if _vaso_pd is not None
+        else None
+    )
 
     _crrt_pd = load_optional(
         CrrtTherapy,
@@ -1375,10 +1522,14 @@ def _(
     PHI_DIR,
     RESPIRATORY_DEVICES,
     category_exposure_flags,
+    normalize_category_columns,
     pl,
     spine_resolved,
 ):
-    resp_waterfall = pl.read_parquet(PHI_DIR / "step01__cohort_resp_waterfall.parquet")
+    resp_waterfall = normalize_category_columns(
+        pl.read_parquet(PHI_DIR / "step01__cohort_resp_waterfall.parquet"),
+        "device_category",
+    )
     _run_ids = resp_waterfall.get_column("cohort_run_id").unique().to_list()
     _expected_run_ids = spine_resolved.get_column("cohort_run_id").unique().to_list()
     assert not _run_ids or _run_ids == _expected_run_ids, (
@@ -1434,6 +1585,7 @@ def _(
     bridge_hosp_ids,
     in_lookback,
     load_optional,
+    normalize_vital_category,
     pl,
     spine_resolved,
     to_site_naive,
@@ -1446,18 +1598,6 @@ def _(
     ]
     _VITAL_CATEGORIES = [c for c, _, _ in _VITAL_SPECS] + ["weight_kg"]
 
-    # P20 casing variants, enumerated by hand rather than by `.upper()/.title()`.
-    # `"spo2".title()` is `"Spo2"` and never `"SpO2"`, which is how most EHRs spell it --
-    # a site charting `SpO2` would silently return zero rows for that category while sbp
-    # and heart_rate loaded fine, leaving all three lowest_spo2_*h columns null and
-    # `covariate_coverage` still reporting vitals at ~100%. Nothing downstream would
-    # signal the loss; Table 1 would show an SpO2 row that is 100% missing and read as a
-    # charting gap. The post-load check below is the second half of the defence.
-    _VITAL_VARIANTS = sorted(
-        {v for c in _VITAL_CATEGORIES for v in (c, c.upper(), c.title(), c.capitalize())}
-        | {"SpO2", "spO2", "SpO₂", "HeartRate", "heartRate", "weightKg", "WeightKg"}
-    )
-
     print("optional physiology table:")
     _vit_pd = load_optional(
         Vitals,
@@ -1466,10 +1606,7 @@ def _(
         filetype=FILETYPE,
         timezone=TIMEZONE,
         columns=["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"],
-        filters={
-            "hospitalization_id": bridge_hosp_ids,
-            "vital_category": _VITAL_VARIANTS,
-        },
+        filters={"hospitalization_id": bridge_hosp_ids},
     )
 
     _events = spine_resolved.select("index_paralytic_id", "encounter_block", "t_dttm")
@@ -1497,20 +1634,22 @@ def _(
         print("  vital_category casings returned by the load:")
         for _raw, _n in sorted(_vit_pd["vital_category"].value_counts().items()):
             print(f"    {_raw!r:20s} {_n:,}")
-        _seen = {str(v).lower() for v in _vit_pd["vital_category"].unique()}
+        _canonical_vitals = normalize_vital_category(pl.from_pandas(_vit_pd))
+        _seen = set(
+            _canonical_vitals.get_column("vital_category").drop_nulls().unique().to_list()
+        )
         for _want in _VITAL_CATEGORIES:
             if _want not in _seen:
                 print(
                     f"  WARNING: vital_category {_want!r} returned ZERO rows. Either this "
-                    "site does not chart it, or its casing is missing from _VITAL_VARIANTS "
-                    "-- every statistic derived from it will be null and coverage will "
+                    "site does not chart it -- every statistic derived from it will be null and coverage will "
                     "still report vitals as available."
                 )
 
         _vit_pd["recorded_dttm"] = to_site_naive(_vit_pd["recorded_dttm"])
         vitals = (
-            pl.from_pandas(_vit_pd)
-            .with_columns(pl.col("vital_category").str.to_lowercase())
+            normalize_vital_category(pl.from_pandas(_vit_pd))
+            .filter(pl.col("vital_category").is_in(_VITAL_CATEGORIES))
             .join(
                 bridge.select("hospitalization_id", "encounter_block"),
                 on="hospitalization_id",
@@ -1652,9 +1791,11 @@ def _(
     SHARE_DIR,
     SITE,
     TIMEZONE,
+    TemporaryDirectory,
     bridge,
     compute_sofa_polars,
     pl,
+    prepare_sofa_inputs,
     publish,
     spine_resolved,
 ):
@@ -1675,16 +1816,23 @@ def _(
         )
     )
 
-    sofa_raw = compute_sofa_polars(
-        data_directory=DATA_DIR,
-        cohort_df=_sofa_cohort,
-        filetype=FILETYPE,
-        id_name="index_paralytic_id",
-        extremal_type="worst",
-        fill_na_scores_with_zero=True,
-        remove_outliers=True,
-        timezone=TIMEZONE,
-    )
+    with TemporaryDirectory(prefix="venttrace_sofa_") as _sofa_dir:
+        prepare_sofa_inputs(
+            DATA_DIR,
+            FILETYPE,
+            _sofa_dir,
+            _sofa_cohort.get_column("hospitalization_id").unique().to_list(),
+        )
+        sofa_raw = compute_sofa_polars(
+            data_directory=_sofa_dir,
+            cohort_df=_sofa_cohort,
+            filetype="parquet",
+            id_name="index_paralytic_id",
+            extremal_type="worst",
+            fill_na_scores_with_zero=True,
+            remove_outliers=True,
+            timezone=TIMEZONE,
+        )
 
     _component_inputs = {
         "sofa_cv_97": [

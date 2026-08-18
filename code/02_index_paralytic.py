@@ -30,6 +30,24 @@ def _():
 
 
 @app.cell
+def _(pl):
+    def normalize_category_columns(df, *columns):
+        """Canonicalize source categories once before matching or grouping."""
+        return df.with_columns(
+            [
+                pl.col(column)
+                .cast(pl.String)
+                .str.strip_chars()
+                .str.to_lowercase()
+                .alias(column)
+                for column in columns
+            ]
+        )
+
+    return (normalize_category_columns,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -290,6 +308,7 @@ def _(
     TIMEZONE,
     bridge,
     bridge_hosp_ids,
+    normalize_category_columns,
     pl,
     to_site_naive,
 ):
@@ -312,11 +331,13 @@ def _(
         filters={"hospitalization_id": bridge_hosp_ids},
     )
 
-    med_all = pl.from_pandas(
-        _med.df.assign(admin_dttm=lambda d: to_site_naive(d["admin_dttm"]))
+    med_all = normalize_category_columns(
+        pl.from_pandas(
+            _med.df.assign(admin_dttm=lambda d: to_site_naive(d["admin_dttm"]))
+        ),
+        "med_category",
+        "mar_action_category",
     ).with_columns(
-        med_category=pl.col("med_category").str.to_lowercase(),
-        mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
         # P20's posture, applied to med_dose_unit too: a site charting `MG` beside `mg`
         # would otherwise fail an exact configured-unit match. Normalised once here so
         # every downstream consumer agrees.

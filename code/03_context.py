@@ -30,6 +30,24 @@ def _():
 
 
 @app.cell
+def _(pl):
+    def normalize_category_columns(df, *columns):
+        """Canonicalize source categories once before matching or grouping."""
+        return df.with_columns(
+            [
+                pl.col(column)
+                .cast(pl.String)
+                .str.strip_chars()
+                .str.to_lowercase()
+                .alias(column)
+                for column in columns
+            ]
+        )
+
+    return (normalize_category_columns,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -304,7 +322,7 @@ def _(pl):
 
 
 @app.cell
-def _(is_transition_expr, pl):
+def _(is_transition_expr, normalize_category_columns, pl):
     def mark_transitions(waterfall):
         """Add `_pos`, `_prev_device`, `opens_block` and `is_transition` to the timeline.
 
@@ -324,7 +342,8 @@ def _(is_transition_expr, pl):
             # let _prev_device below -- and therefore transition detection -- differ
             # run to run at those rows. maintain_order makes the tiebreak the frame's own
             # input order, which is deterministic.
-            waterfall.sort(["encounter_block", "recorded_dttm"], maintain_order=True)
+            normalize_category_columns(waterfall, "device_category")
+            .sort(["encounter_block", "recorded_dttm"], maintain_order=True)
             .with_columns(
                 _pos=pl.int_range(pl.len()).over("encounter_block"),
                 _prev_device=pl.col("device_category").shift(1).over("encounter_block"),
@@ -356,9 +375,12 @@ def _(mo):
 
 
 @app.cell
-def _(PHI_DIR, pl):
+def _(PHI_DIR, normalize_category_columns, pl):
     index_paralytic = pl.read_parquet(PHI_DIR / "step02__index_paralytic.parquet")
-    resp_waterfall = pl.read_parquet(PHI_DIR / "step01__cohort_resp_waterfall.parquet")
+    resp_waterfall = normalize_category_columns(
+        pl.read_parquet(PHI_DIR / "step01__cohort_resp_waterfall.parquet"),
+        "device_category",
+    )
 
     COHORT_RUN_ID = index_paralytic.get_column("cohort_run_id").unique().to_list()
     assert len(COHORT_RUN_ID) == 1, f"index_paralytic carries {len(COHORT_RUN_ID)} run ids"
@@ -800,6 +822,7 @@ def _(
     context_d,
     epoch_minutes,
     in_window_expr,
+    normalize_category_columns,
     pl,
     to_site_naive,
 ):
@@ -829,11 +852,13 @@ def _(
         filters={"hospitalization_id": _hosp_ids},
     )
 
-    _sed_lower = pl.from_pandas(
-        _sed.df.assign(admin_dttm=lambda d: to_site_naive(d["admin_dttm"]))
+    _sed_lower = normalize_category_columns(
+        pl.from_pandas(
+            _sed.df.assign(admin_dttm=lambda d: to_site_naive(d["admin_dttm"]))
+        ),
+        "med_category",
+        "mar_action_category",
     ).with_columns(
-        med_category=pl.col("med_category").str.to_lowercase(),
-        mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
         # P20's posture, applied to med_dose_unit too: a site charting `MG` beside `mg`
         # would otherwise fail an exact configured-unit match. Normalised once here so
         # every downstream consumer agrees.

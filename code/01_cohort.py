@@ -16,9 +16,9 @@ def _():
     from clifpy.tables import (
         Adt,
         Hospitalization,
-        MedicationAdminIntermittent,
         RespiratorySupport,
     )
+    from clifpy.utils.io import fetch_lazy_result, load_data
     from clifpy.utils.stitching_encounters import stitch_encounters
     from clifpy.utils.waterfall import process_resp_support_waterfall
 
@@ -30,10 +30,11 @@ def _():
     return (
         Adt,
         Hospitalization,
-        MedicationAdminIntermittent,
         Path,
         RespiratorySupport,
+        fetch_lazy_result,
         json,
+        load_data,
         mo,
         pd,
         pl,
@@ -41,6 +42,46 @@ def _():
         publish,
         stitch_encounters,
     )
+
+
+@app.cell
+def _(pl):
+    def canonical_category_sql(column):
+        """DuckDB expression equivalent to strip + lowercase for pushdown."""
+        if not column.isidentifier():
+            raise ValueError(f"unsafe SQL identifier: {column!r}")
+        whitespace_codepoints = (
+            *range(9, 14),
+            32,
+            133,
+            160,
+            5760,
+            *range(8192, 8203),
+            8232,
+            8233,
+            8239,
+            8287,
+            12288,
+        )
+        whitespace_sql = " || ".join(
+            f"chr({codepoint})" for codepoint in whitespace_codepoints
+        )
+        return f"lower(trim({column}, {whitespace_sql}))"
+
+    def normalize_category_columns(df, *columns):
+        """Canonicalize source categories once before matching or grouping."""
+        return df.with_columns(
+            [
+                pl.col(column)
+                .cast(pl.String)
+                .str.strip_chars()
+                .str.to_lowercase()
+                .alias(column)
+                for column in columns
+            ]
+        )
+
+    return canonical_category_sql, normalize_category_columns
 
 
 @app.cell
@@ -242,30 +283,39 @@ def _(
     Hospitalization,
     MAR_ACTIONS,
     MEDICATION_DOSE_UNITS,
-    MedicationAdminIntermittent,
     PARALYTICS,
     TIMEZONE,
+    canonical_category_sql,
+    fetch_lazy_result,
+    load_data,
+    normalize_category_columns,
     pl,
     to_site_naive,
 ):
-    _category_variants = sorted(
-        {v for c in PARALYTICS for v in (c, c.title(), c.upper())}
-    )
-    _med = MedicationAdminIntermittent.from_file(
-        data_directory=DATA_DIR,
-        filetype=FILETYPE,
-        timezone=TIMEZONE,
+    # This is the only category pushdown before cohort IDs exist. clifpy's regular
+    # filter is exact, so use its lazy DuckDB relation to make the pushdown genuinely
+    # case-insensitive and whitespace-insensitive without loading the whole MAR table.
+    _category_sql = ", ".join(f"'{category}'" for category in PARALYTICS)
+    _med_rel = load_data(
+        "medication_admin_intermittent",
+        DATA_DIR,
+        FILETYPE,
         columns=[
             "hospitalization_id",
             "med_category",
             "mar_action_category",
             "med_dose_unit",
         ],
-        filters={"med_category": _category_variants},
+        lazy=True,
     )
-    _med_pl = pl.from_pandas(_med.df).with_columns(
-        med_category=pl.col("med_category").str.to_lowercase(),
-        mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
+    _category_expr = canonical_category_sql("med_category")
+    _med_pd = fetch_lazy_result(
+        _med_rel.filter(f"{_category_expr} IN ({_category_sql})"),
+        site_tz=TIMEZONE,
+    )
+    _med_pl = normalize_category_columns(
+        pl.from_pandas(_med_pd), "med_category", "mar_action_category"
+    ).with_columns(
         med_dose_unit=pl.col("med_dose_unit").str.strip_chars().str.to_lowercase(),
     )
     _qualifying = _med_pl.filter(
@@ -372,6 +422,7 @@ def _(
     STITCH_HOURS,
     TIMEZONE,
     hosp_paralytic_patients,
+    normalize_category_columns,
     pl,
     stitch_encounters,
 ):
@@ -383,15 +434,17 @@ def _(
         timezone=TIMEZONE,
         filters={"hospitalization_id": _cohort_hosp_ids},
     )
-    # location_category lower-cased on load like every other category column (D21).
-    adt_pl = pl.from_pandas(
-        _adt.df.assign(
-            in_dttm=lambda d: to_site_naive(d["in_dttm"]),
-            out_dttm=lambda d: to_site_naive(d["out_dttm"]),
-        )
-    ).with_columns(location_category=pl.col("location_category").str.to_lowercase())
+    adt_pl = normalize_category_columns(
+        pl.from_pandas(
+            _adt.df.assign(
+                in_dttm=lambda d: to_site_naive(d["in_dttm"]),
+                out_dttm=lambda d: to_site_naive(d["out_dttm"]),
+            )
+        ),
+        "location_category",
+    )
 
-    print("lower-cased location_category:")
+    print("canonical location_category:")
     print(adt_pl.get_column("location_category").value_counts(sort=True))
 
     _hosp_stitched_pd, _adt_stitched_pd, _mapping_pd = stitch_encounters(
@@ -601,6 +654,7 @@ def _(
     TIMEZONE,
     cohort_paralytic,
     encounter_mapping,
+    normalize_category_columns,
     pl,
 ):
     # One load of the raw respiratory table for every hospitalization in the cohort —
@@ -623,25 +677,31 @@ def _(
     # creates UTC-aware scaffold rows, so this branch makes the one deliberate timezone
     # conversion in the pipeline. Everything else uses stripped site-local wall time.
     resp_raw_pd = _resp.df.copy()
+    _resp_category_columns = [
+        column for column in resp_raw_pd.columns if column.endswith("_category")
+    ]
+    resp_raw_pd = normalize_category_columns(
+        pl.from_pandas(resp_raw_pd), *_resp_category_columns
+    ).to_pandas()
     resp_utc_pd = resp_raw_pd.assign(
         recorded_dttm=resp_raw_pd["recorded_dttm"].dt.tz_convert("UTC")
     )
     resp_raw_pd["recorded_dttm"] = to_site_naive(resp_raw_pd["recorded_dttm"])
 
-    # Lower-cased once, here, before any comparison (D21). Every device literal below is
-    # written in lower case to match.
     resp_raw = (
-        pl.from_pandas(
-            resp_raw_pd[
-                ["hospitalization_id", "recorded_dttm", "device_category", "tracheostomy"]
-            ]
+        normalize_category_columns(
+            pl.from_pandas(
+                resp_raw_pd[
+                    ["hospitalization_id", "recorded_dttm", "device_category", "tracheostomy"]
+                ]
+            ),
+            "device_category",
         )
-        .with_columns(device_category=pl.col("device_category").str.to_lowercase())
         .join(encounter_mapping, on="hospitalization_id", how="inner")
     )
 
     print(f"raw respiratory rows for cohort hospitalizations : {resp_raw.height:,}")
-    print("\nlower-cased device_category across the cohort:")
+    print("\ncanonical device_category across the cohort:")
     print(resp_raw.get_column("device_category").value_counts(sort=True))
 
     return resp_raw, resp_utc_pd
@@ -732,6 +792,7 @@ def _(
     TIMEZONE,
     cohort,
     encounter_mapping,
+    normalize_category_columns,
     pl,
     process_resp_support_waterfall,
     resp_utc_pd,
@@ -778,13 +839,12 @@ def _(
         )
 
         resp_waterfall = (
-            pl.from_pandas(
+            normalize_category_columns(
+                pl.from_pandas(
                 _waterfalled[["hospitalization_id", "recorded_dttm", "device_category"]]
+                ),
+                "device_category",
             )
-            # Belt and braces: the column arrives lower-cased both because we lower-cased it
-            # on load and because the waterfall lower-cases it again. Stating it here means the
-            # invariant holds even if either of those two facts changes.
-            .with_columns(device_category=pl.col("device_category").str.to_lowercase())
             .join(encounter_mapping, on="hospitalization_id", how="inner")
             .sort(["encounter_block", "recorded_dttm"])
         )

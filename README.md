@@ -69,6 +69,14 @@ component scores default to 0, while `step04__sofa_coverage.csv` publishes compo
 `hospitalization` and `adt`, already required above; that is no new contract. See
 [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §2 for the full per-notebook table map.
 
+Every source `*_category` value is stripped and lower-cased before filtering, matching, joining,
+or grouping. Thus `IMV`, `imv`, and ` IMV ` are equivalent. Standard `from_file` calls filter
+categories only after loading the cohort IDs so exact loader filters cannot discard a site's casing;
+the initial whole-site medication scan uses an equivalent normalized DuckDB pushdown. Supported
+vital aliases such as `HeartRate`, `weightKg`, and `SpO₂` are also mapped to their canonical CLIF
+names. Before `compute_sofa_polars` rereads its five source tables, step 04 stages cohort-scoped
+temporary parquet inputs with the same canonical categories.
+
 ## Cohort identification
 
 Adults (≥18 at admission), ED or ICU at some point in the stay, at least one qualifying

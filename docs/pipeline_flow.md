@@ -492,7 +492,7 @@ is now the one thing `publish()` checks.
 | P17 | every sedative administration in the configured window is kept, not only the nearest per agent | `03` | `(index paralytic, administration)` pairs |
 | P18 | superseded by P47's configured-unit contract | `01`, `02`, `03`, `04` | no conversion or relabeling |
 | P19 | the timezone always comes from `config["timezone"]`; no code path consults the OS zone | everywhere | |
-| P20 | every `*_category` column lower-cased on load; every literal in the codebase written lower case | everywhere | |
+| P20 | every source `*_category` value stripped and lower-cased before matching/grouping; category pushdowns are normalized rather than exact raw-value filters | everywhere | `IMV`, `imv`, and ` IMV ` are equivalent |
 | P21 / P23 | the disclosure boundary is row-level vs. aggregate; `publish()` refuses an identifier or a datetime column; nothing else is filtered | `utils/suppress.py` | see §6 |
 | P41 | **added 2026-08-15** — dose distributions also published as full ECDFs keyed on the raw charted `(med_category, med_dose_unit)` pair; one row per distinct dose with `n_at_dose`, `n_cum`, `n_total`, `ecdf`. Amount units only. Additive to P18 | `02`, `03` | 118 + 81 rows; ketamine's `mcg`/`mg` split visible without conversion |
 | P42 | superseded by P47 | `02`, `03`, `04` | no unit overrides |

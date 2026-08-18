@@ -409,9 +409,9 @@ def _(
         _block_unit = table_unit if table_unit == "encounter block" else BLOCK
 
         _cont("age_at_admission", DEMOG, "Age at admission, years", "hospitalization containing t0", event_unit)
-        _cat("sex_category", DEMOG, "Sex", "patient.sex_category, lower-cased", event_unit, sex_levels)
-        _cat("race_category", DEMOG, "Race", "patient.race_category, lower-cased, raw mCIDE level", event_unit, race_levels)
-        _cat("ethnicity_category", DEMOG, "Ethnicity", "patient.ethnicity_category, lower-cased", event_unit, ethnicity_levels)
+        _cat("sex_category", DEMOG, "Sex", "patient.sex_category, stripped and lower-cased", event_unit, sex_levels)
+        _cat("race_category", DEMOG, "Race", "patient.race_category, stripped and lower-cased, raw mCIDE level", event_unit, race_levels)
+        _cat("ethnicity_category", DEMOG, "Ethnicity", "patient.ethnicity_category, stripped and lower-cased", event_unit, ethnicity_levels)
 
         _cont("cci", COMORB, "Charlson comorbidity index", "Charlson via clifpy on the hospitalization containing t0", event_unit)
         _cont(

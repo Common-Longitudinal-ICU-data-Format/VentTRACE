@@ -52,8 +52,16 @@ def _load_from_notebook(name, namespace=None):
 
 
 is_transition_expr = _load_from_notebook("is_transition_expr", {"pl": pl})
+normalize_category_columns = _load_from_notebook(
+    "normalize_category_columns", {"pl": pl}
+)
 mark_transitions = _load_from_notebook(
-    "mark_transitions", {"pl": pl, "is_transition_expr": is_transition_expr}
+    "mark_transitions",
+    {
+        "pl": pl,
+        "is_transition_expr": is_transition_expr,
+        "normalize_category_columns": normalize_category_columns,
+    },
 )
 in_window_expr = _load_from_notebook("in_window_expr", {"pl": pl})
 
@@ -99,6 +107,12 @@ def test_a_block_opening_on_imv_is_a_transition():
 
 def test_imv_to_imv_is_not_a_transition():
     assert _flags([(1, 0, "imv"), (1, 1, "imv"), (1, 2, "imv")]) == [True, False, False]
+
+
+def test_imv_matching_is_case_and_whitespace_insensitive():
+    assert _flags(
+        [(1, 0, " nasal cannula "), (1, 1, " IMV "), (1, 2, "iMv")]
+    ) == [False, True, False]
 
 
 # --------------------------------------------------------------- around them
