@@ -145,8 +145,19 @@ and a site whose extract lacks professional billing sees an empty cascade —
 of the same stems (P41) — the full empirical CDF of
 charted dose per `(med_category, med_dose_unit)`, on the raw unit rather than the converted one,
 so P18's unit fold is visible rather than inferred. `02` and `03` additionally write
-`step02__paralytic_dose_unit_corrections.csv` and `step03__sedation_dose_unit_corrections.csv`, the per-agent
-counts of charted `mg/kg` rows treated as absolute `mg` for P42's converted calculation.
+Each medication uses the exact unit selected in `config["medication_dose_units"]`; no
+unit-correction artifacts are produced because values and units are never relabeled.
+
+`04` adds P46's site-ready outputs. `step04__intubations_by_hospital_year.csv` counts one
+block-first paralytic-index event by configured healthcare system, event-time ADT hospital,
+academic status and calendar year; it remains intubation-adjacent rather than adjudicated.
+`fig_B2__paralytic_dose_per_weight_ecdf.csv` and
+`fig_E4__sedation_dose_per_weight_ecdf.csv` publish normalized distributions with integer counts.
+`step04__combined_induction_dose_distribution_percentiles.csv` publishes site-specific p1-p99 for
+etomidate and ketamine. `fig_E5__induction_dose_tiers.csv` carries every local tier numerator and
+denominator needed for later pooled logit random-effects analysis, while its PNG is explicitly
+local and has no pooled confidence intervals. `fig_G1__dose_per_weight_consort.csv` reports every
+dose and weight exclusion without changing the block/patient analytic cohort.
 
 ---
 
@@ -163,7 +174,7 @@ or cares which drug is being studied.
 | age | ≥ 18 at admission |
 | dates | 2018-01-01 … 2025-12-31 (skipped at MIMIC — its timestamps are date-shifted, so a calendar filter is meaningless there) |
 | location | ED **or** ICU at some point in the block |
-| index signal | at least one qualifying rocuronium, succinylcholine, or vecuronium administration: `given`/`bolus`, non-rate unit |
+| index signal | at least one qualifying rocuronium, succinylcholine, or vecuronium administration: `given`, exact configured unit |
 | exclusion | tracheostomy in the first 24 h — `tracheostomy` truthy **or** `device_category == 'trach collar'` |
 
 **Stitching comes first.** An ED presentation and the inpatient admission that follows it can
@@ -208,7 +219,7 @@ neither ever names a raw `hospitalization_id` outside the one bridge step that r
 ## 4. `02_index_paralytic.py` — the index event
 
 Loads `medication_admin_intermittent`, filtered to `med_category ∈ {rocuronium,
-succinylcholine, vecuronium}` and `mar_action_category ∈ {given, bolus}` — `bolus` is kept
+succinylcholine, vecuronium}`, `mar_action_category == given`, and the medication's exact configured unit
 alongside `given` because that is exactly how many EHRs chart a one-time IV push, which is
 precisely what an intubating paralytic is. At this site: **1,585 rocuronium** and **575
 vecuronium** administrations, both charted only as `given`. **Succinylcholine is absent from
@@ -269,7 +280,7 @@ asserted:
   the assertable invariant P6 bought by choosing anchor-and-close over transitive chaining: no
   index event, however many administrations it folds, can span more than the threshold that
   defines it.
-- Doses, standardised with clifpy to one preferred unit per `med_category` and keyed on
+- Doses, retained without conversion in one configured unit per `med_category` and keyed on
   `med_category` alone (P18, amended 2026-08-10): rocuronium converts to `mg` — n=1,585
   (1,582 already charted in `mg`, 3 charted in `mcg` folded in by the conversion), median 50
   (IQR 50–100). Vecuronium: `mg` only, n=575, median 10 (IQR 6–10). The raw unit mix that the
@@ -365,7 +376,7 @@ without. Of 2,117 index paralytics, **1,399 (66.1%) had at least one sedative ch
 window and **718 (33.9%) had none**. The most common charted sets: fentanyl+propofol (383),
 propofol alone (324), fentanyl alone (242), fentanyl+midazolam (202), midazolam alone (128).
 
-Dose statistics are standardised with clifpy to one preferred unit per `med_category`, clinically
+Dose statistics retain the exact configured unit per `med_category`, clinically
 filtered, and keyed on `med_category` alone (P18/P43). Both tables publish mean, sample SD,
 median, p25 and p75. Included values satisfy `0 < dose <` the agent-specific upper bound:
 etomidate 200 mg, fentanyl 500 mcg, midazolam 50 mg, propofol 500 mg, rocuronium 400 mg,
@@ -380,8 +391,8 @@ see the quantile note in `02`/`03`. The raw unit mix that the withdrawn version 
 as separate rows is now a counts-only table with no dose statistics attached —
 `step03__sedation_dose_raw_unit_counts.csv`. `fig_E3__sedation_dose_ecdf.csv` retains the raw, unfiltered QC population and
 is where inaccurate units and outliers remain auditable, including ketamine's charted `mcg` and
-`mg` administrations as separate distributions. `step03__sedation_dose_unit_corrections.csv` reports, including explicit
-zeros, how many administration-window pairs per sedative had exact `mg/kg` interpreted as `mg`.
+configured-unit administrations as separate distributions. Administrations in other units
+were excluded before window matching.
 
 **What E's counts count: pairs, not administrations.** A block can hold several index
 paralytics, and a single physical administration inside two overlapping ±60-minute windows
@@ -399,6 +410,22 @@ administrations, despite the two files sharing a column name and schema.
 row per index paralytic, written to `output/intermediate_phi/`. It carries raw timestamps
 (`t_dttm`, `imv_transition_dttm`, per-dose `admin_dttm` inside `sedatives`) and is never
 published in any form.
+
+### P46 - normalized dose and local induction tiers
+
+Step 04 selects a dose-specific weight independently of Table 1: the latest finite 20-300 kg
+weight at or before the event in the current hospitalization, otherwise the latest prior-hospital
+weight recorded within 28 days. Configured `/kg` values are already normalized and bypass
+weight selection; absolute-unit values use P43's absolute-dose checks before division
+before division. Missing weight reduces only normalized-dose denominators.
+
+Sedation normalization retains E's existing unit: an `(index paralytic, administration)` pair.
+The induction percentile and tier population is every etomidate or ketamine pair inside +/-60
+minutes, not a nearest-dose or five-minute RSI subset, with no additional normalized-dose range
+filter. Site percentiles are descriptive and cannot
+be averaged across sites. B.2/E.4 integer `n_at_dose` values can be concatenated to reconstruct a
+pooled distribution; E.5 integer tier numerators and denominators support the later coordinating
+center meta-analysis.
 
 ---
 
@@ -465,7 +492,7 @@ is now the one thing `publish()` checks.
 |---|---|---|---|
 | P2 | **amended 2026-08-17** — adults, date window, ED/ICU, >=1 qualifying paralytic, no trach in 24h; stitch <6h apart; raw IMV is not required | `01` | respiratory absence becomes context/QC rather than exclusion |
 | P3 | paralytic list: `rocuronium`, `succinylcholine`, `vecuronium` (`cisatracurium`/`atracurium` excluded — maintenance agents, not induction) | `02` | 1,585 roc + 575 vec administered (succinylcholine absent at this site) |
-| P4 | an administration is `mar_action_category ∈ {given, bolus}` | `02`, `03` | |
+| P4 | superseded by P47 | `01`, `02`, `03` | `bolus` excluded |
 | P5 | analytic unit is `encounter_block`; `hospitalization_id` named only at the bridge, dropped the instant the join lands | `02`, `03` | |
 | P6 | index paralytics formed by anchor-and-close at 15 min, never transitive chaining; inclusive at the boundary | `02` | `span_minutes <= 15` always; 2,117 index paralytics |
 | P7 | 15 minutes is a clinical judgment, not a fitted optimum — the whole gap distribution is published beside it | `02` | Figure A.1 |
@@ -478,15 +505,17 @@ is now the one thing `publish()` checks.
 | P15 | D and E share one window predicate (±`context_window_minutes`, 60), implemented once | `03` | |
 | P16 | sedative list: `midazolam`, `etomidate`, `ketamine`, `propofol`, `fentanyl` — a covariate, not a detector | `03` | etomidate absent at this site |
 | P17 | every sedative administration in the window is kept, not only the nearest per agent | `03` | 3,570 (index paralytic, administration) pairs |
-| P18 | **amended 2026-08-10** — doses standardised with clifpy to one preferred unit per `med_category`; dose stats keyed on `med_category` alone; the raw unit mix is published separately, counts only | `02`, `03` | e.g. ketamine n=13 (was `mcg` n=8 / `mg` n=5 under the withdrawn rule) |
+| P18 | superseded by P47's configured-unit contract | `01`, `02`, `03`, `04` | no conversion or relabeling |
 | P19 | the timezone always comes from `config["timezone"]`; no code path consults the OS zone | everywhere | |
 | P20 | every `*_category` column lower-cased on load; every literal in the codebase written lower case | everywhere | |
 | P21 / P23 | the disclosure boundary is row-level vs. aggregate; `publish()` refuses an identifier or a datetime column; nothing else is filtered | `utils/suppress.py` | see §6 |
 | P41 | **added 2026-08-15** — dose distributions also published as full ECDFs keyed on the raw charted `(med_category, med_dose_unit)` pair; one row per distinct dose with `n_at_dose`, `n_cum`, `n_total`, `ecdf`. Amount units only. Additive to P18 | `02`, `03` | 118 + 81 rows; ketamine's `mcg`/`mg` split visible without conversion |
-| P42 | every study medication charted as exact `mg/kg` is treated as mislabeled absolute `mg` for calculation; raw-unit outputs remain unchanged and correction counts are published | `02`, `03` | every other `/kg` unit still fails |
-| P43 | converted dose summaries publish mean/SD and median/IQR after strict clinical plausibility filtering; propofol `mcg` is invalid for summaries; raw-unit QC remains unchanged | `02`, `03` | `0 < dose <` each supplied upper bound; ketamine unfiltered |
+| P42 | superseded by P47 | `02`, `03`, `04` | no unit overrides |
+| P43 | configured-unit summaries publish mean/SD and median/IQR; absolute-unit upper bounds do not apply to configured `/kg` units | `02`, `03`, `04` | positive finite doses; ketamine has no upper bound |
 | P44 | Table 1 adds DBP, per-device respiratory support, per-agent vasopressors, CLIF ICU types, and `compute_sofa_polars` over `[t0-24h,t0]` | `04`, `05` | missing SOFA components score 0; coverage is published separately |
 | P45 | figure dataframes use `figure_<id>_df`; each plotted CSV and PNG shares `fig_<ID>__<description>`; support outputs use `stepNN__<description>`; Table 1 pooling names remain stable | everywhere | `07_artifact_manifest.py` rejects stale, missing or undeclared outputs and records checksums |
+| P46 | block-first hospital/year counts plus additive normalized-dose outputs; dose weight is latest valid 20-300 kg current-hospital weight, otherwise prior-hospital weight within 28 days; local induction tiers retain integer pooling counts | `04` | B.2, E.4, E.5, G.1 and step 04 aggregate files; analytic cohort unchanged |
+| P47 | one required config unit per medication; `given` only; exact unit matching before event construction; no conversion; configured `/kg` is already normalized | `01`, `02`, `03`, `04` | fentanyl allows `mcg`/`mcg/kg`; other agents allow `mg`/`mg/kg` |
 
 ---
 

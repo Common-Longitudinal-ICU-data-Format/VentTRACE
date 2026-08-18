@@ -15,6 +15,12 @@ def test_figure_dataframe_names_match_figure_ids():
             "figure_e2_df",
             "figure_e3_df",
         ),
+        "code/04_covariates.py": (
+            "figure_b2_df",
+            "figure_e4_df",
+            "figure_e5_df",
+            "figure_g1_df",
+        ),
         "code/05_table_one.py": ("figure_t1_df", "figure_t2_df"),
         "code/06_reference_cpt.py": ("figure_f1_df",),
     }
@@ -36,6 +42,12 @@ def test_figure_data_and_png_stems_match_in_source():
             "E1": "sedation_offset",
             "E2": "sedation_dose_summary",
             "E3": "sedation_dose_ecdf",
+        },
+        "code/04_covariates.py": {
+            "B2": "paralytic_dose_per_weight_ecdf",
+            "E4": "sedation_dose_per_weight_ecdf",
+            "E5": "induction_dose_tiers",
+            "G1": "dose_per_weight_consort",
         },
         "code/05_table_one.py": {
             "T1": "organ_support_by_window",

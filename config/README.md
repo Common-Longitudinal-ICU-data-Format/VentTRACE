@@ -10,6 +10,9 @@
    - `filetype` — `"csv"` or `"parquet"`.
    - `timezone` — your data's timezone, e.g. `"US/Eastern"` (required by clifpy).
    - `output_directory` — where clifpy writes logs and validation results (e.g. `"./output"`).
+   - `medication_dose_units` — the one exact dose unit retained for each study medication.
+     Use `mg` or `mg/kg` for non-fentanyl medications and `mcg` or `mcg/kg` for fentanyl.
+     Units are normalized to lowercase before matching; rows in every other unit are excluded.
 
 This file uses the **clifpy config schema**, so the Python templates can read it directly with
 `ClifOrchestrator(config_path="config/config.json")`, and the R templates read the same fields via

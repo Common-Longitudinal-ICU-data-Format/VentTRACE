@@ -30,7 +30,7 @@ The alternative was put to the study lead and declined: the ECDF's `n_total` col
 
 | \# | Decision | Rationale |
 |---|---|---|
-| P41 | **Dose distributions are published as full ECDFs keyed on the raw charted `(med_category, med_dose_unit)` pair — one row per distinct dose value, carrying `n_at_dose`, `n_cum`, `n_total` and `ecdf`.** Amount units only; rate-charted rows are not published in any form. Additive to P18's converted summary and unchanged by P43's later summary-only plausibility filter. | Set by the study lead. Three quantiles cannot show bimodality, cannot show that 363 of 575 vecuronium administrations are the single value 10 mg, nor that 4 rocuronium administrations are charted at 0.0 mg. The raw ECDF is the complete QC aggregate: any quantile, threshold count or cross-site pooled raw distribution is recoverable from it. Keying on the **raw** unit makes it diagnostic: inaccurate units and implausible values excluded from P43's clinical summary remain visible here rather than disappearing silently. |
+| P41 | **Dose distributions are published as full ECDFs keyed on `(med_category, med_dose_unit)` — one row per distinct dose value, carrying `n_at_dose`, `n_cum`, `n_total` and `ecdf`.** P47 later restricted this source population to `given` administrations in each medication's exact configured unit. | Set by the study lead. The ECDF remains the complete distribution of the selected analysis population; units excluded by P47 do not define events and are not published as alternate analysis distributions. |
 
 ### The disclosure consequence, stated rather than discovered
 
@@ -66,11 +66,10 @@ These are the **same frames**, grouped on the **same keys**, that already produc
 
 The ECDF reads the **raw** `med_dose` and `med_dose_unit` columns from those frames, never `med_dose_converted` / `med_dose_unit_converted`. Both pairs are present on the frame; P41 uses the raw pair.
 
-### 3.2 Rate units require no code
+### 3.2 Configured units
 
-Rate-charted rows are removed upstream, at `code/02_index_paralytic.py:351` and `code/03_context.py:853`, by `~rate_unit_expr("med_dose_unit")` — the filter added by commit `305de1f`. Everything downstream of that point, `dose_converted` and `sedation_dose_converted` included, is amount-only already, and `02:1240` carries an assertion that no rate row can reach the converter.
-
-So the amount-only property of P41 is **inherited, not re-asserted**. No new filter is written, `rate_unit_expr` gains no new caller, and `_rate_rows` stays what it is today: a marimo cell-local, counted into the run log, published nowhere. At this site both counts are `0`.
+P47 filters exact configured units upstream, before event construction and window matching.
+That stricter rule replaces the former rate-only exclusion and unit-conversion boundary.
 
 Publishing the rate population was designed and then withdrawn by the study lead on 2026-08-15. It would have been the pipeline's only published artifact drawn from a frame that is neither action-filtered nor index-anchored, and its `n_total` would have shared a column name with the amount tables while meaning something else entirely.
 

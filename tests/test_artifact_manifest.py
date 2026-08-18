@@ -41,13 +41,14 @@ def test_manifest_has_unique_complete_inventory(manifest):
     assert manifest.get_column("filename").is_unique().all()
     assert manifest.get_column("artifact_id").is_unique().all()
     assert manifest.filter(pl.col("status") == "missing").height == 0
-    assert manifest.height == 42
+    assert manifest.height == 50
 
 
 def test_declared_source_artifacts_exist(manifest):
     output = _share_dir().parent
-    for source in manifest.get_column("source_files"):
-        assert (output / source).exists(), source
+    for source_files in manifest.get_column("source_files"):
+        for source in source_files.split("|"):
+            assert (output / source).exists(), source
 
 
 def test_generated_artifact_hashes_match(manifest):

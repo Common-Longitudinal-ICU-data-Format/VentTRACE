@@ -29,7 +29,8 @@ paralytic, and does not adjudicate whether an intubation occurred.
 ## Required CLIF tables and fields
 
 1. **hospitalization**: `patient_id`, `hospitalization_id`, `admission_dttm`, `age_at_admission`
-2. **adt**: `hospitalization_id`, `location_category`, `location_type`, `in_dttm`, `out_dttm`
+2. **adt**: `hospitalization_id`, `hospital_id`, `hospital_type`, `location_category`,
+   `location_type`, `in_dttm`, `out_dttm`
 3. **respiratory_support**: `hospitalization_id`, `recorded_dttm`, `device_category`,
    `tracheostomy`, and the fields `clifpy`'s waterfall needs to infer device from ventilator
    settings
@@ -70,7 +71,8 @@ component scores default to 0, while `step04__sofa_coverage.csv` publishes compo
 ## Cohort identification
 
 Adults (≥18 at admission), ED or ICU at some point in the stay, at least one qualifying
-rocuronium, succinylcholine, or vecuronium administration (`given` or `bolus`, non-rate unit),
+rocuronium, succinylcholine, or vecuronium administration (`given` with the medication's
+exact `medication_dose_units` config value),
 and no tracheostomy signal in the first 24 hours. A raw IMV row is not required because a patient
 who dies immediately after intubation may never have one charted. Hospitalizations less than 6
 hours apart for the same patient are stitched into one `encounter_block`, the analytic unit for
@@ -88,6 +90,12 @@ Figure data and PNGs use the same auditable stem, for example
 for example `step03__sedation_summary.csv`. `artifact_manifest.csv` records each artifact's
 producer, dataframe, sources, row count, size and SHA-256. The four `table1_by_agent_*` names
 remain stable for cross-site pooling.
+
+Step 04 also publishes block-first paralytic-index event counts by healthcare system, event-time
+hospital, academic status, and year. These are intubation-adjacent operational counts, not confirmed
+intubations. Weight-normalized dose ECDFs, etomidate/ketamine percentiles, local four-tier counts,
+and a dose-specific eligibility flow are additive outputs. Tier files carry site-level integer
+numerators and denominators for later consortium meta-analysis; site percentiles are never averaged.
 
 > [!WARNING]
 > **Never upload patient-level data to Box.** Only `output/final_no_phi/` may be shared — no

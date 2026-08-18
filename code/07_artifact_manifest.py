@@ -33,7 +33,6 @@ CATALOG = [
     ("step02__index_paralytics_per_block.csv", "data", "02_index_paralytic", None, "index_per_block", "intermediate_phi/step02__index_paralytic.parquet"),
     ("step02__index_paralytic_summary.csv", "data", "02_index_paralytic", None, "index_summary", "intermediate_phi/step02__index_paralytic.parquet"),
     ("step02__index_paralytic_composition.csv", "data", "02_index_paralytic", None, "index_composition", "intermediate_phi/step02__index_paralytic.parquet"),
-    ("step02__paralytic_dose_unit_corrections.csv", "qc", "02_index_paralytic", None, "paralytic_dose_unit_corrections", "intermediate_phi/step02__index_paralytic.parquet"),
     ("step02__index_paralytic_dose_summary.csv", "data", "02_index_paralytic", None, "index_dose", "intermediate_phi/step02__index_paralytic.parquet"),
     ("step02__paralytic_dose_raw_unit_counts.csv", "qc", "02_index_paralytic", None, "paralytic_dose_units", "intermediate_phi/step02__index_paralytic.parquet"),
     ("fig_B1__paralytic_dose_ecdf.csv", "figure_data", "02_index_paralytic", "B1", "figure_b1_df", "intermediate_phi/step02__index_paralytic.parquet"),
@@ -43,12 +42,17 @@ CATALOG = [
     ("step03__imv_transitions_per_window.csv", "data", "03_context", None, "transitions_in_window", "intermediate_phi/step03__index_context.parquet"),
     ("step03__sedation_summary.csv", "data", "03_context", None, "sedation_summary", "intermediate_phi/step03__index_context.parquet"),
     ("fig_E1__sedation_offset.csv", "figure_data", "03_context", "E1", "figure_e1_df", "intermediate_phi/step03__index_context.parquet"),
-    ("step03__sedation_dose_unit_corrections.csv", "qc", "03_context", None, "sedation_dose_unit_corrections", "intermediate_phi/step03__index_context.parquet"),
     ("fig_E2__sedation_dose_summary.csv", "figure_data", "03_context", "E2", "figure_e2_df", "intermediate_phi/step03__index_context.parquet"),
     ("step03__sedation_dose_raw_unit_counts.csv", "qc", "03_context", None, "sedation_dose_units", "intermediate_phi/step03__index_context.parquet"),
     ("fig_E3__sedation_dose_ecdf.csv", "figure_data", "03_context", "E3", "figure_e3_df", "intermediate_phi/step03__index_context.parquet"),
     ("step04__sofa_coverage.csv", "qc", "04_covariates", None, "sofa_coverage", "intermediate_phi/step04__index_covariates.parquet"),
     ("fig_T2__source_coverage.csv", "figure_data", "04_covariates", "T2", "figure_t2_df", "intermediate_phi/step04__index_covariates.parquet"),
+    ("step04__intubations_by_hospital_year.csv", "data", "04_covariates", None, "intubations_by_hospital_year", "intermediate_phi/step04__index_covariates.parquet"),
+    ("fig_B2__paralytic_dose_per_weight_ecdf.csv", "figure_data", "04_covariates", "B2", "figure_b2_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
+    ("fig_E4__sedation_dose_per_weight_ecdf.csv", "figure_data", "04_covariates", "E4", "figure_e4_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
+    ("step04__combined_induction_dose_distribution_percentiles.csv", "data", "04_covariates", None, "induction_dose_percentiles", "final_no_phi/fig_E4__sedation_dose_per_weight_ecdf.csv"),
+    ("fig_E5__induction_dose_tiers.csv", "figure_data", "04_covariates", "E5", "figure_e5_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
+    ("fig_G1__dose_per_weight_consort.csv", "figure_data", "04_covariates", "G1", "figure_g1_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
     ("table1_by_agent_block_readable.csv", "table", "05_table_one", None, "table1_block_readable", "intermediate_phi/step04__index_covariates.parquet"),
     ("table1_by_agent_block.json", "table", "05_table_one", None, "table1_block", "intermediate_phi/step04__index_covariates.parquet"),
     ("table1_by_agent_index_readable.csv", "table", "05_table_one", None, "table1_index_readable", "intermediate_phi/step04__index_covariates.parquet"),
@@ -66,6 +70,10 @@ FIGURES = [
     ("E1", "sedation_offset", "03_context", "figure_e1_df"),
     ("E2", "sedation_dose_summary", "03_context", "figure_e2_df"),
     ("E3", "sedation_dose_ecdf", "03_context", "figure_e3_df"),
+    ("B2", "paralytic_dose_per_weight_ecdf", "04_covariates", "figure_b2_df"),
+    ("E4", "sedation_dose_per_weight_ecdf", "04_covariates", "figure_e4_df"),
+    ("E5", "induction_dose_tiers", "04_covariates", "figure_e5_df"),
+    ("G1", "dose_per_weight_consort", "04_covariates", "figure_g1_df"),
     ("T1", "organ_support_by_window", "05_table_one", "figure_t1_df"),
     ("T2", "source_coverage", "05_table_one", "figure_t2_df"),
     ("F1", "cpt_cascade", "06_reference_cpt", "figure_f1_df"),
@@ -117,9 +125,10 @@ def main():
     assert not unexpected, f"undeclared or stale shareable artifacts: {unexpected}"
 
     missing_sources = sorted(
-        source_files
+        source
         for *_, source_files in CATALOG
-        if not (OUTPUT_DIR / source_files).exists()
+        for source in source_files.split("|")
+        if not (OUTPUT_DIR / source).exists()
     )
     assert not missing_sources, f"declared source artifacts are missing: {missing_sources}"
 

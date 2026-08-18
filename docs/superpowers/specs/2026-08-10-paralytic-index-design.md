@@ -65,10 +65,13 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | P42 | **Every medication in this study charted as exact `mg/kg` is treated as a mislabeled absolute `mg` dose for calculation at every site.** The raw value and unit remain unchanged in the raw-unit counts and P41 ECDFs; `step02__paralytic_dose_unit_corrections.csv` and `step03__sedation_dose_unit_corrections.csv` publish the affected counts per agent. Every other `/kg` unit still fails. Rows with a null/non-finite dose or null unit remain in administration and raw-unit counts but are excluded, with a logged count, from converted dose statistics. | Set by the study lead after consortium runs found `mg/kg` values whose magnitudes represented conventional absolute-mg doses, first for rocuronium and succinylcholine and then among the sedatives. Interpreting those literally and multiplying by adult weight would produce implausibly large doses. The correction remains visible rather than rewriting the source, and exact matching prevents this rule from discarding the weight axis from rate or other weight-based units. |
 | P43 | **Converted dose summaries use strict clinical plausibility ranges and publish mean, sample SD, median, p25 and p75.** Included doses satisfy `0 < dose < upper bound` after conversion: etomidate 200 mg, fentanyl 500 mcg, midazolam 50 mg, propofol 500 mg, rocuronium 400 mg, succinylcholine 400 mg and vecuronium 30 mg. Ketamine is unchanged because no threshold was supplied. Raw propofol `mcg` rows are excluded as inaccurate entries. These exclusions affect only converted summary tables and Figure E.2; administration detection, raw-unit counts and raw-unit ECDFs retain the source rows for QC. | Set by the study lead. The bounds remove clinically implausible data-entry artifacts without changing which administrations define an index event or sedation context. Applying them after conversion makes every threshold unit-explicit; retaining the raw QC artifacts makes every exclusion auditable. Mean and SD beside median and IQR make skew visible in the compact summary. |
 | P45 | **Generated artifact names encode ownership and figure lineage.** Every plotted dataframe is `figure_<id>_df`; its published CSV and PNG share `fig_<ID>__<description>`. Supporting outputs use `stepNN__<description>`, including PHI intermediates. The four `table1_by_agent_*` pooling names remain unchanged. `07_artifact_manifest.py` rejects stale, missing or undeclared shareable files and publishes producer, dataframe, sources, row count, size and SHA-256. | Set by the study lead for audit and control. A figure and its data can be paired by basename without reading code, while every non-figure file identifies its producer. Table 1 is the explicit exception because those names are an external consortium contract. |
+| P46 | **Dose/weight is an additive analysis using a separate corrected selector: latest valid 20-300 kg current-hospital weight at or before the event, otherwise latest prior-hospital weight within 28 days.** Existing raw ECDFs and Table 1 weight remain unchanged. Step 04 also publishes block-first event counts by configured healthcare system, event-time hospital, academic status and year; normalized ECDFs; etomidate/ketamine p1-p99; local four-tier integer counts; and a dose-specific eligibility flow. | Set by the study lead. Site tier numerators and denominators are collected now for later pooled logit random-effects analysis; local plots do not imply pooled estimates before all sites report. Full contract: `2026-08-18-dose-weight-and-site-counts-design.md`. |
+| P47 | **AMENDED 2026-08-18: every study medication has one required site-configured unit and only `mar_action_category == "given"` rows in that exact normalized unit enter any analysis.** `config["medication_dose_units"]` must specify all eight agents. Non-fentanyl agents allow `mg` or `mg/kg`; fentanyl allows `mcg` or `mcg/kg`. Values and units are never converted or relabeled. A configured `/kg` value is already normalized, needs no weight, and is not checked against an absolute-unit upper bound. | Set by the study lead after reviewing Rush and UCMC unit distributions. This supersedes P4, P18, P25 and P42, plus the action/unit clauses of P2, P41, P43 and P46. It removes `bolus`, prevents minority-unit rows from changing event denominators, and makes the selected site unit explicit and reproducible. |
 
-P42 supersedes P18's earlier statement that every `/kg` unit requires vitals. That remains the rule for every unit except exact `mg/kg` on the eight medication categories defined by P3 and P16.
-
-P43 amends P18's converted summary population and columns. It does not amend P41: the raw-unit ECDF remains intentionally unfiltered QC.
+P47 is the active medication action/unit contract. Earlier conversion, override, rate-only,
+and `given`/`bolus` language is retained above as decision history but is no longer operative.
+P43's mean/SD and median/IQR outputs remain; its absolute upper bounds apply only when the
+configured unit is absolute.
 
 ------------------------------------------------------------------------
 
@@ -94,7 +97,8 @@ utils/
         │
         │  medication_admin_intermittent
         │    med_category ∈ {rocuronium, succinylcholine, vecuronium}
-        │    mar_action_category ∈ {given, bolus}
+        │    mar_action_category == given
+        │    med_dose_unit == config unit for this medication
         ▼
   02_index_paralytic.py
         │
@@ -201,7 +205,7 @@ One definition, used by sub-analyses A and B alike:
 medication_admin_intermittent
   hospitalization_id ∈ cohort            (load-time filter)
   med_category ∈ {rocuronium, succinylcholine, vecuronium}       P3
-  mar_action_category ∈ {given, bolus}                           P4
+  mar_action_category == given + exact configured dose unit      P47
   columns: hospitalization_id, admin_dttm, med_category,
            mar_action_category, med_dose, med_dose_unit
 ```
@@ -321,9 +325,8 @@ Defined in §6.3–6.4. Published aggregates:
 | `step02__index_paralytic_summary.csv` | one row per `agent_label`: n index paralytics, n blocks, n patients, `n_coadmin` (index events folding more than one administration of that label), `span_minutes` median and max |
 | `step02__index_paralytic_dose_summary.csv` | `med_category` → cleaned n, mean, SD, median, p25, p75, in the standardised unit (P18, P43) |
 | `step02__paralytic_dose_raw_unit_counts.csv` | `med_category` × raw `med_dose_unit` → n administrations. Counts only — no dose statistics, so the table shows charting heterogeneity without reintroducing the split it replaced. |
-| `step02__paralytic_dose_unit_corrections.csv` | each paralytic's P42 `(med_category, mg/kg → mg)` rule → n affected administrations, including an explicit zero when absent |
 
-Doses are standardised to one preferred unit per `med_category` with clifpy before any statistic is taken, and the statistics are keyed on `med_category` alone (P18). P42's calculation-only override is applied before clifpy. The raw unit mix is published separately as `step02__paralytic_dose_raw_unit_counts.csv`; missing doses remain there but do not inflate the `n` in `step02__index_paralytic_dose_summary.csv`.
+Doses retain the exact configured unit and numeric value without conversion (P47). The unit-count file documents the selected analysis population; missing doses remain there but do not inflate the summary `n`.
 
 ### 7.3 C — the gap between index paralytics
 
@@ -385,7 +388,7 @@ Offset bins are `[−60,−55)`, … , `[55, 60]` — 24 bins, left-closed and r
 
 ### 7.5 E — sedation in the same window
 
-The identical window predicate as D (P15). Source: `medication_admin_intermittent`, `med_category ∈ {midazolam, etomidate, ketamine, propofol, fentanyl}` (P16), `mar_action_category ∈ {given, bolus}` (P4). **Every** administration in the window is kept (P17).
+The identical window predicate as D (P15). Source: `medication_admin_intermittent`, `med_category ∈ {midazolam, etomidate, ketamine, propofol, fentanyl}` (P16), `mar_action_category == given`, and the exact configured unit (P47). **Every qualifying** administration in the window is kept (P17).
 
 Recorded per index paralytic:
 
@@ -406,7 +409,6 @@ Ties on \|offset\| for `nearest_sedative_med` break alphabetically by `med_categ
 | `fig_E1__sedation_offset.csv` | 5-minute bins across `[−60, +60]` × `med_category` → n |
 | `fig_E2__sedation_dose_summary.csv` | `med_category` → cleaned n_admin_windows, mean, SD, median, p25, p75, in the standardised unit (P18, P43) |
 | `step03__sedation_dose_raw_unit_counts.csv` | `med_category` × raw `med_dose_unit` → n administrations, counts only |
-| `step03__sedation_dose_unit_corrections.csv` | each sedative's P42 `(med_category, mg/kg → mg)` rule → n affected administration-window pairs, including an explicit zero when absent |
 
 **Figure E.1** — offset histogram across ±60 min, one series per agent, drawn from `fig_E1__sedation_offset.csv`. **Figure E.2** — dose distribution per `med_category` in its standardised unit, drawn from `fig_E2__sedation_dose_summary.csv`. Each is written to a same-stem PNG. One panel per unit is retained, because fentanyl standardises to `mcg` and every other agent to `mg` (P18), and mg and mcg on a shared axis is a dual-axis chart in disguise. The raw unit mix is a table, not a figure.
 

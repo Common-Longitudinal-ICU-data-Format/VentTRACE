@@ -1,94 +1,31 @@
-"""Pins the polars -> pandas -> polars dose-unit-conversion boundary (spec P18,
-amended 2026-08-10).
-
-`convert_doses_to_preferred_units` is defined once in each of `02_index_paralytic.py`
-and `03_context.py` -- a deliberate duplicate, not a shared import (spec §4, P23):
-duplicated analysis logic risks visible divergence between the two notebooks, while a
-shared bug in a `utils/` helper would corrupt both identically and invisibly. This
-file extracts the function from BOTH notebooks and runs the identical test suite
-against each, so a future edit that quietly diverges the two copies fails here first.
-
-`clifpy.utils.unit_converter.convert_dose_units_by_med_category` takes pandas; this
-pipeline is polars everywhere else. The function under test is the whole boundary
-crossing, including P42's calculation-only unit overrides and the exclusion of rows
-without a usable dose. An integer row key plus the four columns the converter needs
-(`med_category`, `med_dose`, calculation `med_dose_unit`, an all-null `weight_kg`)
-go through pandas, and the result is joined back on the key -- never a datetime column.
-
-The function is lifted out of the notebooks by AST rather than imported: neither
-`02_index_paralytic` nor `03_context` is an importable module name, and importing
-either would run the pipeline against real PHI.
-
-Run:  uv run pytest tests/test_dose_conversion.py -v
-"""
+"""Configured medication-unit contract shared by steps 01-04."""
 
 import ast
-from functools import partial
+import json
 from pathlib import Path
 
 import polars as pl
 import pytest
 
-from clifpy.utils.unit_converter import convert_dose_units_by_med_category
 
-NOTEBOOKS = {
-    "02_index_paralytic": Path(__file__).parent.parent / "code" / "02_index_paralytic.py",
-    "03_context": Path(__file__).parent.parent / "code" / "03_context.py",
+ROOT = Path(__file__).parent.parent
+DOSE_NOTEBOOKS = {
+    label: ROOT / "code" / filename
+    for label, filename in {
+        "02_index_paralytic": "02_index_paralytic.py",
+        "03_context": "03_context.py",
+        "04_covariates": "04_covariates.py",
+    }.items()
 }
-
-FUNC_NAME = "convert_doses_to_preferred_units"
-FILTER_FUNC_NAME = "filter_doses_for_summary"
-RATE_FUNC_NAME = "rate_unit_expr"
-
-
-def _load_from_notebook(path, name, namespace=None):
-    """Compile a single named function out of a marimo notebook, exactly as
-    tests/test_collapse_agent_events.py and tests/test_pair_gaps.py do it."""
-    tree = ast.parse(path.read_text())
-    found = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == name
-    ]
-    assert len(found) == 1, f"expected exactly one def {name} in {path.name}, found {len(found)}"
-    module = ast.Module(body=[found[0]], type_ignores=[])
-    ast.fix_missing_locations(module)
-    namespace = dict(namespace or {})
-    exec(compile(module, str(path), "exec"), namespace)
-    return namespace[name]
-
-
-def _load_literal_assignment(path, name):
-    tree = ast.parse(path.read_text())
-    found = [
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
-    ]
-    assert len(found) == 1, f"expected exactly one assignment to {name} in {path.name}"
-    return ast.literal_eval(found[0])
-
-
-_NAMESPACE = {
-    "pl": pl,
-    "convert_dose_units_by_med_category": convert_dose_units_by_med_category,
+MEDICATION_NOTEBOOKS = {
+    label: ROOT / "code" / filename
+    for label, filename in {
+        "01_cohort": "01_cohort.py",
+        "02_index_paralytic": "02_index_paralytic.py",
+        "03_context": "03_context.py",
+    }.items()
 }
-
-_RAW_CONVERTERS = {
-    label: _load_from_notebook(path, FUNC_NAME, _NAMESPACE) for label, path in NOTEBOOKS.items()
-}
-RATE_EXPRESSIONS = {
-    label: _load_from_notebook(path, RATE_FUNC_NAME, {"pl": pl})
-    for label, path in NOTEBOOKS.items()
-}
-SUMMARY_FILTERS = {
-    label: _load_from_notebook(path, FILTER_FUNC_NAME, {"pl": pl})
-    for label, path in NOTEBOOKS.items()
-}
-
-# The spec's exact constant (brief, P18): mg for everything except fentanyl.
-PREFERRED_UNITS = {
+EXPECTED_UNITS = {
     "rocuronium": "mg",
     "succinylcholine": "mg",
     "vecuronium": "mg",
@@ -98,19 +35,7 @@ PREFERRED_UNITS = {
     "propofol": "mg",
     "fentanyl": "mcg",
 }
-
-UNIT_OVERRIDES = {
-    ("rocuronium", "mg/kg"): "mg",
-    ("succinylcholine", "mg/kg"): "mg",
-    ("vecuronium", "mg/kg"): "mg",
-    ("midazolam", "mg/kg"): "mg",
-    ("etomidate", "mg/kg"): "mg",
-    ("ketamine", "mg/kg"): "mg",
-    ("propofol", "mg/kg"): "mg",
-    ("fentanyl", "mg/kg"): "mg",
-}
-
-SUMMARY_UPPER_BOUNDS = {
+UPPER_BOUNDS = {
     "etomidate": 200.0,
     "fentanyl": 500.0,
     "midazolam": 50.0,
@@ -119,393 +44,132 @@ SUMMARY_UPPER_BOUNDS = {
     "succinylcholine": 400.0,
     "vecuronium": 30.0,
 }
-INVALID_SUMMARY_UNITS = [("propofol", "mcg")]
 
-CONVERTERS = {
-    label: partial(convert, unit_overrides=UNIT_OVERRIDES)
-    for label, convert in _RAW_CONVERTERS.items()
+
+def _load_function(path, name):
+    tree = ast.parse(path.read_text())
+    found = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    ]
+    assert len(found) == 1, f"expected one {name} in {path.name}"
+    module = ast.Module(body=[found[0]], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"pl": pl}
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace[name]
+
+
+PREPARERS = {
+    label: _load_function(path, "prepare_configured_doses")
+    for label, path in DOSE_NOTEBOOKS.items()
+}
+SUMMARY_FILTERS = {
+    label: _load_function(path, "filter_doses_for_summary")
+    for label, path in DOSE_NOTEBOOKS.items()
 }
 
-LABELS = sorted(CONVERTERS)
+
+def test_template_configures_every_study_medication():
+    config = json.loads((ROOT / "config" / "config_template.json").read_text())
+    assert config["medication_dose_units"] == EXPECTED_UNITS
 
 
-@pytest.mark.parametrize("label", LABELS)
-def test_both_notebooks_define_the_function(label):
-    """Guards the guard: if extraction silently returned nothing, every test below
-    would vacuously pass against a missing function."""
-    assert callable(CONVERTERS[label])
+@pytest.mark.parametrize("label,path", MEDICATION_NOTEBOOKS.items())
+def test_medication_event_paths_accept_given_only(label, path):
+    tree = ast.parse(path.read_text())
+    assignments = [
+        ast.literal_eval(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "MAR_ACTIONS" for target in node.targets)
+    ]
+    assert assignments == [["given"]], label
 
 
-@pytest.mark.parametrize("label", LABELS)
-def test_both_notebooks_define_the_same_global_unit_overrides(label):
-    assert _load_literal_assignment(NOTEBOOKS[label], "DOSE_UNIT_OVERRIDES") == UNIT_OVERRIDES
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_both_notebooks_define_the_same_summary_filter_rules(label):
-    assert (
-        _load_literal_assignment(NOTEBOOKS[label], "DOSE_SUMMARY_UPPER_BOUNDS")
-        == SUMMARY_UPPER_BOUNDS
-    )
-    assert (
-        _load_literal_assignment(NOTEBOOKS[label], "INVALID_DOSE_SUMMARY_UNITS")
-        == INVALID_SUMMARY_UNITS
-    )
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_summary_filter_uses_strict_clinical_bounds_and_leaves_ketamine_unfiltered(label):
-    df = pl.DataFrame(
+@pytest.mark.parametrize("label,prepare", PREPARERS.items())
+def test_configured_doses_are_not_converted_or_relabelled(label, prepare):
+    frame = pl.DataFrame(
         {
-            "row_id": list(range(18)),
-            "med_category": [
-                "etomidate", "etomidate",
-                "fentanyl", "fentanyl",
-                "midazolam", "midazolam",
-                "propofol", "propofol", "propofol",
-                "rocuronium", "rocuronium",
-                "succinylcholine", "succinylcholine",
-                "vecuronium", "vecuronium", "vecuronium",
-                "ketamine", "ketamine",
-            ],
-            "med_dose_unit": [
-                "mg", "mg",
-                "mcg", "mcg",
-                "mg", "mg",
-                "mg", "mg", "mcg",
-                "mg", "mg",
-                "mg", "mg",
-                "mg", "mg", "mg",
-                "mg", "mg",
-            ],
-            "med_dose_converted": [
-                199.0, 200.0,
-                499.0, 500.0,
-                49.0, 50.0,
-                499.0, 500.0, 10.0,
-                399.0, 400.0,
-                399.0, 400.0,
-                -1.0, 29.0, 30.0,
-                0.0, 5_000.0,
-            ],
+            "med_category": ["rocuronium", "fentanyl"],
+            "med_dose": [50.0, 25.0],
+            "med_dose_unit": ["mg", "mcg"],
         }
     )
-
-    out = SUMMARY_FILTERS[label](
-        df, SUMMARY_UPPER_BOUNDS, INVALID_SUMMARY_UNITS
-    )
-
-    assert out.get_column("row_id").to_list() == [0, 2, 4, 6, 9, 11, 14, 16, 17]
+    out = prepare(frame, EXPECTED_UNITS)
+    assert out["med_dose_converted"].to_list() == [50.0, 25.0]
+    assert out["med_dose_unit_converted"].to_list() == ["mg", "mcg"]
+    assert out["_convert_status"].to_list() == ["configured_unit"] * 2
 
 
-@pytest.mark.parametrize("label", LABELS)
-def test_summary_filter_rejects_non_positive_doses_for_bounded_agents(label):
-    df = pl.DataFrame(
+@pytest.mark.parametrize("label,prepare", PREPARERS.items())
+def test_per_kg_configured_dose_is_preserved(label, prepare):
+    units = {**EXPECTED_UNITS, "rocuronium": "mg/kg"}
+    frame = pl.DataFrame(
         {
-            "med_category": ["rocuronium", "rocuronium", "rocuronium"],
+            "med_category": ["rocuronium"],
+            "med_dose": [1.2],
+            "med_dose_unit": ["mg/kg"],
+        }
+    )
+    out = prepare(frame, units)
+    assert out["med_dose_converted"].to_list() == [1.2]
+    assert out["med_dose_unit_converted"].to_list() == ["mg/kg"]
+
+
+@pytest.mark.parametrize("label,prepare", PREPARERS.items())
+def test_nonconfigured_unit_is_rejected(label, prepare):
+    frame = pl.DataFrame(
+        {
+            "med_category": ["rocuronium"],
+            "med_dose": [1.2],
+            "med_dose_unit": ["mg/kg"],
+        }
+    )
+    with pytest.raises(AssertionError, match="non-configured"):
+        prepare(frame, EXPECTED_UNITS)
+
+
+@pytest.mark.parametrize("label,prepare", PREPARERS.items())
+def test_unusable_doses_are_excluded(label, prepare):
+    frame = pl.DataFrame(
+        {
+            "med_category": ["rocuronium"] * 3,
+            "med_dose": [50.0, None, float("nan")],
             "med_dose_unit": ["mg", "mg", "mg"],
-            "med_dose_converted": [-1.0, 0.0, 1.0],
         }
     )
-
-    out = SUMMARY_FILTERS[label](
-        df, SUMMARY_UPPER_BOUNDS, INVALID_SUMMARY_UNITS
-    )
-
-    assert out.get_column("med_dose_converted").to_list() == [1.0]
+    assert prepare(frame, EXPECTED_UNITS).height == 1
 
 
-@pytest.mark.parametrize("label", LABELS)
-def test_summary_filter_normalizes_propofol_raw_unit_for_matching(label):
-    df = pl.DataFrame(
+@pytest.mark.parametrize("label,filter_doses", SUMMARY_FILTERS.items())
+def test_absolute_bounds_do_not_apply_to_configured_per_kg_units(label, filter_doses):
+    frame = pl.DataFrame(
         {
-            "med_category": [" PROPOFOL ", "propofol"],
-            "med_dose_unit": [" MCG ", "mg"],
-            "med_dose_converted": [10.0, 10.0],
+            "row_id": [0, 1, 2, 3, 4],
+            "med_category": ["rocuronium"] * 4 + ["ketamine"],
+            "med_dose_unit": ["mg", "mg", "mg", "mg/kg", "mg"],
+            "med_dose_converted": [-1.0, 399.0, 400.0, 500.0, 5_000.0],
         }
     )
-
-    out = SUMMARY_FILTERS[label](
-        df, SUMMARY_UPPER_BOUNDS, INVALID_SUMMARY_UNITS
-    )
-
-    assert out.height == 1
-    assert out.get_column("med_dose_unit").to_list() == ["mg"]
+    out = filter_doses(frame, UPPER_BOUNDS)
+    assert out["row_id"].to_list() == [1, 3, 4]
 
 
-@pytest.mark.parametrize("label", LABELS)
-def test_dose_summary_cells_publish_mean_and_sample_sd(label):
-    tree = ast.parse(NOTEBOOKS[label].read_text())
-    keyword_names = [
+@pytest.mark.parametrize("label,path", DOSE_NOTEBOOKS.items())
+def test_no_clifpy_dose_converter_remains(label, path):
+    assert "convert_dose_units_by_med_category" not in path.read_text(), label
+
+
+@pytest.mark.parametrize("label,path", DOSE_NOTEBOOKS.items())
+def test_dose_summaries_still_publish_mean_and_sample_sd(label, path):
+    tree = ast.parse(path.read_text())
+    keywords = {
         keyword.arg
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         for keyword in node.keywords
-    ]
-
-    assert "mean_dose" in keyword_names
-    assert "sd_dose" in keyword_names
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_rate_units_are_identified_before_medication_analysis(label):
-    df = pl.DataFrame(
-        {
-            "med_dose_unit": [
-                "mcg/hr",
-                "mg/kg/min",
-                "ml/hour",
-                "mcg per minute",
-                "mg/day",
-                "mg",
-                "mcg",
-                None,
-            ]
-        }
-    ).with_columns(is_rate=RATE_EXPRESSIONS[label]("med_dose_unit"))
-
-    assert df.get_column("is_rate").to_list() == [
-        True,
-        True,
-        True,
-        True,
-        True,
-        False,
-        False,
-        False,
-    ]
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_mixed_units_convert_to_the_preferred_unit_with_correct_arithmetic(label):
-    """A frame mixing mg and mcg for one category converts to the preferred unit;
-    1 mg = 1,000 mcg is the arithmetic this pins."""
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["ketamine", "ketamine"],
-            "med_dose": [50.0, 30_000.0],  # 50 mg, and 30,000 mcg == 30 mg
-            "med_dose_unit": ["mg", "mcg"],
-        }
-    )
-    out = convert(df, PREFERRED_UNITS)
-
-    assert out.height == 2
-    assert set(out.get_column("med_dose_unit_converted").to_list()) == {"mg"}
-    assert set(out.get_column("_unit_class").to_list()) == {"amount"}
-    assert set(out.get_column("_convert_status").to_list()) == {"success"}
-    assert sorted(out.get_column("med_dose_converted").to_list()) == pytest.approx(
-        [30.0, 50.0]
-    )
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_an_unapproved_kg_unit_raises_before_the_converter_ever_runs(label):
-    """P42 applies only to exact mg/kg, not genuinely weight-based rate units."""
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["propofol"],
-            "med_dose": [50.0],
-            "med_dose_unit": ["mcg/kg/min"],
-        }
-    )
-    with pytest.raises(AssertionError, match="weight-based dosing"):
-        convert(df, PREFERRED_UNITS)
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_a_kg_unit_is_detected_case_insensitively(label):
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["propofol"],
-            "med_dose": [50.0],
-            "med_dose_unit": ["MCG/KG/MIN"],
-        }
-    )
-    with pytest.raises(AssertionError, match="weight-based dosing"):
-        convert(df, PREFERRED_UNITS)
-
-
-@pytest.mark.parametrize("label", LABELS)
-@pytest.mark.parametrize("med_category", PREFERRED_UNITS)
-def test_mg_per_kg_is_assumed_to_be_absolute_mg_for_every_med(label, med_category):
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": [med_category],
-            "med_dose": [50.0],
-            "med_dose_unit": ["mg/kg"],
-        }
-    )
-    out = convert(df, PREFERRED_UNITS)
-
-    assert out.get_column("med_dose").to_list() == [50.0]
-    assert out.get_column("med_dose_unit").to_list() == ["mg/kg"]
-    expected_dose = 50_000.0 if med_category == "fentanyl" else 50.0
-    assert out.get_column("med_dose_converted").to_list() == [expected_dose]
-    assert out.get_column("med_dose_unit_converted").to_list() == [
-        PREFERRED_UNITS[med_category]
-    ]
-    assert out.get_column("_convert_status").to_list() == ["success"]
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_override_matching_is_case_insensitive(label):
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["PROPOFOL"],
-            "med_dose": [50.0],
-            "med_dose_unit": ["MG/KG"],
-        }
-    )
-    out = convert(df, {**PREFERRED_UNITS, "PROPOFOL": "mg"})
-
-    assert out.get_column("med_dose_unit").to_list() == ["MG/KG"]
-    assert out.get_column("med_dose_converted").to_list() == [50.0]
-    assert out.get_column("med_dose_unit_converted").to_list() == ["mg"]
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_rows_without_a_usable_dose_are_excluded(label):
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["rocuronium"] * 4,
-            "med_dose": [50.0, None, float("nan"), 40.0],
-            "med_dose_unit": ["mg", None, "mg", None],
-        }
-    )
-    out = convert(df, PREFERRED_UNITS)
-
-    assert out.height == 1
-    assert out.get_column("med_dose").to_list() == [50.0]
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_an_unrecognized_unit_raises_rather_than_being_silently_dropped(label):
-    """A converter that dropped an unrecognised unit would shrink the denominator
-    without anything raising. This must never be filtered out."""
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["propofol"],
-            "med_dose": [1.0],
-            "med_dose_unit": ["puffs"],
-        }
-    )
-    with pytest.raises(AssertionError, match="failed unit conversion"):
-        convert(df, PREFERRED_UNITS)
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_row_count_is_preserved(label):
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["fentanyl", "fentanyl", "midazolam"],
-            "med_dose": [50.0, 100.0, 2.0],
-            "med_dose_unit": ["mcg", "mcg", "mg"],
-        }
-    )
-    out = convert(df, PREFERRED_UNITS)
-    assert out.height == df.height
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_the_row_key_round_trips_so_duplicate_rows_cannot_fan_out(label):
-    """Three rows sharing an identical (med_category, med_dose, med_dose_unit) triple
-    must come back as three rows, unchanged and unshuffled. A join performed on those
-    natural columns instead of the row key would either fan the duplicates out
-    (a join on non-unique columns multiplies) or silently collapse them -- either is a
-    denominator bug this test is built to catch."""
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["rocuronium", "rocuronium", "rocuronium"],
-            "med_dose": [50.0, 50.0, 50.0],
-            "med_dose_unit": ["mg", "mg", "mg"],
-        }
-    )
-    out = convert(df, PREFERRED_UNITS)
-
-    assert out.height == 3
-    assert out.get_column("med_dose_converted").to_list() == [50.0, 50.0, 50.0]
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_n_in_preferred_unit_counts_rows_already_in_the_preferred_unit(label):
-    """Pins the derivation both notebooks use for the `n_in_preferred_unit` column in
-    step02__index_paralytic_dose_summary.csv / fig_E2__sedation_dose_summary.csv:
-    a row-wise comparison of the RAW
-    `med_dose_unit` against `med_dose_unit_converted`, summed per med_category.
-
-    Ketamine at this site is the motivating case: 8 of 13 administrations were
-    charted in mcg and only 5 already in the preferred mg, so the published median
-    pools two unit populations rather than one. This frame mirrors that shape (2 raw
-    mg, 3 raw mcg, all converting to mg) and pins that the column reads 2, not 5 and
-    not 0 -- a reader must be able to see the split without opening the companion
-    counts-only table.
-    """
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["ketamine"] * 5,
-            "med_dose": [50.0, 60.0, 30.0, 31.0, 40.0],
-            "med_dose_unit": ["mg", "mg", "mcg", "mcg", "mcg"],
-        }
-    )
-    out = convert(df, PREFERRED_UNITS)
-
-    n_in_preferred_unit = (
-        out.filter(pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")).height
-    )
-    assert n_in_preferred_unit == 2
-    assert out.height == 5  # n vs n_in_preferred_unit is the "5 of which 2" signal
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_n_in_preferred_unit_equals_n_when_every_row_is_already_the_preferred_unit(label):
-    """The agents unaffected by the contamination (rocuronium, propofol at this site):
-    n_in_preferred_unit must equal n exactly, not merely be close to it."""
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["rocuronium", "rocuronium", "rocuronium"],
-            "med_dose": [50.0, 50.0, 100.0],
-            "med_dose_unit": ["mg", "mg", "mg"],
-        }
-    )
-    out = convert(df, PREFERRED_UNITS)
-    n_in_preferred_unit = (
-        out.filter(pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")).height
-    )
-    assert n_in_preferred_unit == out.height == 3
-
-
-@pytest.mark.parametrize("label", LABELS)
-def test_row_order_and_original_columns_are_preserved(label):
-    """The returned frame lines back up with the input row for row -- necessary for
-    every downstream group_by to attribute the right converted dose to the right
-    original administration."""
-    convert = CONVERTERS[label]
-    df = pl.DataFrame(
-        {
-            "med_category": ["vecuronium", "rocuronium", "succinylcholine"],
-            "med_dose": [10.0, 50.0, 100.0],
-            "med_dose_unit": ["mg", "mg", "mg"],
-            "offset_minutes": [-5.0, 0.0, 12.0],
-        }
-    )
-    out = convert(df, PREFERRED_UNITS)
-
-    assert out.get_column("med_category").to_list() == df.get_column("med_category").to_list()
-    assert out.get_column("med_dose").to_list() == df.get_column("med_dose").to_list()
-    assert out.get_column("offset_minutes").to_list() == df.get_column(
-        "offset_minutes"
-    ).to_list()
-    assert out.get_column("med_dose_converted").to_list() == df.get_column(
-        "med_dose"
-    ).to_list()  # already all mg -> preferred unit is mg -> unchanged
+    }
+    if label != "04_covariates":
+        assert {"mean_dose", "sd_dose"} <= keywords

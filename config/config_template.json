@@ -6,6 +6,16 @@
     "output_directory": "./output",
     "collapse_gap_minutes": 15,
     "context_window_minutes": 60,
+    "medication_dose_units": {
+        "rocuronium": "mg",
+        "succinylcholine": "mg",
+        "vecuronium": "mg",
+        "midazolam": "mg",
+        "etomidate": "mg",
+        "ketamine": "mg",
+        "propofol": "mg",
+        "fentanyl": "mcg"
+    },
     "stitch_hours": 6,
     "trach_window_hours": 24,
     "min_age": 18,

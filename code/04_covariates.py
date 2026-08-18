@@ -126,17 +126,51 @@ def _(Path, json):
         "medical_icu",
     ]
 
+    MEDICATION_DOSE_UNITS = config["medication_dose_units"]
+    _expected_meds = {
+        "rocuronium", "succinylcholine", "vecuronium", "midazolam",
+        "etomidate", "ketamine", "propofol", "fentanyl",
+    }
+    assert set(MEDICATION_DOSE_UNITS) == _expected_meds, (
+        "medication_dose_units must configure exactly the eight study medications"
+    )
+    _valid_units = {
+        med: ({"mcg", "mcg/kg"} if med == "fentanyl" else {"mg", "mg/kg"})
+        for med in _expected_meds
+    }
+    assert all(
+        unit in _valid_units[med] for med, unit in MEDICATION_DOSE_UNITS.items()
+    ), "invalid medication_dose_units; use mg[/kg], or mcg[/kg] for fentanyl"
+    DOSE_SUMMARY_UPPER_BOUNDS = {
+        "etomidate": 200.0,
+        "fentanyl": 500.0,
+        "midazolam": 50.0,
+        "propofol": 500.0,
+        "rocuronium": 400.0,
+        "succinylcholine": 400.0,
+        "vecuronium": 30.0,
+    }
+    DOSE_WEIGHT_LOOKBACK_DAYS = 28
+    DOSE_WEIGHT_MIN_KG = 20.0
+    DOSE_WEIGHT_MAX_KG = 300.0
+
     print(f"site           : {SITE}")
     print(f"lookback hours : {LOOKBACK_HOURS}")
     print(f"vasopressors   : {' | '.join(VASOPRESSORS)}")
     print(f"resp devices   : {' | '.join(RESPIRATORY_DEVICES)}")
     print(f"icu types      : {' | '.join(ICU_TYPES)}")
+    print(f"configured units: {MEDICATION_DOSE_UNITS}")
     return (
         DATA_DIR,
+        DOSE_SUMMARY_UPPER_BOUNDS,
+        DOSE_WEIGHT_LOOKBACK_DAYS,
+        DOSE_WEIGHT_MAX_KG,
+        DOSE_WEIGHT_MIN_KG,
         FIG_DIR,
         FILETYPE,
         ICU_TYPES,
         LOOKBACK_HOURS,
+        MEDICATION_DOSE_UNITS,
         PHI_DIR,
         RESPIRATORY_DEVICES,
         SHARE_DIR,
@@ -349,9 +383,11 @@ def _(
     TIMEZONE,
     bridge,
     bridge_hosp_ids,
+    cohort_index,
     pl,
     to_site_naive,
 ):
+    _patient_ids = cohort_index.get_column("patient_id").unique().to_list()
     _hosp_table = Hospitalization.from_file(
         data_directory=DATA_DIR,
         filetype=FILETYPE,
@@ -376,9 +412,33 @@ def _(
         .join(bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner")
     )
 
+    # Dose normalisation may fall back to a prior hospitalization within 28 days, so
+    # this second frame deliberately spans every hospitalization for cohort patients.
+    _hosp_all_table = Hospitalization.from_file(
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=[
+            "hospitalization_id",
+            "patient_id",
+            "admission_dttm",
+            "discharge_dttm",
+            "age_at_admission",
+            "discharge_category",
+        ],
+        filters={"patient_id": _patient_ids},
+    )
+    _hosp_all_pd = _hosp_all_table.df.copy()
+    for _c in ("admission_dttm", "discharge_dttm"):
+        _hosp_all_pd[_c] = to_site_naive(_hosp_all_pd[_c])
+    hospitalization_all = pl.from_pandas(_hosp_all_pd).with_columns(
+        pl.col("discharge_category").str.to_lowercase()
+    )
+
     print(f"hospitalizations loaded : {hospitalization.height:,}")
+    print(f"patient-history hospitalizations loaded : {hospitalization_all.height:,}")
     print(hospitalization.group_by("discharge_category").agg(n=pl.len()).sort("n", descending=True))
-    return (hospitalization,)
+    return hospitalization, hospitalization_all
 
 
 @app.cell
@@ -389,6 +449,8 @@ def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_na
         timezone=TIMEZONE,
         columns=[
             "hospitalization_id",
+            "hospital_id",
+            "hospital_type",
             "location_category",
             "location_type",
             "in_dttm",
@@ -403,6 +465,7 @@ def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_na
     adt = (
         pl.from_pandas(_adt_pd)
         .with_columns(
+            pl.col("hospital_type").str.to_lowercase(),
             pl.col("location_category").str.to_lowercase(),
             pl.col("location_type").str.to_lowercase(),
         )
@@ -655,7 +718,10 @@ def _(ICU_TYPES, adt, block_outcomes, hospitalization, patient, pl, spine):
         .join(hospitalization, on="encounter_block", how="left")
         .filter(
             (pl.col("t_dttm") >= pl.col("admission_dttm"))
-            & (pl.col("t_dttm") <= pl.col("discharge_dttm"))
+            & (
+                pl.col("discharge_dttm").is_null()
+                | (pl.col("t_dttm") <= pl.col("discharge_dttm"))
+            )
         )
         # A t0 landing in two member hospitalizations would mean overlapping stays, which
         # the stitcher should have merged -- it should not happen, but the tiebreak below
@@ -681,13 +747,21 @@ def _(ICU_TYPES, adt, block_outcomes, hospitalization, patient, pl, spine):
         spine.select("index_paralytic_id", "encounter_block", "t_dttm")
         .join(adt, on="encounter_block", how="left")
         .filter(
-            (pl.col("t_dttm") >= pl.col("in_dttm")) & (pl.col("t_dttm") < pl.col("out_dttm"))
+            (pl.col("t_dttm") >= pl.col("in_dttm"))
+            & (pl.col("out_dttm").is_null() | (pl.col("t_dttm") < pl.col("out_dttm")))
         )
-        .sort(["index_paralytic_id", "in_dttm", "location_category"])
+        .sort(["index_paralytic_id", "in_dttm", "location_category", "hospital_id"])
         .group_by("index_paralytic_id", maintain_order=True)
         .first()
         .select(
             "index_paralytic_id",
+            pl.col("hospital_id").fill_null("unknown").alias("hospital"),
+            pl.when(pl.col("hospital_type").is_null())
+            .then(pl.lit("unknown"))
+            .when(pl.col("hospital_type") == "academic")
+            .then(pl.lit("academic"))
+            .otherwise(pl.lit("non-academic"))
+            .alias("academic_status"),
             pl.when(
                 pl.col("location_category").is_in(["ed", "icu", "ward", "procedural"])
             )
@@ -716,6 +790,10 @@ def _(ICU_TYPES, adt, block_outcomes, hospitalization, patient, pl, spine):
         # which means "in a location that is neither ED nor ICU".
         .with_columns(pl.col("location_at_index").fill_null("unknown"))
         .with_columns(
+            pl.col("hospital").fill_null("unknown"),
+            pl.col("academic_status").fill_null("unknown"),
+        )
+        .with_columns(
             *[
                 (
                     (pl.col("location_at_index") == "icu")
@@ -742,6 +820,154 @@ def _(ICU_TYPES, adt, block_outcomes, hospitalization, patient, pl, spine):
 
 
 @app.cell
+def _(pl):
+    def select_dose_weights(
+        events,
+        hospitalizations,
+        weights,
+        lookback_days=28,
+        min_weight_kg=20.0,
+        max_weight_kg=300.0,
+    ):
+        """Select one weight for dose normalisation without changing Table 1 weight.
+
+        Current-hospital weights have priority and may come from any time at or before
+        the index. If none exists, use the latest prior-hospital weight recorded within
+        `lookback_days` before the index. Only finite values in the closed physiological
+        range are eligible. The complete sort makes equal-timestamp choices stable.
+        """
+        _event_cols = [
+            "index_paralytic_id",
+            "patient_id",
+            "current_hospitalization_id",
+            "t_dttm",
+        ]
+        _empty = events.select(
+            "index_paralytic_id",
+            pl.lit(None, dtype=pl.Float64).alias("dose_weight_kg"),
+            pl.lit(None, dtype=pl.String).alias("dose_weight_source"),
+            pl.lit(None, dtype=pl.Datetime).alias("dose_weight_recorded_dttm"),
+            pl.lit(None, dtype=pl.Float64).alias("dose_weight_age_days"),
+        )
+        if weights is None or weights.height == 0:
+            return _empty
+
+        _current_hosp = hospitalizations.select(
+            pl.col("hospitalization_id").alias("current_hospitalization_id"),
+            pl.col("admission_dttm").alias("current_admission_dttm"),
+        )
+        _weight_hosp = hospitalizations.select(
+            pl.col("hospitalization_id").alias("weight_hospitalization_id"),
+            "patient_id",
+            pl.col("admission_dttm").alias("weight_hospital_admission_dttm"),
+        )
+        _events = events.select(_event_cols).join(
+            _current_hosp, on="current_hospitalization_id", how="left"
+        )
+        _candidates = weights.select(
+            pl.col("hospitalization_id").alias("weight_hospitalization_id"),
+            "recorded_dttm",
+            pl.col("vital_value").alias("weight_kg"),
+        ).join(_weight_hosp, on="weight_hospitalization_id", how="inner")
+
+        _is_current = (
+            pl.col("weight_hospitalization_id")
+            == pl.col("current_hospitalization_id")
+        )
+        _is_prior = (
+            (pl.col("weight_hospital_admission_dttm") < pl.col("current_admission_dttm"))
+            & (
+                pl.col("recorded_dttm")
+                >= pl.col("t_dttm") - pl.duration(days=lookback_days)
+            )
+        )
+        _eligible = (
+            _events.join(_candidates, on="patient_id", how="inner")
+            .filter(
+                pl.col("recorded_dttm").is_not_null()
+                & (pl.col("recorded_dttm") <= pl.col("t_dttm"))
+                & pl.col("weight_kg").is_not_null()
+                & pl.col("weight_kg").is_finite()
+                & pl.col("weight_kg").is_between(
+                    min_weight_kg, max_weight_kg, closed="both"
+                )
+                & (_is_current | _is_prior)
+            )
+            .with_columns(
+                pl.when(_is_current)
+                .then(pl.lit(0))
+                .otherwise(pl.lit(1))
+                .alias("_source_order"),
+                pl.when(_is_current)
+                .then(pl.lit("current_hospitalization"))
+                .otherwise(pl.lit("prior_hospitalization_28d"))
+                .alias("dose_weight_source"),
+            )
+            .sort(
+                [
+                    "index_paralytic_id",
+                    "_source_order",
+                    "recorded_dttm",
+                    "weight_hospitalization_id",
+                    "weight_kg",
+                ],
+                descending=[False, False, True, False, False],
+            )
+            .group_by("index_paralytic_id", maintain_order=True)
+            .first()
+            .select(
+                "index_paralytic_id",
+                pl.col("weight_kg").alias("dose_weight_kg"),
+                "dose_weight_source",
+                pl.col("recorded_dttm").alias("dose_weight_recorded_dttm"),
+                (
+                    (pl.col("t_dttm") - pl.col("recorded_dttm")).dt.total_seconds()
+                    / 86400.0
+                ).alias("dose_weight_age_days"),
+            )
+        )
+        return _empty.select("index_paralytic_id").join(
+            _eligible, on="index_paralytic_id", how="left"
+        )
+
+    return (select_dose_weights,)
+
+
+@app.cell
+def _(SHARE_DIR, SITE, pl, publish, spine_resolved):
+    # One block-first event is the requested intubation-counting unit. This remains an
+    # operational VentTRACE definition, not confirmation of an endotracheal procedure.
+    intubations_by_hospital_year = (
+        spine_resolved.filter(pl.col("p_num") == 1)
+        .with_columns(pl.col("t_dttm").dt.year().cast(pl.Int16).alias("calendar_year"))
+        .group_by(["hospital", "academic_status", "calendar_year"])
+        .agg(n_intubations=pl.len())
+        .with_columns(
+            pl.lit(SITE).alias("healthcare_system"),
+            pl.lit("block-first VentTRACE paralytic-index event").alias("event_definition"),
+        )
+        .select(
+            "healthcare_system",
+            "hospital",
+            "academic_status",
+            "calendar_year",
+            "n_intubations",
+            "event_definition",
+        )
+        .sort(["healthcare_system", "hospital", "academic_status", "calendar_year"])
+    )
+    publish(
+        intubations_by_hospital_year,
+        SHARE_DIR / "step04__intubations_by_hospital_year.csv",
+        "step04__intubations_by_hospital_year",
+    )
+    assert intubations_by_hospital_year.get_column("n_intubations").sum() == spine_resolved.filter(
+        pl.col("p_num") == 1
+    ).height
+    return (intubations_by_hospital_year,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -758,13 +984,10 @@ def _(mo):
         the first; a null cannot be misread, and `fig_T2__source_coverage.csv` is what qualifies
         it.
 
-        **Do NOT apply `rate_unit_expr` here.** `02` and `03` drop rate-charted rows from
-        `medication_admin_intermittent` because a discrete push charted as `mcg/kg/min` is
-        an infusion misfiled as a bolus (commit `305de1f`). This table is the opposite
-        case: every row in `medication_admin_continuous` is rate-charted by definition, and
-        filtering on that would zero the vasopressor column entirely — which would read as
-        "no patient was on pressors" rather than as a bug. Presence of an infusion **is**
-        the exposure here; no dose or rate is read at all (P32).
+        The configured intermittent-dose unit filter does not apply here. Every row in
+        `medication_admin_continuous` is rate-charted by definition, and filtering by an
+        intermittent amount unit would zero the vasopressor column entirely. Presence of
+        an infusion **is** the exposure here; no dose or rate is read at all (P32).
         """
     )
     return
@@ -870,6 +1093,163 @@ def _(LOOKBACK_HOURS, in_lookback, pl):
         )
 
     return category_exposure_flags, exposure_flags, load_optional
+
+
+@app.cell
+def _(
+    DATA_DIR,
+    DOSE_WEIGHT_LOOKBACK_DAYS,
+    DOSE_WEIGHT_MAX_KG,
+    DOSE_WEIGHT_MIN_KG,
+    FILETYPE,
+    PHI_DIR,
+    TIMEZONE,
+    Vitals,
+    hospitalization_all,
+    load_optional,
+    pl,
+    select_dose_weights,
+    spine_resolved,
+    to_site_naive,
+):
+    _all_hosp_ids = hospitalization_all.get_column("hospitalization_id").unique().to_list()
+    _weight_pd = load_optional(
+        Vitals,
+        "vitals weights for dose normalisation",
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"],
+        filters={
+            "hospitalization_id": _all_hosp_ids,
+            "vital_category": [
+                "weight_kg",
+                "WEIGHT_KG",
+                "Weight_Kg",
+                "Weight_kg",
+                "weightKg",
+                "WeightKg",
+            ],
+        },
+    )
+    if _weight_pd is None:
+        dose_weight_rows = None
+    else:
+        _weight_pd["recorded_dttm"] = to_site_naive(_weight_pd["recorded_dttm"])
+        dose_weight_rows = pl.from_pandas(_weight_pd).filter(
+            pl.col("vital_category")
+            .str.to_lowercase()
+            .str.replace_all("_", "")
+            == "weightkg"
+        )
+
+    dose_weights = select_dose_weights(
+        spine_resolved.select(
+            "index_paralytic_id",
+            "patient_id",
+            pl.col("hospitalization_id").alias("current_hospitalization_id"),
+            "t_dttm",
+        ),
+        hospitalization_all,
+        dose_weight_rows,
+        lookback_days=DOSE_WEIGHT_LOOKBACK_DAYS,
+        min_weight_kg=DOSE_WEIGHT_MIN_KG,
+        max_weight_kg=DOSE_WEIGHT_MAX_KG,
+    )
+    assert dose_weights.height == spine_resolved.height
+    dose_weights.write_parquet(PHI_DIR / "step04__dose_weights.parquet")
+    print("dose-normalisation weight sources:")
+    print(
+        dose_weights.with_columns(
+            pl.col("dose_weight_source").fill_null("no_eligible_weight")
+        )
+        .group_by("dose_weight_source")
+        .agg(n_events=pl.len())
+        .sort("n_events", descending=True)
+    )
+    return dose_weight_rows, dose_weights
+
+
+@app.cell
+def _(pl):
+    def prepare_configured_doses(df, configured_units):
+        """Keep finite doses in their exact configured unit without conversion."""
+        _usable = df.filter(
+            pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & pl.col("med_dose_unit").is_not_null()
+        )
+        _expected_unit = pl.col("med_category").replace_strict(configured_units)
+        assert _usable.filter(pl.col("med_dose_unit") != _expected_unit).height == 0, (
+            "a non-configured medication unit reached dose analysis"
+        )
+        return _usable.with_columns(
+            pl.col("med_dose").alias("med_dose_converted"),
+            pl.col("med_dose_unit").alias("med_dose_unit_converted"),
+            pl.lit("amount").alias("_unit_class"),
+            pl.lit("configured_unit").alias("_convert_status"),
+        )
+
+    def filter_doses_for_summary(df, upper_bounds):
+        """Apply positive-dose checks and absolute-unit clinical upper bounds."""
+        _category = pl.col("med_category").str.strip_chars().str.to_lowercase()
+        _raw_unit = pl.col("med_dose_unit").str.strip_chars().str.to_lowercase()
+        _upper_bound = pl.lit(None, dtype=pl.Float64)
+        for _med, _bound in upper_bounds.items():
+            _upper_bound = (
+                pl.when(_category == _med)
+                .then(pl.lit(float(_bound)))
+                .otherwise(_upper_bound)
+            )
+        return (
+            df.with_columns(
+                _upper_bound.alias("_upper_bound"),
+            )
+            .filter(
+                (pl.col("med_dose_converted") > 0)
+                & (
+                    _raw_unit.str.ends_with("/kg")
+                    | pl.col("_upper_bound").is_null()
+                    | (
+                        pl.col("med_dose_converted") < pl.col("_upper_bound")
+                    )
+                )
+            )
+            .drop("_upper_bound")
+        )
+
+    def ecdf_by_dose_per_weight(df):
+        """Integer-count ECDF suitable for concatenation across consortium sites."""
+        _group = ["med_category", "dose_per_weight_unit"]
+        return (
+            df.filter(
+                pl.col("dose_per_weight").is_not_null()
+                & pl.col("dose_per_weight").is_finite()
+            )
+            .group_by([*_group, "dose_per_weight"])
+            .agg(n_at_dose=pl.len())
+            .sort([*_group, "dose_per_weight"])
+            .with_columns(
+                n_cum=pl.col("n_at_dose").cum_sum().over(_group),
+                n_total=pl.col("n_at_dose").sum().over(_group),
+            )
+            .with_columns(ecdf=(pl.col("n_cum") / pl.col("n_total")).round(6))
+            .select(
+                "med_category",
+                "dose_per_weight_unit",
+                "dose_per_weight",
+                "n_at_dose",
+                "n_cum",
+                "n_total",
+                "ecdf",
+            )
+        )
+
+    return (
+        ecdf_by_dose_per_weight,
+        filter_doses_for_summary,
+        prepare_configured_doses,
+    )
 
 
 @app.cell
@@ -1477,6 +1857,510 @@ def _(
         "fig_T2__source_coverage",
     )
     return (covariate_coverage,)
+
+
+@app.cell
+def _(
+    DOSE_SUMMARY_UPPER_BOUNDS,
+    MEDICATION_DOSE_UNITS,
+    SHARE_DIR,
+    SITE,
+    dose_weights,
+    ecdf_by_dose_per_weight,
+    filter_doses_for_summary,
+    index_context,
+    pl,
+    prepare_configured_doses,
+    publish,
+):
+    _dose_weight = dose_weights.select("index_paralytic_id", "dose_weight_kg")
+    paralytic_source = (
+        index_context.select("index_paralytic_id", "doses")
+        .join(_dose_weight, on="index_paralytic_id", how="left")
+        .explode("doses")
+        .unnest("doses")
+        .filter(pl.col("med_category").is_not_null())
+    )
+    sedation_source = (
+        index_context.select("index_paralytic_id", "sedatives")
+        .join(_dose_weight, on="index_paralytic_id", how="left")
+        .explode("sedatives")
+        .unnest("sedatives")
+        .filter(pl.col("med_category").is_not_null())
+    )
+
+    def _usable(frame):
+        return frame.filter(
+            pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & pl.col("med_dose_unit").is_not_null()
+        )
+
+    def _normalised(frame):
+        _already_per_kg = pl.col("med_dose_unit_converted").str.ends_with("/kg")
+        return (
+            frame.filter(_already_per_kg | pl.col("dose_weight_kg").is_not_null())
+            .with_columns(
+                pl.when(_already_per_kg)
+                .then(pl.col("med_dose_converted"))
+                .otherwise(pl.col("med_dose_converted") / pl.col("dose_weight_kg"))
+                .alias("dose_per_weight"),
+                pl.when(_already_per_kg)
+                .then(pl.col("med_dose_unit_converted"))
+                .otherwise(pl.col("med_dose_unit_converted") + pl.lit("/kg"))
+                .alias("dose_per_weight_unit"),
+            )
+            .filter(
+                pl.col("dose_per_weight").is_not_null()
+                & pl.col("dose_per_weight").is_finite()
+            )
+        )
+
+    paralytic_usable = _usable(paralytic_source)
+    sedation_usable = _usable(sedation_source)
+    paralytic_converted = prepare_configured_doses(
+        paralytic_usable, MEDICATION_DOSE_UNITS
+    )
+    sedation_converted = prepare_configured_doses(
+        sedation_usable, MEDICATION_DOSE_UNITS
+    )
+    paralytic_plausible = filter_doses_for_summary(
+        paralytic_converted, DOSE_SUMMARY_UPPER_BOUNDS
+    )
+    sedation_plausible = filter_doses_for_summary(
+        sedation_converted, DOSE_SUMMARY_UPPER_BOUNDS
+    )
+    paralytic_normalised = _normalised(paralytic_plausible)
+    sedation_normalised = _normalised(sedation_plausible)
+
+    paralytic_dose_per_weight_ecdf = ecdf_by_dose_per_weight(
+        paralytic_normalised
+    ).with_columns(pl.lit(SITE).alias("site_name")).select(
+        "site_name",
+        "med_category",
+        "dose_per_weight_unit",
+        "dose_per_weight",
+        "n_at_dose",
+        "n_cum",
+        "n_total",
+        "ecdf",
+    )
+    sedation_dose_per_weight_ecdf = ecdf_by_dose_per_weight(
+        sedation_normalised
+    ).with_columns(pl.lit(SITE).alias("site_name")).select(
+        "site_name",
+        "med_category",
+        "dose_per_weight_unit",
+        "dose_per_weight",
+        "n_at_dose",
+        "n_cum",
+        "n_total",
+        "ecdf",
+    )
+    publish(
+        paralytic_dose_per_weight_ecdf,
+        SHARE_DIR / "fig_B2__paralytic_dose_per_weight_ecdf.csv",
+        "fig_B2__paralytic_dose_per_weight_ecdf",
+    )
+    publish(
+        sedation_dose_per_weight_ecdf,
+        SHARE_DIR / "fig_E4__sedation_dose_per_weight_ecdf.csv",
+        "fig_E4__sedation_dose_per_weight_ecdf",
+    )
+
+    _induction_source = sedation_source.filter(
+        pl.col("med_category").is_in(["etomidate", "ketamine"])
+    )
+    _induction_usable = sedation_usable.filter(
+        pl.col("med_category").is_in(["etomidate", "ketamine"])
+    )
+    _induction_converted = sedation_converted.filter(
+        pl.col("med_category").is_in(["etomidate", "ketamine"])
+    )
+    _induction_plausible = sedation_plausible.filter(
+        pl.col("med_category").is_in(["etomidate", "ketamine"])
+    )
+    _induction_weighted = sedation_normalised.filter(
+        pl.col("med_category").is_in(["etomidate", "ketamine"])
+    )
+    induction_normalised = _induction_weighted
+
+    _percentile_rows = []
+    for _drug in ("etomidate", "ketamine"):
+        _drug_frame = induction_normalised.filter(pl.col("med_category") == _drug)
+        if _drug_frame.height == 0:
+            continue
+        for _percentile in range(1, 100):
+            _value = _drug_frame.select(
+                pl.col("dose_per_weight").quantile(
+                    _percentile / 100.0, interpolation="linear"
+                )
+            ).item()
+            _percentile_rows.append(
+                {
+                    "site_name": SITE,
+                    "drug": _drug,
+                    "percentile": _percentile,
+                    "dose_mg_per_kg": _value,
+                    "n_admin_windows": _drug_frame.height,
+                }
+            )
+    induction_dose_percentiles = pl.DataFrame(
+        _percentile_rows,
+        schema={
+            "site_name": pl.String,
+            "drug": pl.String,
+            "percentile": pl.Int64,
+            "dose_mg_per_kg": pl.Float64,
+            "n_admin_windows": pl.Int64,
+        },
+    ).sort(["site_name", "drug", "percentile"])
+    publish(
+        induction_dose_percentiles,
+        SHARE_DIR / "step04__combined_induction_dose_distribution_percentiles.csv",
+        "step04__combined_induction_dose_distribution_percentiles",
+    )
+
+    _tiered = induction_normalised.with_columns(
+        pl.when(
+            ((pl.col("med_category") == "etomidate") & (pl.col("dose_per_weight") < 0.20))
+            | ((pl.col("med_category") == "ketamine") & (pl.col("dose_per_weight") < 1.00))
+        )
+        .then(pl.lit("reduced"))
+        .when(
+            (
+                (pl.col("med_category") == "etomidate")
+                & (pl.col("dose_per_weight") < 0.25)
+            )
+            | (
+                (pl.col("med_category") == "ketamine")
+                & (pl.col("dose_per_weight") < 1.50)
+            )
+        )
+        .then(pl.lit("intermediate_reduced"))
+        .when(
+            (
+                (pl.col("med_category") == "etomidate")
+                & (pl.col("dose_per_weight") < 0.30)
+            )
+            | (
+                (pl.col("med_category") == "ketamine")
+                & (pl.col("dose_per_weight") < 2.00)
+            )
+        )
+        .then(pl.lit("intermediate_full"))
+        .otherwise(pl.lit("full"))
+        .alias("dose_tier")
+    )
+    _tier_grid = pl.DataFrame(
+        {
+            "drug": [drug for drug in ("etomidate", "ketamine") for _ in range(4)],
+            "dose_tier": [
+                tier
+                for _ in range(2)
+                for tier in (
+                    "reduced",
+                    "intermediate_reduced",
+                    "intermediate_full",
+                    "full",
+                )
+            ],
+            "tier_order": [1, 2, 3, 4] * 2,
+        }
+    )
+    _tier_counts = (
+        _tiered.group_by([pl.col("med_category").alias("drug"), "dose_tier"])
+        .agg(n_admin_windows=pl.len())
+    )
+    induction_dose_tiers = (
+        _tier_grid.join(_tier_counts, on=["drug", "dose_tier"], how="left")
+        .with_columns(pl.col("n_admin_windows").fill_null(0))
+        .with_columns(pl.col("n_admin_windows").sum().over("drug").alias("n_total"))
+        .with_columns(
+            pl.when(pl.col("n_total") > 0)
+            .then(100.0 * pl.col("n_admin_windows") / pl.col("n_total"))
+            .otherwise(None)
+            .alias("pct"),
+            pl.lit(SITE).alias("site_name"),
+            pl.lit("(index paralytic, administration) pairs within +/-60 min").alias(
+                "count_unit"
+            ),
+        )
+        .select(
+            "site_name",
+            "drug",
+            "dose_tier",
+            "tier_order",
+            "n_admin_windows",
+            "n_total",
+            "pct",
+            "count_unit",
+        )
+        .sort(["site_name", "drug", "tier_order"])
+    )
+    publish(
+        induction_dose_tiers,
+        SHARE_DIR / "fig_E5__induction_dose_tiers.csv",
+        "fig_E5__induction_dose_tiers",
+    )
+
+    def _flow(population, count_unit, stages):
+        _rows = []
+        _previous = None
+        for _order, (_stage, _count) in enumerate(stages, start=1):
+            _rows.append(
+                {
+                    "site_name": SITE,
+                    "population": population,
+                    "count_unit": count_unit,
+                    "stage_order": _order,
+                    "stage": _stage,
+                    "n_remaining": _count,
+                    "n_excluded": 0 if _previous is None else _previous - _count,
+                }
+            )
+            _previous = _count
+        return _rows
+
+    _flow_rows = []
+    _flow_rows.extend(
+        _flow(
+            "paralytic",
+            "administrations",
+            [
+                ("source dose rows", paralytic_source.height),
+                ("finite dose and non-null unit", paralytic_usable.height),
+                ("positive dose and applicable absolute bound", paralytic_plausible.height),
+                ("valid weight or configured per-kg unit", paralytic_normalised.height),
+            ],
+        )
+    )
+    _flow_rows.extend(
+        _flow(
+            "sedation",
+            "administration-window pairs",
+            [
+                ("source dose rows", sedation_source.height),
+                ("finite dose and non-null unit", sedation_usable.height),
+                ("positive dose and applicable absolute bound", sedation_plausible.height),
+                ("valid weight or configured per-kg unit", sedation_normalised.height),
+            ],
+        )
+    )
+    _flow_rows.extend(
+        _flow(
+            "induction tiers",
+            "etomidate/ketamine administration-window pairs",
+            [
+                ("source etomidate/ketamine rows", _induction_source.height),
+                ("finite dose and non-null unit", _induction_usable.height),
+                ("positive dose and applicable absolute bound", _induction_plausible.height),
+                ("valid weight or configured per-kg unit", _induction_weighted.height),
+                ("dose/weight calculated", induction_normalised.height),
+            ],
+        )
+    )
+    dose_per_weight_consort = pl.DataFrame(_flow_rows).sort(
+        ["population", "stage_order"]
+    )
+    publish(
+        dose_per_weight_consort,
+        SHARE_DIR / "fig_G1__dose_per_weight_consort.csv",
+        "fig_G1__dose_per_weight_consort",
+    )
+    return (
+        dose_per_weight_consort,
+        induction_dose_percentiles,
+        induction_dose_tiers,
+        induction_normalised,
+        paralytic_dose_per_weight_ecdf,
+        paralytic_normalised,
+        sedation_dose_per_weight_ecdf,
+        sedation_normalised,
+    )
+
+
+@app.cell
+def _():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return (plt,)
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    def _draw_ecdf(csv_name, png_name, title):
+        _df = pl.read_csv(SHARE_DIR / csv_name)
+        _groups = (
+            _df.select("med_category", "dose_per_weight_unit")
+            .unique()
+            .sort(["med_category", "dose_per_weight_unit"])
+            .rows()
+        )
+        if not _groups:
+            (FIG_DIR / png_name).unlink(missing_ok=True)
+            print(f"{png_name} skipped -- source CSV has zero rows")
+            return _df
+        _height = 1.3 + 2.1 * len(_groups)
+        _fig, _axes = plt.subplots(len(_groups), 1, figsize=(9, _height), squeeze=False)
+        _axes = [row[0] for row in _axes]
+        for _ax, (_drug, _unit) in zip(_axes, _groups):
+            _part = _df.filter(
+                (pl.col("med_category") == _drug)
+                & (pl.col("dose_per_weight_unit") == _unit)
+            ).sort("dose_per_weight")
+            _x = _part.get_column("dose_per_weight").to_list()
+            _y = _part.get_column("ecdf").to_list()
+            _ax.step(_x, _y, where="post", color="#2a78d6", linewidth=1.6)
+            _ax.plot(_x, _y, "o", color="#2a78d6", markersize=3.2)
+            _ax.set_ylim(0, 1.02)
+            _ax.set_xlim(left=0)
+            _ax.grid(axis="x", color="#e1e0d9", linewidth=0.8)
+            _ax.set_axisbelow(True)
+            for _side in ("top", "right"):
+                _ax.spines[_side].set_visible(False)
+            _ax.set_ylabel("cumulative\nproportion", fontsize=8)
+            _ax.set_title(
+                f"{_drug} | {_unit} | n = {_part['n_total'][0]:,}",
+                loc="left",
+                fontsize=9,
+            )
+        _axes[-1].set_xlabel("dose divided by selected weight")
+        _fig.suptitle(title, fontsize=11)
+        _fig.tight_layout()
+        _fig.subplots_adjust(top=1 - 0.8 / _height, hspace=0.55)
+        _fig.savefig(FIG_DIR / png_name, dpi=150)
+        plt.close(_fig)
+        print(f"{png_name} -> {FIG_DIR}")
+        return _df
+
+    figure_b2_df = _draw_ecdf(
+        "fig_B2__paralytic_dose_per_weight_ecdf.csv",
+        "fig_B2__paralytic_dose_per_weight_ecdf.png",
+        "B.2 - index paralytic dose/weight empirical CDF\n"
+        "20-300 kg; current hospitalization first, then prior hospitalization within 28 days",
+    )
+    figure_e4_df = _draw_ecdf(
+        "fig_E4__sedation_dose_per_weight_ecdf.csv",
+        "fig_E4__sedation_dose_per_weight_ecdf.png",
+        "E.4 - sedation dose/weight empirical CDF\n"
+        "all administration-window pairs within +/-60 minutes",
+    )
+    return figure_b2_df, figure_e4_df
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    figure_e5_df = pl.read_csv(SHARE_DIR / "fig_E5__induction_dose_tiers.csv")
+    _tier_order = ["full", "intermediate_full", "intermediate_reduced", "reduced"]
+    _labels = {
+        "full": "Full",
+        "intermediate_full": "Int-Full",
+        "intermediate_reduced": "Int-Reduced",
+        "reduced": "Reduced",
+    }
+    _colors = {
+        "full": "#b84432",
+        "intermediate_full": "#dc8435",
+        "intermediate_reduced": "#efca3f",
+        "reduced": "#57ad6b",
+    }
+    _drugs = ["etomidate", "ketamine"]
+    _fig, _ax = plt.subplots(figsize=(8.8, 6.8))
+    _bottom = [0.0, 0.0]
+    for _tier in _tier_order:
+        _values = []
+        for _drug in _drugs:
+            _row = figure_e5_df.filter(
+                (pl.col("drug") == _drug) & (pl.col("dose_tier") == _tier)
+            )
+            _values.append(float(_row["pct"][0] or 0.0))
+        _bars = _ax.bar(
+            [0, 1], _values, bottom=_bottom, width=0.55,
+            color=_colors[_tier], edgecolor="white", label=_labels[_tier],
+        )
+        for _i, (_bar, _value) in enumerate(zip(_bars, _values)):
+            if _value >= 3:
+                _ax.text(
+                    _bar.get_x() + _bar.get_width() / 2,
+                    _bottom[_i] + _value / 2,
+                    f"{_value:.1f}%",
+                    ha="center", va="center", color="white", fontweight="bold",
+                )
+        _bottom = [_bottom[i] + _values[i] for i in range(2)]
+    for _i, _drug in enumerate(_drugs):
+        _n = int(
+            figure_e5_df.filter(pl.col("drug") == _drug).get_column("n_total").first()
+        )
+        _ax.text(_i, -3.0, f"n = {_n:,}", ha="center", color="#555555", fontsize=9)
+    _ax.set_xticks([0, 1])
+    _ax.set_xticklabels(["Etomidate", "Ketamine"])
+    _ax.set_ylim(-5, 105)
+    _ax.set_yticks([0, 25, 50, 75, 100])
+    _ax.set_yticklabels(["0%", "25%", "50%", "75%", "100%"])
+    _ax.set_ylabel("Proportion of administration-window pairs (%)")
+    _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+    _ax.set_axisbelow(True)
+    _handles, _legend_labels = _ax.get_legend_handles_labels()
+    _ax.legend(
+        _handles[::-1],
+        _legend_labels[::-1],
+        title="Dose tier",
+        bbox_to_anchor=(1.02, 0.62),
+        loc="center left",
+        frameon=False,
+    )
+    _ax.set_title(
+        "E.5 - Local Dose Tier Distribution by Drug\n"
+        "Etomidate: reduced <0.20 | int-reduced 0.20-0.24 | int-full 0.25-0.29 | full >=0.30 mg/kg\n"
+        "Ketamine: reduced <1.0 | int-reduced 1.0-1.49 | int-full 1.5-1.99 | full >=2.0 mg/kg",
+        loc="left", fontsize=11,
+    )
+    _fig.tight_layout()
+    _fig.savefig(FIG_DIR / "fig_E5__induction_dose_tiers.png", dpi=150)
+    plt.close(_fig)
+    print(f"fig_E5__induction_dose_tiers.png -> {FIG_DIR}")
+    return (figure_e5_df,)
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    figure_g1_df = pl.read_csv(SHARE_DIR / "fig_G1__dose_per_weight_consort.csv")
+    _populations = ["paralytic", "sedation", "induction tiers"]
+    _fig, _axes = plt.subplots(1, 3, figsize=(15, 6.5), squeeze=False)
+    for _ax, _population in zip(_axes[0], _populations):
+        _part = figure_g1_df.filter(pl.col("population") == _population).sort("stage_order")
+        _y = list(range(_part.height))
+        _counts = _part.get_column("n_remaining").to_list()
+        _ax.barh(_y, _counts, color="#2a78d6", height=0.58)
+        _ax.set_yticks(_y)
+        _ax.set_yticklabels(_part.get_column("stage").to_list(), fontsize=8)
+        _ax.invert_yaxis()
+        _ax.grid(axis="x", color="#e1e0d9", linewidth=0.8)
+        _ax.set_axisbelow(True)
+        for _i, _row in enumerate(_part.iter_rows(named=True)):
+            _label = f"{_row['n_remaining']:,}"
+            if _row["n_excluded"]:
+                _label += f"  (-{_row['n_excluded']:,})"
+            _ax.text(_row["n_remaining"], _i, f"  {_label}", va="center", fontsize=8)
+        _ax.set_title(_population, loc="left", fontweight="bold")
+        _ax.set_xlabel(_part.get_column("count_unit").first(), fontsize=8)
+        for _side in ("top", "right", "left"):
+            _ax.spines[_side].set_visible(False)
+    _fig.suptitle(
+        "G.1 - Dose/weight eligibility flow\n"
+        "Weight-related exclusions affect normalized-dose analyses only, not the analytic cohort",
+        fontsize=12,
+    )
+    _fig.tight_layout()
+    _fig.subplots_adjust(top=0.82, wspace=0.9)
+    _fig.savefig(FIG_DIR / "fig_G1__dose_per_weight_consort.png", dpi=150)
+    plt.close(_fig)
+    print(f"fig_G1__dose_per_weight_consort.png -> {FIG_DIR}")
+    return (figure_g1_df,)
 
 
 if __name__ == "__main__":

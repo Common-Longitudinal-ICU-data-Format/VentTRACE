@@ -93,7 +93,22 @@ def _(Path, json):
     DATE_END = config["date_end"]
 
     PARALYTICS = ["rocuronium", "succinylcholine", "vecuronium"]
-    MAR_ACTIONS = ["given", "bolus"]
+    MAR_ACTIONS = ["given"]
+    MEDICATION_DOSE_UNITS = config["medication_dose_units"]
+    _expected_meds = {
+        "rocuronium", "succinylcholine", "vecuronium", "midazolam",
+        "etomidate", "ketamine", "propofol", "fentanyl",
+    }
+    assert set(MEDICATION_DOSE_UNITS) == _expected_meds, (
+        "medication_dose_units must configure exactly the eight study medications"
+    )
+    _valid_units = {
+        med: ({"mcg", "mcg/kg"} if med == "fentanyl" else {"mg", "mg/kg"})
+        for med in _expected_meds
+    }
+    assert all(
+        unit in _valid_units[med] for med, unit in MEDICATION_DOSE_UNITS.items()
+    ), "invalid medication_dose_units; use mg[/kg], or mcg[/kg] for fentanyl"
 
     OUTPUT_DIR = Path(config["output_directory"])
     PHI_DIR = OUTPUT_DIR / "intermediate_phi"
@@ -121,6 +136,7 @@ def _(Path, json):
         FILETYPE,
         MIN_AGE,
         MAR_ACTIONS,
+        MEDICATION_DOSE_UNITS,
         PARALYTICS,
         PHI_DIR,
         SHARE_DIR,
@@ -225,25 +241,13 @@ def _(
     FILETYPE,
     Hospitalization,
     MAR_ACTIONS,
+    MEDICATION_DOSE_UNITS,
     MedicationAdminIntermittent,
     PARALYTICS,
     TIMEZONE,
     pl,
     to_site_naive,
 ):
-    def _rate_unit_expr():
-        _time_units = (
-            "s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
-            "h|hr|hrs|hour|hours|d|day|days"
-        )
-        return (
-            pl.col("med_dose_unit")
-            .str.strip_chars()
-            .str.to_lowercase()
-            .str.contains(rf"(?:/|\bper\s+)(?:{_time_units})$")
-            .fill_null(False)
-        )
-
     _category_variants = sorted(
         {v for c in PARALYTICS for v in (c, c.title(), c.upper())}
     )
@@ -262,11 +266,15 @@ def _(
     _med_pl = pl.from_pandas(_med.df).with_columns(
         med_category=pl.col("med_category").str.to_lowercase(),
         mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
+        med_dose_unit=pl.col("med_dose_unit").str.strip_chars().str.to_lowercase(),
     )
     _qualifying = _med_pl.filter(
         pl.col("med_category").is_in(PARALYTICS)
         & pl.col("mar_action_category").is_in(MAR_ACTIONS)
-        & ~_rate_unit_expr()
+        & (
+            pl.col("med_dose_unit")
+            == pl.col("med_category").replace_strict(MEDICATION_DOSE_UNITS)
+        )
     )
     paralytic_hosp_ids = (
         _qualifying
@@ -553,7 +561,7 @@ def _(cohort_loc, consort_add, encounter_mapping, paralytic_hosp_ids, pl):
         cohort_paralytic.height,
         cohort_paralytic.get_column("patient_id").n_unique(),
         cohort_loc.height - cohort_paralytic.height,
-        "rocuronium/succinylcholine/vecuronium; given/bolus; non-rate unit",
+        "rocuronium/succinylcholine/vecuronium; given; configured dose unit",
     )
     return (cohort_paralytic,)
 
