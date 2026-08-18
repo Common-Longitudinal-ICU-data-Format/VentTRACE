@@ -52,7 +52,8 @@ paralytic, and does not adjudicate whether an intubation occurred.
 9. **vitals** *(optional — the pipeline runs without it and publishes 0% coverage)*:
    `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value`
 10. **hospital_diagnosis** *(optional — the pipeline runs without it and publishes 0% coverage)*:
-     `hospitalization_id`, `diagnosis_code`, `diagnosis_code_format`
+     `hospitalization_id`, `diagnosis_code`, `diagnosis_code_format`. Format values are normalized
+     case-insensitively after loading, so `ICD10CM` and `icd10cm` both contribute to clifpy CCI.
 11. **labs** *(optional SOFA input; missing component scores default to 0)*: creatinine,
     platelet count, arterial PaO2, and total bilirubin
 12. **patient_assessments** *(optional SOFA input; missing component scores default to 0)*:

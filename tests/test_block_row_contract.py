@@ -358,6 +358,7 @@ def test_prior_device_null_states_have_distinct_labels(imv_prior_device):
 def test_readable_table_contains_requested_rows(table1_block_readable):
     variables = table1_block_readable.get_column("variable")
     for text in (
+        "Charlson comorbidity index",
         "Lowest diastolic blood pressure",
         "SOFA score",
         "Any vasopressor",
@@ -367,6 +368,16 @@ def test_readable_table_contains_requested_rows(table1_block_readable):
         "Intubation context category",
     ):
         assert variables.str.contains(text, literal=True).any(), text
+
+
+def test_table1_contains_cci_statistics(table1_block, table1_index):
+    expected = {
+        f"cci_{suffix}"
+        for suffix in ("mean", "sd", "median", "q1", "q3", "n_nonnull")
+    }
+    for label, table in (("block", table1_block), ("index", table1_index)):
+        missing = expected - set(table.get_column("statistic"))
+        assert not missing, f"{label} Table 1 is missing CCI statistics: {sorted(missing)}"
 
 
 def test_the_readable_table_restates_the_long_table(table1_block, table1_block_readable):

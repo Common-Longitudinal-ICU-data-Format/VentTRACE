@@ -117,6 +117,8 @@ The frame carries identifiers and `t_dttm`, so `utils/suppress.py` will refuse i
 
 **Loading (P19, restated because this amendment adds seven tables).** Every new table is read through its clifpy table class via `from_file`, with load-time filters enumerating casing variants (P20). clifpy normalizes recognized datetime columns to `TIMEZONE`; `to_site_naive` then removes that timezone with `series.dt.tz_localize(None)`, preserving the site-local wall clock without a second conversion. The respiratory waterfall in `01` is the only UTC boundary and is not used by this amendment. Timezone conversion is never done in polars, whose DST table stops extrapolating US rules around 2099 while MIMIC's dates are shifted into the 2100s.
 
+**Diagnosis code formats.** `hospital_diagnosis` is not filtered by `diagnosis_code_format` during loading. The loaded values are stripped and lower-cased in memory before the complete frame is passed to `clifpy.calculate_cci`, so site variants such as `ICD10CM` and `icd10cm` are equivalent while clifpy remains responsible for selecting supported code systems.
+
 **Interval arithmetic.** All minute/hour arithmetic is done inside polars with `pl.col(c).dt.epoch("s")`. No `datetime.timestamp()`, no `astimezone`, no `fromtimestamp`.
 
 **One window helper.** `in_lookback(t0_col, dttm_col, hours)` is defined once in `04` and used by all four exposure sources (P33). Closed at both ends.

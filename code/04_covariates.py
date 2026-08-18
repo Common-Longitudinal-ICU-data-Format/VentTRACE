@@ -12,7 +12,7 @@ def _():
 
     import polars as pl
 
-    from clifpy import compute_sofa_polars
+    from clifpy import calculate_cci, compute_sofa_polars
 
     from clifpy.tables import (
         Adt,
@@ -38,6 +38,7 @@ def _():
         Patient,
         Path,
         Vitals,
+        calculate_cci,
         compute_sofa_polars,
         json,
         mo,
@@ -1567,6 +1568,20 @@ def _(
 
 
 @app.cell
+def _(pl):
+    def normalize_diagnosis_code_format(diagnosis):
+        """Normalize diagnosis formats without filtering out source rows."""
+        return diagnosis.with_columns(
+            pl.col("diagnosis_code_format")
+            .cast(pl.String)
+            .str.strip_chars()
+            .str.to_lowercase()
+        )
+
+    return (normalize_diagnosis_code_format,)
+
+
+@app.cell
 def _(
     DATA_DIR,
     FILETYPE,
@@ -1574,7 +1589,9 @@ def _(
     TIMEZONE,
     bridge,
     bridge_hosp_ids,
+    calculate_cci,
     load_optional,
+    normalize_diagnosis_code_format,
     pl,
     spine_resolved,
 ):
@@ -1598,9 +1615,11 @@ def _(
             "index_paralytic_id", pl.lit(None, dtype=pl.Int32).alias("cci")
         )
     else:
-        from clifpy.utils.comorbidity import calculate_cci
-
-        _cci_pd = calculate_cci(_diag_pd)
+        # Do not apply a diagnosis-code-format filter in `from_file`: sites may
+        # encode the same supported format as ICD10CM or icd10cm. Normalize all
+        # loaded rows in memory and let clifpy own supported-format selection.
+        _diagnosis = normalize_diagnosis_code_format(pl.from_pandas(_diag_pd))
+        _cci_pd = calculate_cci(_diagnosis)
         _cci_col = [c for c in _cci_pd.columns if c.lower() in ("cci_score", "cci")]
         assert _cci_col, (
             f"clifpy's CCI output has no recognisable score column: {list(_cci_pd.columns)}"
@@ -1615,7 +1634,7 @@ def _(
             "index_paralytic_id", "hospitalization_id"
         ).join(_cci, on="hospitalization_id", how="left").select("index_paralytic_id", "cci")
 
-        diagnosis = pl.from_pandas(_diag_pd).join(
+        diagnosis = _diagnosis.join(
             bridge.select("hospitalization_id", "encounter_block"),
             on="hospitalization_id",
             how="inner",
