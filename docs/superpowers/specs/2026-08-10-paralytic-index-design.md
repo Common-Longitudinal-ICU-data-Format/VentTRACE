@@ -38,7 +38,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | \# | Decision | Rationale |
 |------------------------|------------------------|------------------------|
 | P1 | **The paralytic is the index event. There is exactly one method.** `SED`, `PAIR`, `DEV` as a scored method, and `CPT` are all removed. | Set by the study lead. The comparison the old build ran is complete; what remains unanswered is what the paralytic itself marks. Keeping the other methods alongside would preserve machinery — the agreement tiers, the reference gate, the episode qualifier — that answers a question no longer being asked, and every one of those parts is coupled to an anchor that has moved. |
-| P2 | **`01_cohort.py` is unchanged, including the ever-IMV pre-filter.** | Set by the study lead. The cohort stays adults · 2018–2025 · ED or ICU · ever on IMV · no tracheostomy in the first 24 h. The consequence is stated rather than left implicit: because every block already reached a ventilator, the sub-analysis D hit rate has a floor built into the cohort and **must not be read as specificity**. It is "given that this patient was ventilated at some point, did the device change around this paralytic" — a narrower and answerable question. |
+| P2 | **AMENDED 2026-08-17: cohort entry requires at least one qualifying paralytic administration, not a raw IMV row.** The patient-level efficiency pre-filter and the displayed block-level inclusion both use P3/P4 plus P25: rocuronium, succinylcholine, or vecuronium; `given`/`bolus`; non-rate unit. | Set by the study lead because a patient intubated immediately before death may receive a paralytic but never have IMV charted. Applying the change only to the displayed CONSORT row would be false: the earlier IMV-ever pre-filter would still remove that patient invisibly. Respiratory charting is context and QC; its absence becomes `no_device_record`, not cohort exclusion. |
 | P3 | **The paralytic list is `rocuronium`, `succinylcholine`, `vecuronium`.** | Set by the study lead, unchanged from the superseded `PARA` method. These are the rapid-onset intubating agents. `cisatracurium` and `atracurium` are in the mCIDE `med_category` vocabulary and are deliberately excluded: they are overwhelmingly maintenance-blockade agents, and including them would turn sub-analysis A from a study of induction sequences into a study of ICU paralysis protocols. The exclusion is a scope choice, not a claim that those agents are never used to intubate. |
 | P4 | **An administration is `mar_action_category ∈ {given, bolus}`.** | The mCIDE vocabulary permits `given · not_given · bolus · other`. The superseded design kept `given` alone, which carries a silent failure mode: a site charting every one-time IV push as `bolus` would report zero paralytics, and zero is indistinguishable from a site that gives none. `bolus` describes a drug that entered the patient and is precisely how an intubating paralytic is charted in many EHRs. Both are kept and the split is printed per agent, so the mix is a published fact rather than an assumption. |
 | P5 | **The analytic unit is `encounter_block`, not `hospitalization_id`.** | An ED presentation and the inpatient admission that follows can carry different `hospitalization_id`s, so the paralytic is charted under one and the ventilator under the other. Under the old ventilator anchor that split cost a drug; under a paralytic anchor it costs the *device transition*, and sub-analysis D would report "no transition nearby" for an intubation that plainly happened. Stitching is what makes D answerable at all. `hospitalization_id` is named only inside the explode-and-drop bridge (§6.1) and dropped the moment the join lands. |
@@ -62,9 +62,13 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | P23 | **The row-level prohibition is the one shared helper in the project, and it is enforced mechanically at every write.** `utils/suppress.py` keeps its name and its role as the single route into `final_no_phi/`; what it enforces is now the P21 boundary. `publish()` refuses any frame carrying an identifier column — `patient_id`, `hospitalization_id`, `encounter_block`, `p_num`, or any column whose name ends in `_id`, with `cohort_run_id` the single exemption because it is a provenance stamp shared by every row of an extract and identifies nobody. It also refuses any frame carrying a **datetime column**: an aggregate has no timestamp, and every row-level artifact in this study does. | This is a deliberate exception to the local-duplication posture of §4, and the reason the exception is safe is that the failure modes point in opposite directions. Duplicating *analysis* logic risks correlated errors that look like agreement — the hazard the superseded design was built around, and which no longer exists here because there is nothing to agree with. Duplicating the *disclosure* check risks one notebook writing a file the other would have refused, which is not an analysis failure and must be impossible rather than merely unlikely. One implementation, one test, applied at every write. The check is now a column-name guard rather than a cell-count filter, which makes it both cheaper and — unlike the threshold it replaces — not defeatable by arithmetic across two files. The count-column requirement this decision originally carried was removed on review: it simultaneously **blocked** a legitimate key/value QC table (`cohort_qc.csv`, columns `stat,value`) and **failed to block** the thing it was written for — dropping the four identifier columns from `index_context.parquet` leaves a 2,117-row row-level frame that still carries `n_admins`, so it satisfied a check for "has a column starting with `n_`" while being pure row detail. The datetime guard catches that construction (`t_dttm`), costs nothing, and is not defeatable by adding a column. |
 | P24 | **WITHDRAWN 2026-08-10, together with the cell-size rule it existed to defend (P21).** Secondary suppression — classifying every `gap_bin` into FULL / POOLED_ONLY / NONE so that two files sharing a key could not be differenced to recover a withheld cell — is removed in full, along with `coadmin_gap_pooled.csv`, the per-agent dose-leak guard in `03`, and the dropping of `n_administrations` from `paralytic_admin_summary.csv` (restored). | The decision is kept in the record rather than deleted, because what it found is still true and is the reason P21 moved. Three separate subtraction leaks were discovered in this design, each by a different construction and none visible in the code: `n_same_agent` minus its published `agent_pair` components; `paralytic_admin_summary.csv`'s `n_administrations` minus `index_paralytic_dose.csv`'s per-unit rows; and an agent's summed offset bins minus its published dose row. Each was closed, and closing the third still left the withheld value bounded to five candidates rather than nine, because the suppression algorithm is itself published and a reader can exclude the counts it would never have chosen. **The generalisable finding: a suppression threshold applied to a set of tables that share keys is not a local property of any one table, and cannot be made one.** Withholding a cell in a table whose margins are published does not remove information, it relocates it — and the relocation is invisible to the person applying the rule. Having to reason about it at all was the cost; under P21 the cost is zero and the protection that matters (P23) is a column-name check that no arithmetic can defeat. |
 | P25 | **Medication rows whose dose unit is a rate are excluded before event construction and window matching.** Both `02` and `03` report the skipped count and aggregate `(med_category, med_dose_unit)` breakdown. | `medication_admin_intermittent` represents discrete administrations. A unit such as `mcg/hr` describes an infusion rate, cannot be converted to an amount without duration, and must not affect administration counts, event timing, or dose summaries. |
-| P42 | **Every medication in this study charted as exact `mg/kg` is treated as a mislabeled absolute `mg` dose for calculation at every site.** The raw value and unit remain unchanged in the raw-unit counts and P41 ECDFs; `paralytic_dose_unit_corrections.csv` and `sedation_dose_unit_corrections.csv` publish the affected counts per agent. Every other `/kg` unit still fails. Rows with a null/non-finite dose or null unit remain in administration and raw-unit counts but are excluded, with a logged count, from converted dose statistics. | Set by the study lead after consortium runs found `mg/kg` values whose magnitudes represented conventional absolute-mg doses, first for rocuronium and succinylcholine and then among the sedatives. Interpreting those literally and multiplying by adult weight would produce implausibly large doses. The correction remains visible rather than rewriting the source, and exact matching prevents this rule from discarding the weight axis from rate or other weight-based units. |
+| P42 | **Every medication in this study charted as exact `mg/kg` is treated as a mislabeled absolute `mg` dose for calculation at every site.** The raw value and unit remain unchanged in the raw-unit counts and P41 ECDFs; `step02__paralytic_dose_unit_corrections.csv` and `step03__sedation_dose_unit_corrections.csv` publish the affected counts per agent. Every other `/kg` unit still fails. Rows with a null/non-finite dose or null unit remain in administration and raw-unit counts but are excluded, with a logged count, from converted dose statistics. | Set by the study lead after consortium runs found `mg/kg` values whose magnitudes represented conventional absolute-mg doses, first for rocuronium and succinylcholine and then among the sedatives. Interpreting those literally and multiplying by adult weight would produce implausibly large doses. The correction remains visible rather than rewriting the source, and exact matching prevents this rule from discarding the weight axis from rate or other weight-based units. |
+| P43 | **Converted dose summaries use strict clinical plausibility ranges and publish mean, sample SD, median, p25 and p75.** Included doses satisfy `0 < dose < upper bound` after conversion: etomidate 200 mg, fentanyl 500 mcg, midazolam 50 mg, propofol 500 mg, rocuronium 400 mg, succinylcholine 400 mg and vecuronium 30 mg. Ketamine is unchanged because no threshold was supplied. Raw propofol `mcg` rows are excluded as inaccurate entries. These exclusions affect only converted summary tables and Figure E.2; administration detection, raw-unit counts and raw-unit ECDFs retain the source rows for QC. | Set by the study lead. The bounds remove clinically implausible data-entry artifacts without changing which administrations define an index event or sedation context. Applying them after conversion makes every threshold unit-explicit; retaining the raw QC artifacts makes every exclusion auditable. Mean and SD beside median and IQR make skew visible in the compact summary. |
+| P45 | **Generated artifact names encode ownership and figure lineage.** Every plotted dataframe is `figure_<id>_df`; its published CSV and PNG share `fig_<ID>__<description>`. Supporting outputs use `stepNN__<description>`, including PHI intermediates. The four `table1_by_agent_*` pooling names remain unchanged. `07_artifact_manifest.py` rejects stale, missing or undeclared shareable files and publishes producer, dataframe, sources, row count, size and SHA-256. | Set by the study lead for audit and control. A figure and its data can be paired by basename without reading code, while every non-figure file identifies its producer. Table 1 is the explicit exception because those names are an external consortium contract. |
 
 P42 supersedes P18's earlier statement that every `/kg` unit requires vitals. That remains the rule for every unit except exact `mg/kg` on the eight medication categories defined by P3 and P16.
+
+P43 amends P18's converted summary population and columns. It does not amend P41: the raw-unit ECDF remains intentionally unfiltered QC.
 
 ------------------------------------------------------------------------
 
@@ -72,7 +76,7 @@ P42 supersedes P18's earlier statement that every `/kg` unit requires vitals. Th
 
 ```
 code/
-  01_cohort.py            UNCHANGED — encounter stitch + cohort CONSORT + waterfall
+  01_cohort.py            qualifying-paralytic cohort + stitch + CONSORT + waterfall
   02_index_paralytic.py   paralytic administrations → sub-analyses A, B, C
                           → index_paralytic.parquet
   03_context.py           index paralytic ± 60 min → sub-analyses D, E
@@ -110,9 +114,9 @@ utils/
 
 The split falls where the **data sources change**, not where the sub-analyses happen to be numbered. Everything in `02` touches `medication_admin_intermittent` and nothing else, which makes sub-analyses A–C self-validating: a gap distribution needs no second table to be checked against, so a failure in D can never obscure whether the index set is right. `03` is the only notebook that joins the waterfall and the only one that loads a second medication list.
 
-`index_paralytic.parquet` is the contract between them, specified in §6.2.
+`step02__index_paralytic.parquet` is the contract between them, specified in §6.2.
 
-Only `01_cohort.py` knows that `hospitalization_id` exists as a unit. It resolves stitching once and publishes `list_hospitalization_id` in `cohort_index.parquet` as the bridge key; `02` explodes that list to reach the medication table and aggregates straight back to `encounter_block`. No notebook re-derives a block.
+Only `01_cohort.py` knows that `hospitalization_id` exists as a unit. It resolves stitching once and publishes `list_hospitalization_id` in `step01__cohort_index.parquet` as the bridge key; `02` explodes that list to reach the medication table and aggregates straight back to `encounter_block`. No notebook re-derives a block.
 
 All notebooks are marimo notebooks stored as `.py`, run as `uv run python code/NN_name.py`. **Dataframe library:** polars throughout. The only pandas boundaries in the project are the two clifpy functions `stitch_encounters` and `process_resp_support_waterfall`, both inside `01`.
 
@@ -147,9 +151,7 @@ def epoch_minutes(column):
 
 ------------------------------------------------------------------------
 
-## 5. Cohort — `01_cohort.py`, unchanged
-
-No change is made to `01`. It is described here only so this document is self-contained.
+## 5. Cohort — `01_cohort.py`
 
 **Criteria**, applied to the stitched block:
 
@@ -158,19 +160,19 @@ No change is made to `01`. It is described here only so this document is self-co
 | age | ≥ `min_age` (18) at admission |
 | dates | `date_start` … `date_end` (2018-01-01 … 2025-12-31) |
 | location | ED **or** ICU at some point in the block |
-| ventilation | at least one **raw charted** `device_category == 'imv'` row |
+| index signal | at least one qualifying P3/P4/P25 paralytic administration |
 | exclusion | tracheostomy in the first `trach_window_hours` (24) — `tracheostomy` truthy **or** `device_category == 'trach collar'` |
 
 **Stitching comes first.** Hospitalizations less than `stitch_hours` (6) apart for the same patient are merged into an `encounter_block`, and every notebook after `01` keys on the block (P5).
 
-**The waterfall makes the device record continuous.** `clifpy`'s `process_resp_support_waterfall` inserts hourly scaffold rows, forward-fills `device_category` unconditionally, and relabels a row with a null device to `imv` when the ventilator settings on it look like a ventilator. Sub-analysis D consumes exactly this output (P13).
+**The waterfall makes the available device record continuous.** `clifpy`'s `process_resp_support_waterfall` inserts hourly scaffold rows, forward-fills `device_category` unconditionally, and relabels a row with a null device to `imv` when the ventilator settings on it look like a ventilator. Sub-analysis D consumes exactly this output (P13). A cohort block may legitimately have no raw IMV row.
 
 Two properties of the waterfall are load-bearing downstream and are recorded so no later reader treats them as incidental:
 
 - **`bfill` is inert for this pipeline.** The flag reaches only the numeric setters, after the device heuristics have already run. Flipping it changes ventilator settings and can never change which rows are IMV.
 - **After the unconditional forward-fill, ~0.2% of waterfalled rows still carry a null device**, all of them before the block's first charted device. That residue is where `null → imv` transitions come from (P12).
 
-**Outputs consumed by this study:** `cohort_index.parquet` (with `list_hospitalization_id`, `patient_id`, `cohort_run_id`) and `cohort_resp_waterfall.parquet`.
+**Outputs consumed by this study:** `step01__cohort_index.parquet` (with `list_hospitalization_id`, `patient_id`, `cohort_run_id`) and `step01__cohort_resp_waterfall.parquet`.
 
 ------------------------------------------------------------------------
 
@@ -238,7 +240,7 @@ Note what anchoring buys: the 12:20 administration is within 15 minutes of the 1
 
 Every administration belongs to **exactly one** index event. There is no eligibility filter at this step — the index set is a partition of the administration set, and `Σ n_admins` over all index events equals the administration count. `02` asserts that.
 
-### 6.4 `index_paralytic.parquet` — the contract
+### 6.4 `step02__index_paralytic.parquet` — the contract
 
 One row per index paralytic, written to `output/intermediate_phi/`.
 
@@ -294,9 +296,9 @@ Published three ways. Every bin appears in every table at its true count (P21); 
 
 | table | rows |
 |---|---|
-| `coadmin_gap_distribution.csv` | bin × `{pooled, same_agent, cross_agent}` → n. Every bin on the grid, including bins with a count of zero. |
-| `coadmin_gap_by_pair.csv` | bin × unordered agent pair → n. The pair label is the two agents sorted alphabetically and joined with `+` — `rocuronium+vecuronium`, never `vecuronium+rocuronium` — so one pair is one row rather than two orderings of itself. Same-agent pairs appear as `rocuronium+rocuronium`. |
-| `paralytic_admin_summary.csv` | agent × `mar_action_category` → n administrations, n blocks, n patients. |
+| `fig_A1__paralytic_administration_pair_gaps.csv` | bin × `{pooled, same_agent, cross_agent}` → n. Every bin on the grid, including bins with a count of zero. |
+| `step02__paralytic_pair_gaps_by_agent_pair.csv` | bin × unordered agent pair → n. The pair label is the two agents sorted alphabetically and joined with `+` — `rocuronium+vecuronium`, never `vecuronium+rocuronium` — so one pair is one row rather than two orderings of itself. Same-agent pairs appear as `rocuronium+rocuronium`. |
+| `step02__paralytic_administration_summary.csv` | agent × `mar_action_category` → n administrations, n blocks, n patients. |
 
 The same/cross split is the point of the table. `rocuronium → rocuronium` at 3 minutes is a redose; `rocuronium → succinylcholine` at 3 minutes is a co-administration. The pooled histogram cannot distinguish them, and they justify the 15-minute boundary for different reasons (P7).
 
@@ -316,12 +318,12 @@ Defined in §6.3–6.4. Published aggregates:
 
 | table | contents |
 |---|---|
-| `index_paralytic_summary.csv` | one row per `agent_label`: n index paralytics, n blocks, n patients, `n_coadmin` (index events folding more than one administration of that label), `span_minutes` median and max |
-| `index_paralytic_dose.csv` | `med_category` → n, median, p25, p75, in the standardised unit (P18) |
-| `paralytic_dose_units.csv` | `med_category` × raw `med_dose_unit` → n administrations. Counts only — no dose statistics, so the table shows charting heterogeneity without reintroducing the split it replaced. |
-| `paralytic_dose_unit_corrections.csv` | each paralytic's P42 `(med_category, mg/kg → mg)` rule → n affected administrations, including an explicit zero when absent |
+| `step02__index_paralytic_summary.csv` | one row per `agent_label`: n index paralytics, n blocks, n patients, `n_coadmin` (index events folding more than one administration of that label), `span_minutes` median and max |
+| `step02__index_paralytic_dose_summary.csv` | `med_category` → cleaned n, mean, SD, median, p25, p75, in the standardised unit (P18, P43) |
+| `step02__paralytic_dose_raw_unit_counts.csv` | `med_category` × raw `med_dose_unit` → n administrations. Counts only — no dose statistics, so the table shows charting heterogeneity without reintroducing the split it replaced. |
+| `step02__paralytic_dose_unit_corrections.csv` | each paralytic's P42 `(med_category, mg/kg → mg)` rule → n affected administrations, including an explicit zero when absent |
 
-Doses are standardised to one preferred unit per `med_category` with clifpy before any statistic is taken, and the statistics are keyed on `med_category` alone (P18). P42's calculation-only override is applied before clifpy. The raw unit mix is published separately as `paralytic_dose_units.csv`; missing doses remain there but do not inflate the `n` in `index_paralytic_dose.csv`.
+Doses are standardised to one preferred unit per `med_category` with clifpy before any statistic is taken, and the statistics are keyed on `med_category` alone (P18). P42's calculation-only override is applied before clifpy. The raw unit mix is published separately as `step02__paralytic_dose_raw_unit_counts.csv`; missing doses remain there but do not inflate the `n` in `step02__index_paralytic_dose_summary.csv`.
 
 ### 7.3 C — the gap between index paralytics
 
@@ -329,14 +331,14 @@ The same construction as A, applied to index paralytics instead of raw administr
 
 | table | contents |
 |---|---|
-| `index_gap_distribution.csv` | bin → n pairs |
-| `index_per_block.csv` | index paralytics per block → n blocks |
+| `fig_C1__index_paralytic_pair_gaps.csv` | bin → n pairs |
+| `step02__index_paralytics_per_block.csv` | index paralytics per block → n blocks |
 
 **Figure C.1** overlays C on A using the same bins. By construction C has **zero mass in every bin up to and including `(10,15]`** — and the bound is strict, not approximate. An anchor at `t` closes at `t + 15` inclusive, so the next anchor is the first administration *strictly after* `t + 15`; consecutive index paralytics are therefore always more than 15 minutes apart, and every non-consecutive pair is wider still. `02` asserts those six bins are empty. A non-zero count there is a bug in the fold, not a finding, and the assertion is the cheapest possible test that P6 was implemented as written.
 
 ### 7.4 D — the non-IMV → IMV transition
 
-Source: `cohort_resp_waterfall.parquet` (P13). Per `encounter_block`, sorted by `recorded_dttm`:
+Source: `step01__cohort_resp_waterfall.parquet` (P13). Per `encounter_block`, sorted by `recorded_dttm`:
 
 ```
 a row is a TRANSITION when
@@ -370,12 +372,12 @@ Recorded per index paralytic:
 
 | table | contents |
 |---|---|
-| `imv_transition_summary.csv` | `imv_transition` × `no_transition_reason` → n; and `prior_device_category` → n among transitions |
-| `imv_offset_distribution.csv` | 5-minute bins across `[−60, +60]` → n |
-| `imv_prior_device.csv` | `prior_device_category` × `transition_opens_block` → n, among transitions |
-| `imv_transitions_in_window.csv` | `n_transitions_in_window` → n, contiguous from 1 to the observed maximum (the P14 de-bouncing evidence, one row per index paralytic that had a transition) |
+| `step03__imv_transition_summary.csv` | `imv_transition` × `no_transition_reason` → n; and `prior_device_category` → n among transitions |
+| `fig_D1__imv_transition_offset.csv` | 5-minute bins across `[−60, +60]` → n |
+| `step03__imv_prior_device.csv` | `prior_device_category` × `transition_opens_block` → n, among transitions |
+| `step03__imv_transitions_per_window.csv` | `n_transitions_in_window` → n, contiguous from 1 to the observed maximum (the P14 de-bouncing evidence, one row per index paralytic that had a transition) |
 
-**Figure D.1** — histogram of `imv_offset_minutes`, 5-minute bins, zero line marked, drawn from `imv_offset_distribution.csv`.
+**Figure D.1** — histogram of `imv_offset_minutes`, 5-minute bins, zero line marked, drawn from `fig_D1__imv_transition_offset.csv` and written to the same-stem PNG.
 
 Offset bins are `[−60,−55)`, … , `[55, 60]` — 24 bins, left-closed and right-open except the last, which is closed so an offset of exactly `+60` has a home.
 
@@ -400,13 +402,13 @@ Ties on \|offset\| for `nearest_sedative_med` break alphabetically by `med_categ
 
 | table | contents |
 |---|---|
-| `sedation_summary.csv` | `any_sedative` × `agent_set` (the sorted, `+`-joined `sedative_agents`) → n, `median_n_admins` |
-| `sedation_offset_distribution.csv` | 5-minute bins across `[−60, +60]` × `med_category` → n |
-| `sedation_dose.csv` | `med_category` → n_admin_windows, median, p25, p75, in the standardised unit (P18) |
-| `sedation_dose_units.csv` | `med_category` × raw `med_dose_unit` → n administrations, counts only |
-| `sedation_dose_unit_corrections.csv` | each sedative's P42 `(med_category, mg/kg → mg)` rule → n affected administration-window pairs, including an explicit zero when absent |
+| `step03__sedation_summary.csv` | `any_sedative` × `agent_set` (the sorted, `+`-joined `sedative_agents`) → n, `median_n_admins` |
+| `fig_E1__sedation_offset.csv` | 5-minute bins across `[−60, +60]` × `med_category` → n |
+| `fig_E2__sedation_dose_summary.csv` | `med_category` → cleaned n_admin_windows, mean, SD, median, p25, p75, in the standardised unit (P18, P43) |
+| `step03__sedation_dose_raw_unit_counts.csv` | `med_category` × raw `med_dose_unit` → n administrations, counts only |
+| `step03__sedation_dose_unit_corrections.csv` | each sedative's P42 `(med_category, mg/kg → mg)` rule → n affected administration-window pairs, including an explicit zero when absent |
 
-**Figure E.1** — offset histogram across ±60 min, one series per agent, drawn from `sedation_offset_distribution.csv`. **Figure E.2** — dose distribution per `med_category` in its standardised unit, drawn from `sedation_dose.csv`. One panel per unit is retained, because fentanyl standardises to `mcg` and every other agent to `mg` (P18), and mg and mcg on a shared axis is a dual-axis chart in disguise. The raw unit mix is a table, not a figure.
+**Figure E.1** — offset histogram across ±60 min, one series per agent, drawn from `fig_E1__sedation_offset.csv`. **Figure E.2** — dose distribution per `med_category` in its standardised unit, drawn from `fig_E2__sedation_dose_summary.csv`. Each is written to a same-stem PNG. One panel per unit is retained, because fentanyl standardises to `mcg` and every other agent to `mg` (P18), and mg and mcg on a shared axis is a dual-axis chart in disguise. The raw unit mix is a table, not a figure.
 
 ------------------------------------------------------------------------
 
@@ -414,31 +416,17 @@ Ties on \|offset\| for `nearest_sedative_med` break alphabetically by `med_categ
 
 ```
 output/intermediate_phi/          row-level, never leaves the site
-  cohort_index.parquet            from 01, unchanged
-  cohort_resp_waterfall.parquet   from 01, unchanged
-  index_paralytic.parquet         §6.4                          (02)
-  index_context.parquet           index_paralytic + D + E cols  (03)
+  step01__cohort_index.parquet            from 01
+  step01__cohort_resp_waterfall.parquet   from 01
+  step02__index_paralytic.parquet         §6.4
+  step03__index_context.parquet           index paralytic + D + E cols
 
 output/final_no_phi/              shareable aggregates — no row-level records (P21, P23)
-  paralytic_admin_summary.csv       A
-  coadmin_gap_distribution.csv      A
-  coadmin_gap_by_pair.csv           A
-  index_paralytic_summary.csv       B
-  index_paralytic_dose.csv          B
-  paralytic_dose_units.csv          B
-  paralytic_dose_unit_corrections.csv B
-  index_gap_distribution.csv        C
-  index_per_block.csv               C
-  imv_transition_summary.csv        D
-  imv_offset_distribution.csv       D
-  imv_prior_device.csv              D
-  imv_transitions_in_window.csv     D
-  sedation_summary.csv              E
-  sedation_offset_distribution.csv  E
-  sedation_dose.csv                 E
-  sedation_dose_units.csv           E
-  sedation_dose_unit_corrections.csv E
-  figures/  A.1  C.1  D.1  E.1  E.2
+  step01__*.csv through step04__*.csv    supporting and QC tables by owner
+  fig_A1__*.csv through fig_T2__*.csv    plotted data keyed by figure ID
+  figures/fig_A1__*.png through fig_T2__*.png  same-stem figures
+  table1_by_agent_*.csv/.json            stable consortium contracts
+  artifact_manifest.csv                  lineage, row counts and SHA-256
 ```
 
 **Rules** (P21, P23):
@@ -523,7 +511,7 @@ new       tests/test_imv_transition.py
 - **Sedation as a detector.** Sedation is a covariate of the index paralytic (P16); no `SED` method is defined and no sedative-derived index event exists.
 - **Extubation, duration of ventilation, and outcomes.** Not touched.
 - **Reintubation linkage beyond `p_num`.** The design counts a block's index paralytics in order and says nothing about the relationship between them beyond the gap distribution of §7.3.
-- **Cohort changes.** `01` is unchanged (P2), including the ever-IMV pre-filter and its consequence for how sub-analysis D may be read.
+- **Further cohort changes.** P2 defines the qualifying-paralytic cohort; no additional cohort rule is introduced downstream.
 
 ------------------------------------------------------------------------
 

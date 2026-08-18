@@ -116,6 +116,21 @@ def _(Path, json):
         ("propofol", "mg/kg"): "mg",
         ("fentanyl", "mg/kg"): "mg",
     }
+    # Clinical plausibility limits for converted dose summaries. Bounds are strict:
+    # only 0 < dose < upper bound contributes. Ketamine is intentionally absent because
+    # the study lead supplied no threshold for it.
+    DOSE_SUMMARY_UPPER_BOUNDS = {
+        "etomidate": 200.0,
+        "fentanyl": 500.0,
+        "midazolam": 50.0,
+        "propofol": 500.0,
+        "rocuronium": 400.0,
+        "succinylcholine": 400.0,
+        "vecuronium": 30.0,
+    }
+    # Propofol is charted in mg for this analysis. Raw mcg rows remain in unit/ECDF QC
+    # but never enter converted summary statistics.
+    INVALID_DOSE_SUMMARY_UNITS = [("propofol", "mcg")]
 
     COLLAPSE_GAP_MINUTES = config["collapse_gap_minutes"]
 
@@ -149,15 +164,19 @@ def _(Path, json):
     print(f"max pairs      : {MAX_TOTAL_PAIRS:,}")
     print(f"preferred units: {PREFERRED_DOSE_UNITS}   (P18)")
     print(f"unit overrides : {DOSE_UNIT_OVERRIDES}   (P42)")
+    print(f"summary bounds : {DOSE_SUMMARY_UPPER_BOUNDS}")
+    print(f"invalid summary units: {INVALID_DOSE_SUMMARY_UNITS}")
     return (
         COLLAPSE_GAP_MINUTES,
         DATA_DIR,
+        DOSE_SUMMARY_UPPER_BOUNDS,
         DOSE_UNIT_OVERRIDES,
         FIG_DIR,
         FILETYPE,
         GAP_CUT_BREAKS,
         GAP_CUT_LABELS,
         GAP_BIN_LABELS,
+        INVALID_DOSE_SUMMARY_UNITS,
         MAR_ACTIONS,
         MAX_TOTAL_PAIRS,
         PARALYTICS,
@@ -279,7 +298,7 @@ def _(mo):
 
 @app.cell
 def _(PHI_DIR, pl):
-    cohort_index = pl.read_parquet(PHI_DIR / "cohort_index.parquet")
+    cohort_index = pl.read_parquet(PHI_DIR / "step01__cohort_index.parquet")
 
     COHORT_RUN_ID = cohort_index.get_column("cohort_run_id").unique().to_list()
     assert len(COHORT_RUN_ID) == 1, f"cohort_index carries {len(COHORT_RUN_ID)} run ids"
@@ -426,7 +445,7 @@ def _(
 def _(mo):
     mo.md(
         r"""
-        ## A — the co-administration gap distribution
+        ## A — the paralytic administration gap distribution
 
         Every **unordered pair** of paralytic administrations inside an `encounter_block`,
         same-agent pairs included (P9). This is the evidence for the fifteen-minute
@@ -548,7 +567,8 @@ def _(MAX_TOTAL_PAIRS, all_pair_gaps, gap_bin_expr, med_admin, pl):
 @app.cell
 def _(SHARE_DIR, med_admin, pl, publish):
     # n_administrations was dropped by 42cc70f to close a subtraction leak against
-    # index_paralytic_dose.csv under the old n>=10 cell rule. P24-withdrawn restores it:
+    # step02__index_paralytic_dose_summary.csv under the old n>=10 cell rule.
+    # P24-withdrawn restores it:
     # under P21 an aggregate count is published at its true value regardless of size, so
     # there is no residual left to be recoverable by subtraction.
     admin_summary = (
@@ -562,8 +582,8 @@ def _(SHARE_DIR, med_admin, pl, publish):
     )
     publish(
         admin_summary,
-        SHARE_DIR / "paralytic_admin_summary.csv",
-        "paralytic_admin_summary",
+        SHARE_DIR / "step02__paralytic_administration_summary.csv",
+        "step02__paralytic_administration_summary",
     )
     return (admin_summary,)
 
@@ -593,8 +613,8 @@ def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, pl, publish):
     gap_distribution = pl.DataFrame(_rows)
     publish(
         gap_distribution,
-        SHARE_DIR / "coadmin_gap_distribution.csv",
-        "coadmin_gap_distribution",
+        SHARE_DIR / "fig_A1__paralytic_administration_pair_gaps.csv",
+        "fig_A1__paralytic_administration_pair_gaps",
     )
 
     # Every observed agent_pair, in EVERY bin -- not just the bins it was observed in.
@@ -617,8 +637,8 @@ def _(GAP_BIN_LABELS, SHARE_DIR, coadmin_pairs, pl, publish):
     )
     publish(
         gap_by_pair,
-        SHARE_DIR / "coadmin_gap_by_pair.csv",
-        "coadmin_gap_by_pair",
+        SHARE_DIR / "step02__paralytic_pair_gaps_by_agent_pair.csv",
+        "step02__paralytic_pair_gaps_by_agent_pair",
     )
 
     return gap_by_pair, gap_distribution
@@ -901,9 +921,9 @@ def _(mo):
 
 @app.cell
 def _(PHI_DIR, index_paralytic):
-    _path = PHI_DIR / "index_paralytic.parquet"
+    _path = PHI_DIR / "step02__index_paralytic.parquet"
     index_paralytic.write_parquet(_path)
-    print(f"index_paralytic.parquet   {index_paralytic.height:,} rows -> {_path}")
+    print(f"step02__index_paralytic.parquet   {index_paralytic.height:,} rows -> {_path}")
     return
 
 
@@ -980,8 +1000,8 @@ def _(GAP_BIN_LABELS, SHARE_DIR, index_pairs, pl, publish):
     )
     publish(
         index_gap_distribution,
-        SHARE_DIR / "index_gap_distribution.csv",
-        "index_gap_distribution",
+        SHARE_DIR / "fig_C1__index_paralytic_pair_gaps.csv",
+        "fig_C1__index_paralytic_pair_gaps",
     )
     return (index_gap_distribution,)
 
@@ -1023,8 +1043,8 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
     )
     publish(
         index_per_block,
-        SHARE_DIR / "index_per_block.csv",
-        "index_per_block",
+        SHARE_DIR / "step02__index_paralytics_per_block.csv",
+        "step02__index_paralytics_per_block",
     )
     return (index_per_block,)
 
@@ -1065,8 +1085,8 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
     )
     publish(
         index_summary,
-        SHARE_DIR / "index_paralytic_summary.csv",
-        "index_paralytic_summary",
+        SHARE_DIR / "step02__index_paralytic_summary.csv",
+        "step02__index_paralytic_summary",
     )
     return (index_summary,)
 
@@ -1115,8 +1135,8 @@ def _(SHARE_DIR, index_paralytic, pl, publish):
     )
     publish(
         index_composition,
-        SHARE_DIR / "index_composition.csv",
-        "index_composition",
+        SHARE_DIR / "step02__index_paralytic_composition.csv",
+        "step02__index_paralytic_composition",
     )
 
     _solo = index_composition.filter(pl.col("n_admins") == 1).get_column("n_index").sum()
@@ -1294,20 +1314,80 @@ def _(convert_dose_units_by_med_category, pl):
 
 
 @app.cell
+def _(pl):
+    def filter_doses_for_summary(df, upper_bounds, invalid_units):
+        """Exclude implausible converted doses without changing raw dose QC outputs."""
+        _category = pl.col("med_category").str.strip_chars().str.to_lowercase()
+        _raw_unit = pl.col("med_dose_unit").str.strip_chars().str.to_lowercase()
+
+        _invalid_unit = pl.lit(False)
+        for _med, _unit in invalid_units:
+            _invalid_unit = _invalid_unit | ((_category == _med) & (_raw_unit == _unit))
+
+        _upper_bound = pl.lit(None, dtype=pl.Float64)
+        for _med, _bound in upper_bounds.items():
+            _upper_bound = (
+                pl.when(_category == _med)
+                .then(pl.lit(float(_bound)))
+                .otherwise(_upper_bound)
+            )
+
+        _checked = df.with_columns(
+            _invalid_unit.alias("_summary_invalid_unit"),
+            _upper_bound.alias("_summary_upper_bound"),
+        ).with_columns(
+            pl.when(pl.col("_summary_invalid_unit"))
+            .then(pl.lit("invalid_raw_unit"))
+            .when(
+                pl.col("_summary_upper_bound").is_not_null()
+                & (pl.col("med_dose_converted") <= 0)
+            )
+            .then(pl.lit("non_positive_dose"))
+            .when(
+                pl.col("_summary_upper_bound").is_not_null()
+                & (pl.col("med_dose_converted") >= pl.col("_summary_upper_bound"))
+            )
+            .then(pl.lit("at_or_above_upper_bound"))
+            .otherwise(None)
+            .alias("_summary_exclusion_reason")
+        )
+
+        _excluded = (
+            _checked.filter(pl.col("_summary_exclusion_reason").is_not_null())
+            .group_by(["med_category", "med_dose_unit", "_summary_exclusion_reason"])
+            .agg(n=pl.len())
+            .sort(["med_category", "med_dose_unit", "_summary_exclusion_reason"])
+        )
+        if _excluded.height:
+            print("DOSE SUMMARY exclusions (raw QC outputs retain these rows):")
+            print(_excluded)
+
+        return _checked.filter(
+            pl.col("_summary_exclusion_reason").is_null()
+        ).drop(
+            "_summary_invalid_unit",
+            "_summary_upper_bound",
+            "_summary_exclusion_reason",
+        )
+
+    return (filter_doses_for_summary,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
         ### Dose statistics, standardised to one unit per `med_category`
 
         P18 (amended): the raw unit mix is not discarded, it moves to
-        `paralytic_dose_units.csv` -- a **counts-only** table, so charting
+        `step02__paralytic_dose_raw_unit_counts.csv` -- a **counts-only** table, so charting
         heterogeneity stays visible without reintroducing the split the conversion
-        replaces in `index_paralytic_dose.csv`.
+        replaces in `step02__index_paralytic_dose_summary.csv`.
 
         `n_in_preferred_unit` is how many administrations were **already** charted in
         the agent's preferred unit, before conversion touched anything. Where it sits
         materially below `n`, the published median pools two unit populations rather
-        than one, and the raw split in `paralytic_dose_units.csv` should be read
+        than one, and the raw split in `step02__paralytic_dose_raw_unit_counts.csv` should be read
         before trusting the row -- ketamine's sedation dose table in `03_context.py`
         is the current live instance of this at this site, where 8 of 13
         administrations were charted in mcg and the combined median lands inside that
@@ -1353,17 +1433,20 @@ def _(DOSE_UNIT_OVERRIDES, PARALYTICS, SHARE_DIR, pl, publish, raw_doses):
     )
     publish(
         paralytic_dose_unit_corrections,
-        SHARE_DIR / "paralytic_dose_unit_corrections.csv",
-        "paralytic_dose_unit_corrections",
+        SHARE_DIR / "step02__paralytic_dose_unit_corrections.csv",
+        "step02__paralytic_dose_unit_corrections",
     )
     return (paralytic_dose_unit_corrections,)
 
 
 @app.cell
 def _(
+    DOSE_SUMMARY_UPPER_BOUNDS,
     DOSE_UNIT_OVERRIDES,
+    INVALID_DOSE_SUMMARY_UNITS,
     PREFERRED_DOSE_UNITS,
     convert_doses_to_preferred_units,
+    filter_doses_for_summary,
     pl,
     raw_doses,
 ):
@@ -1397,11 +1480,17 @@ def _(
     print("_convert_status breakdown:")
     print(_status_breakdown)
 
-    return (dose_converted,)
+    dose_summary_clean = filter_doses_for_summary(
+        dose_converted,
+        DOSE_SUMMARY_UPPER_BOUNDS,
+        INVALID_DOSE_SUMMARY_UNITS,
+    )
+
+    return dose_converted, dose_summary_clean
 
 
 @app.cell
-def _(SHARE_DIR, dose_converted, pl, publish):
+def _(SHARE_DIR, dose_summary_clean, pl, publish):
     # interpolation="linear" on both quantiles, explicitly: polars' default is
     # "nearest", which at small n republishes a raw charted dose verbatim as the
     # statistic (n=3 -> p75 IS the largest of the three charted values). Linear
@@ -1411,12 +1500,12 @@ def _(SHARE_DIR, dose_converted, pl, publish):
     # IS one of the charted observations -- not a rare edge case, but guaranteed
     # whenever (n-1) is a multiple of 4, since p25, median and p75 then land at
     # indices (n-1)/4, (n-1)/2 and 3(n-1)/4 all at once. That is live in this
-    # pipeline: ketamine's sedation dose (n=13, see sedation_dose.csv / 03) publishes
+    # pipeline: ketamine's sedation dose (n=13, see fig_E2__sedation_dose_summary.csv / 03) publishes
     # p25/median/p75 as three specific charted doses, not synthesised values. Linear
     # interpolation buys smoother behaviour as n changes; it does not buy a guarantee
     # of never equaling an individual observation.
     index_dose = (
-        dose_converted.group_by("med_category")
+        dose_summary_clean.group_by("med_category")
         .agg(
             n=pl.len(),
             # How many administrations were ALREADY in the preferred unit, before
@@ -1425,6 +1514,8 @@ def _(SHARE_DIR, dose_converted, pl, publish):
             n_in_preferred_unit=(
                 pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")
             ).sum(),
+            mean_dose=pl.col("med_dose_converted").mean(),
+            sd_dose=pl.col("med_dose_converted").std(),
             median_dose=pl.col("med_dose_converted").median(),
             p25_dose=pl.col("med_dose_converted").quantile(0.25, interpolation="linear"),
             p75_dose=pl.col("med_dose_converted").quantile(0.75, interpolation="linear"),
@@ -1434,8 +1525,8 @@ def _(SHARE_DIR, dose_converted, pl, publish):
     )
     publish(
         index_dose,
-        SHARE_DIR / "index_paralytic_dose.csv",
-        "index_paralytic_dose",
+        SHARE_DIR / "step02__index_paralytic_dose_summary.csv",
+        "step02__index_paralytic_dose_summary",
     )
     return (index_dose,)
 
@@ -1451,8 +1542,8 @@ def _(SHARE_DIR, pl, publish, raw_doses):
     )
     publish(
         paralytic_dose_units,
-        SHARE_DIR / "paralytic_dose_units.csv",
-        "paralytic_dose_units",
+        SHARE_DIR / "step02__paralytic_dose_raw_unit_counts.csv",
+        "step02__paralytic_dose_raw_unit_counts",
     )
     return (paralytic_dose_units,)
 
@@ -1463,8 +1554,9 @@ def _(mo):
         """
         ### The whole dose distribution, on the unit the site actually charted
 
-        P18 publishes a dose as three numbers on a converted scale. That is thinner
-        than the data supports, and the cell above says why in its own margin: polars
+        P18/P43 publish mean, SD and three quantiles on a cleaned converted scale. The
+        three quantiles are thinner than the data supports, and the cell above says why
+        in its own margin: polars
         places the q-th quantile at fractional index `(n-1)*q`, so whenever `(n-1)` is
         a multiple of 4 the published p25, median and p75 **are** three charted doses
         rather than statistics computed from them.
@@ -1479,9 +1571,9 @@ def _(mo):
         Keyed on the **raw charted unit**, deliberately, not the converted one. P18's
         conversion folds ketamine's `mcg` rows in with its `mg` rows; on the raw unit
         that split is visible directly instead of by cross-referencing
-        `sedation_dose_units.csv` and inferring it.
+        `step03__sedation_dose_raw_unit_counts.csv` and inferring it.
 
-        `n_total` equals `paralytic_dose_units.csv`'s `n` for fully dosed groups. A
+        `n_total` equals `step02__paralytic_dose_raw_unit_counts.csv`'s `n` for fully dosed groups. A
         null-dose group remains in the counts table but has no ECDF position; that
         difference is printed explicitly.
         """
@@ -1582,7 +1674,8 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, raw_doses):
         f"raw_doses:\nexpected:\n{_expected}\ngot:\n{_got}"
     )
 
-    # The gap against paralytic_dose_units.csv's own count: reported, never fatal (spec §4).
+    # The gap against step02__paralytic_dose_raw_unit_counts.csv's own count: reported,
+    # never fatal (spec §4).
     # That file counts every administration in the group; this one counts only those
     # carrying a dose, so where the two differ the difference IS the null count. A
     # group that is entirely null-dosed vanishes from the ECDF and shows n = 0 here
@@ -1600,15 +1693,16 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, raw_doses):
     )
     if _gap.height:
         print(
-            "  [paralytic_dose_ecdf] n_total sits below paralytic_dose_units.csv's n for the "
+            "  [paralytic_dose_ecdf] n_total sits below "
+            "step02__paralytic_dose_raw_unit_counts.csv's n for the "
             "groups below -- the difference is rows carrying a null dose:"
         )
         print(_gap)
 
     publish(
         paralytic_dose_ecdf,
-        SHARE_DIR / "paralytic_dose_ecdf.csv",
-        "paralytic_dose_ecdf",
+        SHARE_DIR / "fig_B1__paralytic_dose_ecdf.csv",
+        "fig_B1__paralytic_dose_ecdf",
     )
     return (paralytic_dose_ecdf,)
 
@@ -1683,7 +1777,7 @@ def _(plt):
 def _(mo):
     mo.md(
         """
-        ### Figure A.1 — co-administration gaps, same agent vs. cross agent
+        ### Figure A.1 — paralytic administration gaps, same agent vs. cross agent
 
         Every bin, at its true count. A colored bar where that series' count is positive,
         a colored diamond on the baseline where it is a *published* zero -- `n_cross_agent`
@@ -1707,11 +1801,11 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     _BLUE = "#2a78d6"
     _ORANGE = "#eb6834"
 
-    _dist = pl.read_csv(SHARE_DIR / "coadmin_gap_distribution.csv")
+    figure_a1_df = pl.read_csv(SHARE_DIR / "fig_A1__paralytic_administration_pair_gaps.csv")
 
     _fig, _ax = plt.subplots(figsize=(11, 6.5))
 
-    for _row in _dist.iter_rows(named=True):
+    for _row in figure_a1_df.iter_rows(named=True):
         _o = _row["bin_order"]
         if _row["n_same_agent"] > 0:
             _ax.bar([_o - 0.2], [_row["n_same_agent"]], width=0.4, color=_BLUE)
@@ -1729,12 +1823,12 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     # the CSV beside it.
     _ax.text(
         0.99, 0.98,
-        f"same agent:  n = {_dist['n_same_agent'].sum():,}, peak = {_dist['n_same_agent'].max():,}",
+        f"same agent:  n = {figure_a1_df['n_same_agent'].sum():,}, peak = {figure_a1_df['n_same_agent'].max():,}",
         transform=_ax.transAxes, ha="right", va="top", fontsize=8, color=_BLUE,
     )
     _ax.text(
         0.99, 0.94,
-        f"cross agent:  n = {_dist['n_cross_agent'].sum():,}, peak = {_dist['n_cross_agent'].max():,}",
+        f"cross agent:  n = {figure_a1_df['n_cross_agent'].sum():,}, peak = {figure_a1_df['n_cross_agent'].max():,}",
         transform=_ax.transAxes, ha="right", va="top", fontsize=8, color=_ORANGE,
     )
 
@@ -1766,10 +1860,10 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     )
     _fig.tight_layout()
     _fig.subplots_adjust(bottom=0.38)
-    _fig.savefig(FIG_DIR / "A1_coadmin_gap_distribution.png", dpi=150)
+    _fig.savefig(FIG_DIR / "fig_A1__paralytic_administration_pair_gaps.png", dpi=150)
     plt.close(_fig)
-    print(f"A1_coadmin_gap_distribution.png -> {FIG_DIR}")
-    return
+    print(f"fig_A1__paralytic_administration_pair_gaps.png -> {FIG_DIR}")
+    return (figure_a1_df,)
 
 
 @app.cell
@@ -1785,12 +1879,12 @@ def _(mo):
 
         A block with a single index paralytic forms no pair and is therefore absent by
         definition, not by a filter — the corner annotation names how many blocks actually
-        contribute, read from `index_per_block.csv`.
+        contribute, read from `step02__index_paralytics_per_block.csv`.
 
         Only the bins **above 15 minutes** are drawn. The six at or below it are empty by
         construction: the fold closes an index event at `t + 15` inclusive, so the next
         index is strictly after that. They are still published as explicit zeros in
-        `index_gap_distribution.csv`, and the assertion in sub-analysis C is what tests
+        `fig_C1__index_paralytic_pair_gaps.csv`, and the assertion in sub-analysis C is what tests
         the floor. Drawing them here spent a third of the axis on a result that could not
         have come out any other way.
         """
@@ -1810,10 +1904,10 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     _FIRST_DRAWN = GAP_BIN_LABELS.index("(15,30]")
     _labels = GAP_BIN_LABELS[_FIRST_DRAWN:]
 
-    _c = pl.read_csv(SHARE_DIR / "index_gap_distribution.csv").filter(
+    figure_c1_df = pl.read_csv(SHARE_DIR / "fig_C1__index_paralytic_pair_gaps.csv").filter(
         pl.col("bin_order") >= _FIRST_DRAWN
     )
-    _dropped = pl.read_csv(SHARE_DIR / "index_gap_distribution.csv").filter(
+    _dropped = pl.read_csv(SHARE_DIR / "fig_C1__index_paralytic_pair_gaps.csv").filter(
         pl.col("bin_order") < _FIRST_DRAWN
     )
     assert _dropped.get_column("n").sum() == 0, (
@@ -1825,7 +1919,7 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     # rest. Read from the published per-block table so the number on the figure and the
     # number in the CSV cannot drift apart.
     _n_blocks = (
-        pl.read_csv(SHARE_DIR / "index_per_block.csv")
+        pl.read_csv(SHARE_DIR / "step02__index_paralytics_per_block.csv")
         .filter(pl.col("n_index") > 1)
         .get_column("n_blocks")
         .sum()
@@ -1834,7 +1928,7 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     _fig, _ax = plt.subplots(figsize=(11, 6.5))
 
     _has_published_zero = False
-    for _row in _c.iter_rows(named=True):
+    for _row in figure_c1_df.iter_rows(named=True):
         _x = _row["bin_order"] - _FIRST_DRAWN
         if _row["n"] > 0:
             _ax.bar([_x], [_row["n"]], width=0.62, color=_AQUA)
@@ -1846,7 +1940,7 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     # the right shoulder is where the tall bars are and the left is the only reliably
     # empty corner. Both numbers come from published CSVs, never recomputed here.
     _ax.text(
-        0.01, 0.98, f"{_c['n'].sum():,} pairs",
+        0.01, 0.98, f"{figure_c1_df['n'].sum():,} pairs",
         transform=_ax.transAxes, ha="left", va="top", fontsize=8, color="#0b0b0b",
     )
     _ax.text(
@@ -1877,10 +1971,10 @@ def _(FIG_DIR, GAP_BIN_LABELS, SHARE_DIR, mark_zero, pl, plt):
     )
     _fig.tight_layout()
     _fig.subplots_adjust(bottom=0.22)
-    _fig.savefig(FIG_DIR / "C1_index_gap_distribution.png", dpi=150)
+    _fig.savefig(FIG_DIR / "fig_C1__index_paralytic_pair_gaps.png", dpi=150)
     plt.close(_fig)
-    print(f"C1_index_gap_distribution.png -> {FIG_DIR}")
-    return
+    print(f"fig_C1__index_paralytic_pair_gaps.png -> {FIG_DIR}")
+    return (figure_c1_df,)
 
 
 @app.cell
@@ -1892,10 +1986,10 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
 
     # Read the PUBLISHED csv, never the in-memory frame (P21) -- a figure that
     # disagrees with the table beside it is a bug only this convention catches.
-    _b1 = pl.read_csv(SHARE_DIR / "paralytic_dose_ecdf.csv")
+    figure_b1_df = pl.read_csv(SHARE_DIR / "fig_B1__paralytic_dose_ecdf.csv")
 
     _groups = (
-        _b1.select("med_category", "med_dose_unit")
+        figure_b1_df.select("med_category", "med_dose_unit")
         .unique()
         .sort(["med_category", "med_dose_unit"])
         .rows()
@@ -1905,7 +1999,7 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         # No paralytic administration carries an amount dose at this site.
         # plt.subplots(0, 1, ...) would raise; skip with a clear message instead.
         print(
-            "B1_paralytic_dose_ecdf.png skipped -- paralytic_dose_ecdf.csv has zero "
+            "fig_B1__paralytic_dose_ecdf.png skipped -- its source CSV has zero "
             "rows at this site (no paralytic administration carries an amount dose)"
         )
     else:
@@ -1917,7 +2011,7 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         _axes = [_a[0] for _a in _axes]
 
         for _ax, (_cat, _unit) in zip(_axes, _groups):
-            _p = _b1.filter(
+            _p = figure_b1_df.filter(
                 (pl.col("med_category") == _cat) & (pl.col("med_dose_unit") == _unit)
             ).sort("dose")
             _x = _p.get_column("dose").to_list()
@@ -1958,15 +2052,15 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         _fig.suptitle(
             "B.1 — index paralytic dose, empirical CDF by agent and charted unit\n"
             "one panel per (agent, raw charted unit); no unit conversion (P41)\n"
-            f"{_b1.height} row(s) published",
+            f"{figure_b1_df.height} row(s) published",
             fontsize=11, color=_INK,
         )
         _fig.tight_layout()
         _fig.subplots_adjust(top=1 - 1.5 / _FIG_H, hspace=0.55)
-        _fig.savefig(FIG_DIR / "B1_paralytic_dose_ecdf.png", dpi=150)
+        _fig.savefig(FIG_DIR / "fig_B1__paralytic_dose_ecdf.png", dpi=150)
         plt.close(_fig)
-        print(f"B1_paralytic_dose_ecdf.png -> {FIG_DIR}")
-    return
+        print(f"fig_B1__paralytic_dose_ecdf.png -> {FIG_DIR}")
+    return (figure_b1_df,)
 
 
 if __name__ == "__main__":

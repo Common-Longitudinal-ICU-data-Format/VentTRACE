@@ -38,7 +38,12 @@ import json
 import polars as pl
 
 _EXPLICIT_ID_COLUMNS = {"patient_id", "hospitalization_id", "encounter_block", "p_num"}
-_ID_EXCEPTIONS = {"cohort_run_id"}  # a provenance stamp, not an identifier
+# These names are populated only by pipeline-controlled artifact metadata.
+_ID_EXCEPTIONS = {
+    "artifact_id",
+    "cohort_run_id",
+    "figure_id",
+}  # controlled provenance labels, not person identifiers
 _DATETIME_DTYPES = (pl.Datetime, pl.Date)  # pl.Datetime covers naive AND tz-aware
 
 
@@ -81,8 +86,8 @@ def publish(df, path, label):
     Refuses (raises AssertionError) rather than writes when:
       * the frame carries an identifier column -- any of `patient_id`,
         `hospitalization_id`, `encounter_block`, `p_num`, or any column whose name
-        ends in `_id`. `cohort_run_id` is a provenance stamp, not an identifier,
-        and is exempted.
+        ends in `_id`. `cohort_run_id`, `artifact_id`, and `figure_id` are controlled
+        provenance labels, not person identifiers, and are exempted.
       * the frame carries a datetime column -- checked on dtype (`pl.Datetime`,
         naive or timezone-aware, and `pl.Date`), never on column name. An
         aggregate has no timestamp; every row-level artifact in this study does.

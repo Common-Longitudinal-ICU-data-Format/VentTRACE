@@ -132,6 +132,20 @@ def _(Path, json):
         ("propofol", "mg/kg"): "mg",
         ("fentanyl", "mg/kg"): "mg",
     }
+    # Strict preferred-unit limits for converted summary statistics. Ketamine remains
+    # unfiltered because no clinical threshold was supplied for it.
+    DOSE_SUMMARY_UPPER_BOUNDS = {
+        "etomidate": 200.0,
+        "fentanyl": 500.0,
+        "midazolam": 50.0,
+        "propofol": 500.0,
+        "rocuronium": 400.0,
+        "succinylcholine": 400.0,
+        "vecuronium": 30.0,
+    }
+    # Propofol mcg entries are inaccurate for dose analysis. They remain visible in
+    # step03__sedation_dose_raw_unit_counts.csv and the raw-unit ECDF.
+    INVALID_DOSE_SUMMARY_UNITS = [("propofol", "mcg")]
 
     print(f"site           : {SITE}")
     print(f"window         : +/- {CONTEXT_WINDOW_MINUTES:.0f} min   (P15)")
@@ -139,12 +153,16 @@ def _(Path, json):
     print(f"mar actions    : {' | '.join(MAR_ACTIONS)}")
     print(f"preferred units: {PREFERRED_DOSE_UNITS}   (P18)")
     print(f"unit overrides : {DOSE_UNIT_OVERRIDES}   (P42)")
+    print(f"summary bounds : {DOSE_SUMMARY_UPPER_BOUNDS}")
+    print(f"invalid summary units: {INVALID_DOSE_SUMMARY_UNITS}")
     return (
         CONTEXT_WINDOW_MINUTES,
         DATA_DIR,
+        DOSE_SUMMARY_UPPER_BOUNDS,
         DOSE_UNIT_OVERRIDES,
         FIG_DIR,
         FILETYPE,
+        INVALID_DOSE_SUMMARY_UNITS,
         MAR_ACTIONS,
         OFFSET_BIN_WIDTH,
         PHI_DIR,
@@ -261,7 +279,7 @@ def _(mo):
 
         **No de-bouncing (P14).** The hourly scaffold means a brief non-IMV blip
         manufactures a spurious transition. `n_transitions_in_window` is published — as
-        `imv_transitions_in_window.csv` — so the size of that effect is measurable from the
+        `step03__imv_transitions_per_window.csv` — so the size of that effect is measurable from the
         released output rather than merely asserted here, but no suppression rule is applied
         to it: that would be a second threshold with no evidence behind it. The published
         distribution is the evidence a later reader would need in order to argue for one.
@@ -347,8 +365,8 @@ def _(mo):
         from `01` is the timeline the transition is read off. Both are keyed on
         `encounter_block`, which is seeded from a row index — so a re-extract renumbers
         every block and joining an index artifact from one run to a waterfall from another
-        produces a table that is silently wrong. The anti-join below is what makes that
-        loud instead.
+        produces a table that is silently wrong. The embedded `cohort_run_id` makes that
+        loud while still permitting a legitimate index block with no respiratory rows.
         """
     )
     return
@@ -356,17 +374,22 @@ def _(mo):
 
 @app.cell
 def _(PHI_DIR, pl):
-    index_paralytic = pl.read_parquet(PHI_DIR / "index_paralytic.parquet")
-    resp_waterfall = pl.read_parquet(PHI_DIR / "cohort_resp_waterfall.parquet")
+    index_paralytic = pl.read_parquet(PHI_DIR / "step02__index_paralytic.parquet")
+    resp_waterfall = pl.read_parquet(PHI_DIR / "step01__cohort_resp_waterfall.parquet")
 
     COHORT_RUN_ID = index_paralytic.get_column("cohort_run_id").unique().to_list()
     assert len(COHORT_RUN_ID) == 1, f"index_paralytic carries {len(COHORT_RUN_ID)} run ids"
     COHORT_RUN_ID = COHORT_RUN_ID[0]
 
-    # encounter_block is seeded from a row index, so a re-extract renumbers everything.
-    # Joining an index artifact from one run to a waterfall from another produces a table
-    # that is silently wrong: the ids match, the rows are real, and they describe different
-    # patients. §8.
+    _waterfall_run_ids = resp_waterfall.get_column("cohort_run_id").unique().to_list()
+    assert not _waterfall_run_ids or _waterfall_run_ids == [COHORT_RUN_ID], (
+        "index_paralytic and cohort_resp_waterfall carry different cohort_run_ids; "
+        "re-run 01 and 02 together"
+    )
+
+    # Missing timeline rows are now a valid clinical/data state: cohort entry depends on
+    # a paralytic administration, not on IMV charting. Those blocks become
+    # `no_device_record` below rather than being treated as stale artifacts.
     _blocks_missing = (
         index_paralytic.join(
             resp_waterfall.select("encounter_block").unique(), on="encounter_block", how="anti"
@@ -374,15 +397,10 @@ def _(PHI_DIR, pl):
         .get_column("encounter_block")
         .n_unique()
     )
-    assert _blocks_missing == 0, (
-        f"{_blocks_missing:,} encounter_blocks in index_paralytic have no waterfall rows. "
-        "The two artifacts are almost certainly from different cohort runs -- check "
-        "cohort_run_id and re-run 01 and 02 together."
-    )
-
     print(f"cohort_run_id     : {COHORT_RUN_ID}")
     print(f"index paralytics  : {index_paralytic.height:,}")
     print(f"waterfall rows    : {resp_waterfall.height:,}")
+    print(f"blocks without respiratory rows: {_blocks_missing:,}")
     return COHORT_RUN_ID, index_paralytic, resp_waterfall
 
 
@@ -518,7 +536,7 @@ def _(
 def _(mo):
     mo.md(
         """
-        ### `imv_transition_summary.csv`
+        ### `step03__imv_transition_summary.csv`
 
         The transition rate and the full reason breakdown, as a partition of every index
         paralytic. The four categories are laid out as a fixed grid and left-joined onto the
@@ -575,8 +593,8 @@ def _(SHARE_DIR, context_d, pl, publish):
     )
     publish(
         transition_summary,
-        SHARE_DIR / "imv_transition_summary.csv",
-        "imv_transition_summary",
+        SHARE_DIR / "step03__imv_transition_summary.csv",
+        "step03__imv_transition_summary",
     )
     return (transition_summary,)
 
@@ -585,10 +603,11 @@ def _(SHARE_DIR, context_d, pl, publish):
 def _(mo):
     mo.md(
         """
-        ### `imv_prior_device.csv` — what the airway was immediately before
+        ### `step03__imv_prior_device.csv` — what the airway was immediately before
 
-        P12: block-opens-on-IMV and a null-device predecessor both give a null prior device,
-        so `transition_opens_block` is what separates them in the published table.
+        P12: block-opens-on-IMV and a null-device predecessor both give a null prior device.
+        The published category names distinguish those cases directly, while
+        `transition_opens_block` remains available for machine readers.
         """
     )
     return
@@ -596,12 +615,15 @@ def _(mo):
 
 @app.cell
 def _(SHARE_DIR, context_d, pl, publish):
-    # P12: block-opens-on-IMV and a null-device predecessor both give a null prior device,
-    # so transition_opens_block is what separates them in the published table.
+    # P12: give the two null-predecessor states distinct human-readable labels.
     prior_device = (
         context_d.filter(pl.col("imv_transition"))
         .with_columns(
-            prior_device_category=pl.col("prior_device_category").fill_null("(none charted)")
+            prior_device_category=pl.when(pl.col("prior_device_category").is_not_null())
+            .then(pl.col("prior_device_category"))
+            .when(pl.col("transition_opens_block"))
+            .then(pl.lit("(block opens on IMV)"))
+            .otherwise(pl.lit("(prior row device not charted)"))
         )
         .group_by(["prior_device_category", "transition_opens_block"])
         .agg(n=pl.len())
@@ -613,8 +635,8 @@ def _(SHARE_DIR, context_d, pl, publish):
     )
     publish(
         prior_device,
-        SHARE_DIR / "imv_prior_device.csv",
-        "imv_prior_device",
+        SHARE_DIR / "step03__imv_prior_device.csv",
+        "step03__imv_prior_device",
     )
     return (prior_device,)
 
@@ -623,7 +645,7 @@ def _(SHARE_DIR, context_d, pl, publish):
 def _(mo):
     mo.md(
         """
-        ### `imv_offset_distribution.csv` — where in the window the transition sat
+        ### `fig_D1__imv_transition_offset.csv` — where in the window the transition sat
 
         Twenty-four five-minute bins across the full 120 minutes, left-closed and right-open
         except the last, which is closed so an offset of exactly +60 has a home. Every bin
@@ -674,8 +696,8 @@ def _(
     )
     publish(
         offset_distribution,
-        SHARE_DIR / "imv_offset_distribution.csv",
-        "imv_offset_distribution",
+        SHARE_DIR / "fig_D1__imv_transition_offset.csv",
+        "fig_D1__imv_transition_offset",
     )
     return (offset_distribution,)
 
@@ -684,7 +706,7 @@ def _(
 def _(mo):
     mo.md(
         """
-        ### `imv_transitions_in_window.csv` — how many transitions the window contained
+        ### `step03__imv_transitions_per_window.csv` — how many transitions the window contained
 
         This is the table P14 rests on. Declining to de-bounce is only defensible if the
         size of the effect being declined is **measurable from the released output**, and
@@ -713,12 +735,13 @@ def _(SHARE_DIR, context_d, pl, publish):
     # as an explicit zero rather than being absent from the table. At a site where no
     # index paralytic has a transition in window at all, `_observed` is empty and
     # `.max()` returns None -- `int(None)` would raise TypeError here, after
-    # consort_cohort.csv, cohort_qc.csv, imv_transition_summary.csv and
-    # imv_offset_distribution.csv are already published. Guard it: publish the
+    # step01__consort_cohort.csv, step01__cohort_qc.csv,
+    # step03__imv_transition_summary.csv and fig_D1__imv_transition_offset.csv are
+    # already published. Guard it: publish the
     # well-formed, zero-row table instead of crashing partway through the run.
     if _observed.height == 0:
         print("no index paralytic has an IMV transition in window at this site -- "
-              "publishing imv_transitions_in_window.csv with zero rows")
+              "publishing step03__imv_transitions_per_window.csv with zero rows")
         transitions_in_window = _observed.with_columns(
             pl.col("n_transitions_in_window").cast(pl.Int32)
         )
@@ -737,8 +760,8 @@ def _(SHARE_DIR, context_d, pl, publish):
         )
     publish(
         transitions_in_window,
-        SHARE_DIR / "imv_transitions_in_window.csv",
-        "imv_transitions_in_window",
+        SHARE_DIR / "step03__imv_transitions_per_window.csv",
+        "step03__imv_transitions_per_window",
     )
     return (transitions_in_window,)
 
@@ -762,16 +785,17 @@ def _(mo):
 
         `med_dose` and `med_dose_unit` are the raw charted values carried through this
         section; they are standardised with clifpy to one preferred unit per
-        `med_category` before `sedation_dose.csv` is built (P18, amended 2026-08-10),
+        `med_category` before `fig_E2__sedation_dose_summary.csv` is built
+        (P18, amended 2026-08-10),
         the identical conversion boundary `02` uses. Dose statistics are keyed on
         `med_category` **alone** afterward; the raw unit mix moves to
-        `sedation_dose_units.csv`, a counts-only table, so charting heterogeneity stays
+        `step03__sedation_dose_raw_unit_counts.csv`, a counts-only table, so charting heterogeneity stays
         visible without reintroducing the split the conversion replaces.
 
         ### What E's counts count: PAIRS, not administrations
 
         The join is on `encounter_block`, and a block holds up to twelve index paralytics
-        (`index_per_block.csv`). A
+        (`step02__index_paralytics_per_block.csv`). A
         single physical administration that falls inside two index windows therefore
         contributes **two** rows — once to each window. That is correct and intended: the
         administration genuinely happened within ±60 minutes of both paralytics, and the
@@ -817,7 +841,7 @@ def _(
     # The bridge again -- 03 reaches the medication table by hospitalization_id and drops
     # the column at the join, exactly as 02 does (P5). cohort_index is re-read here rather
     # than threaded through index_paralytic, which deliberately carries no hospitalization.
-    _cohort_index = pl.read_parquet(PHI_DIR / "cohort_index.parquet")
+    _cohort_index = pl.read_parquet(PHI_DIR / "step01__cohort_index.parquet")
     _bridge = (
         _cohort_index.select(["encounter_block", "list_hospitalization_id"])
         .explode("list_hospitalization_id")
@@ -917,7 +941,7 @@ def _(
 
     # ONE ROW PER (index paralytic, administration) PAIR, not per administration. The join
     # is on encounter_block, and a block holds up to twelve index paralytics
-    # (index_per_block.csv), so a single physical administration that lies inside two
+    # (step02__index_paralytics_per_block.csv), so a single physical administration that lies inside two
     # index windows produces two rows. That
     # fan-out is intended -- the administration genuinely belongs to both windows, the same
     # reasoning 02's bridge uses -- but it means every count derived from this frame is a
@@ -1245,6 +1269,66 @@ def _(convert_dose_units_by_med_category, pl):
 
 
 @app.cell
+def _(pl):
+    def filter_doses_for_summary(df, upper_bounds, invalid_units):
+        """Exclude implausible converted doses without changing raw dose QC outputs."""
+        _category = pl.col("med_category").str.strip_chars().str.to_lowercase()
+        _raw_unit = pl.col("med_dose_unit").str.strip_chars().str.to_lowercase()
+
+        _invalid_unit = pl.lit(False)
+        for _med, _unit in invalid_units:
+            _invalid_unit = _invalid_unit | ((_category == _med) & (_raw_unit == _unit))
+
+        _upper_bound = pl.lit(None, dtype=pl.Float64)
+        for _med, _bound in upper_bounds.items():
+            _upper_bound = (
+                pl.when(_category == _med)
+                .then(pl.lit(float(_bound)))
+                .otherwise(_upper_bound)
+            )
+
+        _checked = df.with_columns(
+            _invalid_unit.alias("_summary_invalid_unit"),
+            _upper_bound.alias("_summary_upper_bound"),
+        ).with_columns(
+            pl.when(pl.col("_summary_invalid_unit"))
+            .then(pl.lit("invalid_raw_unit"))
+            .when(
+                pl.col("_summary_upper_bound").is_not_null()
+                & (pl.col("med_dose_converted") <= 0)
+            )
+            .then(pl.lit("non_positive_dose"))
+            .when(
+                pl.col("_summary_upper_bound").is_not_null()
+                & (pl.col("med_dose_converted") >= pl.col("_summary_upper_bound"))
+            )
+            .then(pl.lit("at_or_above_upper_bound"))
+            .otherwise(None)
+            .alias("_summary_exclusion_reason")
+        )
+
+        _excluded = (
+            _checked.filter(pl.col("_summary_exclusion_reason").is_not_null())
+            .group_by(["med_category", "med_dose_unit", "_summary_exclusion_reason"])
+            .agg(n=pl.len())
+            .sort(["med_category", "med_dose_unit", "_summary_exclusion_reason"])
+        )
+        if _excluded.height:
+            print("DOSE SUMMARY exclusions (raw QC outputs retain these rows):")
+            print(_excluded)
+
+        return _checked.filter(
+            pl.col("_summary_exclusion_reason").is_null()
+        ).drop(
+            "_summary_invalid_unit",
+            "_summary_upper_bound",
+            "_summary_exclusion_reason",
+        )
+
+    return (filter_doses_for_summary,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -1252,19 +1336,20 @@ def _(mo):
 
         `index_context.parquet` is written first — the canonical artifact, PHI, never
         shared. Then five released tables, each at its true count (P21):
-        `sedation_summary.csv`, `sedation_offset_distribution.csv`,
-        `sedation_dose.csv`, `sedation_dose_units.csv`, and
-        `sedation_dose_unit_corrections.csv`.
+        `step03__sedation_summary.csv`, `fig_E1__sedation_offset.csv`,
+        `fig_E2__sedation_dose_summary.csv`,
+        `step03__sedation_dose_raw_unit_counts.csv`, and
+        `step03__sedation_dose_unit_corrections.csv`.
 
         Every bin of the offset grid is emitted for every agent, including the empty ones: an
         explicit published zero is what lets a reader tell an empty bin from one with no
         observations at all.
 
-        `sedation_dose.csv` carries `n_in_preferred_unit`: how many administrations were
+        `fig_E2__sedation_dose_summary.csv` carries `n_in_preferred_unit`: how many administrations were
         **already** charted in the agent's preferred unit, before conversion touched
         anything. Where it sits materially below `n_admin_windows`, the published median
         pools two unit populations rather than one, and the raw split in
-        `sedation_dose_units.csv` should be read before trusting the row -- ketamine is
+        `step03__sedation_dose_raw_unit_counts.csv` should be read before trusting the row -- ketamine is
         the live instance of this at this site: 8 of its 13 administrations were charted
         in mcg, and the combined median lands inside that artifact rather than near the
         clinical dose range.
@@ -1286,8 +1371,8 @@ def _(
     publish,
     sed_in_window,
 ):
-    index_context.write_parquet(PHI_DIR / "index_context.parquet")
-    print(f"index_context.parquet   {index_context.height:,} rows -> {PHI_DIR}")
+    index_context.write_parquet(PHI_DIR / "step03__index_context.parquet")
+    print(f"step03__index_context.parquet   {index_context.height:,} rows -> {PHI_DIR}")
 
     sedation_summary = (
         index_context.with_columns(agent_set=pl.col("sedative_agents").list.join("+"))
@@ -1307,8 +1392,8 @@ def _(
     )
     publish(
         sedation_summary,
-        SHARE_DIR / "sedation_summary.csv",
-        "sedation_summary",
+        SHARE_DIR / "step03__sedation_summary.csv",
+        "step03__sedation_summary",
     )
 
     _grid = (
@@ -1340,8 +1425,8 @@ def _(
     )
     publish(
         sedation_offsets,
-        SHARE_DIR / "sedation_offset_distribution.csv",
-        "sedation_offset_distribution",
+        SHARE_DIR / "fig_E1__sedation_offset.csv",
+        "fig_E1__sedation_offset",
     )
     return sedation_offsets, sedation_summary
 
@@ -1383,17 +1468,20 @@ def _(
     )
     publish(
         sedation_dose_unit_corrections,
-        SHARE_DIR / "sedation_dose_unit_corrections.csv",
-        "sedation_dose_unit_corrections",
+        SHARE_DIR / "step03__sedation_dose_unit_corrections.csv",
+        "step03__sedation_dose_unit_corrections",
     )
     return (sedation_dose_unit_corrections,)
 
 
 @app.cell
 def _(
+    DOSE_SUMMARY_UPPER_BOUNDS,
     DOSE_UNIT_OVERRIDES,
+    INVALID_DOSE_SUMMARY_UNITS,
     PREFERRED_DOSE_UNITS,
     convert_doses_to_preferred_units,
+    filter_doses_for_summary,
     pl,
     sed_in_window,
 ):
@@ -1429,11 +1517,17 @@ def _(
     print("_convert_status breakdown:")
     print(_status_breakdown)
 
-    return (sedation_dose_converted,)
+    sedation_dose_summary_clean = filter_doses_for_summary(
+        sedation_dose_converted,
+        DOSE_SUMMARY_UPPER_BOUNDS,
+        INVALID_DOSE_SUMMARY_UNITS,
+    )
+
+    return sedation_dose_converted, sedation_dose_summary_clean
 
 
 @app.cell
-def _(SHARE_DIR, pl, publish, sedation_dose_converted):
+def _(SHARE_DIR, pl, publish, sedation_dose_summary_clean):
     # P18 (amended): keyed on med_category ALONE, in the standardised unit.
     # interpolation="linear" on both quantiles, explicitly: polars' default is
     # "nearest", which at small n republishes a raw charted dose verbatim as the
@@ -1450,7 +1544,7 @@ def _(SHARE_DIR, pl, publish, sedation_dose_converted):
     # buys smoother behaviour as n changes; it does not buy a guarantee of never
     # equaling an individual observation.
     sedation_dose = (
-        sedation_dose_converted.group_by("med_category")
+        sedation_dose_summary_clean.group_by("med_category")
         .agg(
             n_admin_windows=pl.len(),
             # How many administrations were ALREADY in the preferred unit, before
@@ -1459,6 +1553,8 @@ def _(SHARE_DIR, pl, publish, sedation_dose_converted):
             n_in_preferred_unit=(
                 pl.col("med_dose_unit") == pl.col("med_dose_unit_converted")
             ).sum(),
+            mean_dose=pl.col("med_dose_converted").mean(),
+            sd_dose=pl.col("med_dose_converted").std(),
             median_dose=pl.col("med_dose_converted").median(),
             p25_dose=pl.col("med_dose_converted").quantile(0.25, interpolation="linear"),
             p75_dose=pl.col("med_dose_converted").quantile(0.75, interpolation="linear"),
@@ -1468,8 +1564,8 @@ def _(SHARE_DIR, pl, publish, sedation_dose_converted):
     )
     publish(
         sedation_dose,
-        SHARE_DIR / "sedation_dose.csv",
-        "sedation_dose",
+        SHARE_DIR / "fig_E2__sedation_dose_summary.csv",
+        "fig_E2__sedation_dose_summary",
     )
     return (sedation_dose,)
 
@@ -1485,8 +1581,8 @@ def _(SHARE_DIR, pl, publish, sed_in_window):
     )
     publish(
         sedation_dose_units,
-        SHARE_DIR / "sedation_dose_units.csv",
-        "sedation_dose_units",
+        SHARE_DIR / "step03__sedation_dose_raw_unit_counts.csv",
+        "step03__sedation_dose_raw_unit_counts",
     )
     return (sedation_dose_units,)
 
@@ -1497,8 +1593,9 @@ def _(mo):
         """
         ### The whole dose distribution, on the unit the site actually charted
 
-        P18 publishes a dose as three numbers on a converted scale. That is thinner
-        than the data supports, and the cell above says why in its own margin: polars
+        P18/P43 publish mean, SD and three quantiles on a cleaned converted scale. The
+        three quantiles are thinner than the data supports, and the cell above says why
+        in its own margin: polars
         places the q-th quantile at fractional index `(n-1)*q`, so whenever `(n-1)` is
         a multiple of 4 the published p25, median and p75 **are** three charted doses
         rather than statistics computed from them.
@@ -1513,9 +1610,9 @@ def _(mo):
         Keyed on the **raw charted unit**, deliberately, not the converted one. P18's
         conversion folds ketamine's `mcg` rows in with its `mg` rows; on the raw unit
         that split is visible directly instead of by cross-referencing
-        `sedation_dose_units.csv` and inferring it.
+        `step03__sedation_dose_raw_unit_counts.csv` and inferring it.
 
-        `n_total` equals `sedation_dose_units.csv`'s `n` for fully dosed groups. A
+        `n_total` equals `step03__sedation_dose_raw_unit_counts.csv`'s `n` for fully dosed groups. A
         null-dose group remains in the counts table but has no ECDF position; that
         difference is printed explicitly.
         """
@@ -1587,7 +1684,8 @@ def _(pl):
 def _(SHARE_DIR, ecdf_by_group, pl, publish, sed_in_window):
     # The ECDF and unit-count table consume the same raw frame. A row here is an (index paralytic,
     # administration) pair, not a distinct administration: a sedative charted inside
-    # two index paralytics' windows is counted in both, exactly as sedation_dose.csv's
+    # two index paralytics' windows is counted in both, exactly as
+    # fig_E2__sedation_dose_summary.csv's
     # n_admin_windows already is.
     sedation_dose_ecdf = ecdf_by_group(sed_in_window)
 
@@ -1618,7 +1716,8 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, sed_in_window):
         f"sed_in_window:\nexpected:\n{_expected}\ngot:\n{_got}"
     )
 
-    # The gap against sedation_dose_units.csv's own count: reported, never fatal (spec §4).
+    # The gap against step03__sedation_dose_raw_unit_counts.csv's own count: reported,
+    # never fatal (spec §4).
     # That file counts every administration in the group; this one counts only those
     # carrying a dose, so where the two differ the difference IS the null count. A
     # group that is entirely null-dosed vanishes from the ECDF and shows n = 0 here
@@ -1636,15 +1735,16 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, sed_in_window):
     )
     if _gap.height:
         print(
-            "  [sedation_dose_ecdf] n_total sits below sedation_dose_units.csv's n for the "
+            "  [sedation_dose_ecdf] n_total sits below "
+            "step03__sedation_dose_raw_unit_counts.csv's n for the "
             "groups below -- the difference is rows carrying a null dose:"
         )
         print(_gap)
 
     publish(
         sedation_dose_ecdf,
-        SHARE_DIR / "sedation_dose_ecdf.csv",
-        "sedation_dose_ecdf",
+        SHARE_DIR / "fig_E3__sedation_dose_ecdf.csv",
+        "fig_E3__sedation_dose_ecdf",
     )
     return (sedation_dose_ecdf,)
 
@@ -1769,11 +1869,11 @@ def _(
     _MUTED = "#898781"
     _GRID = "#e1e0d9"
 
-    _d1 = pl.read_csv(SHARE_DIR / "imv_offset_distribution.csv").sort("bin_order")
+    figure_d1_df = pl.read_csv(SHARE_DIR / "fig_D1__imv_transition_offset.csv").sort("bin_order")
 
     _fig, _ax = plt.subplots(figsize=(11, 5.4))
 
-    for _row in _d1.iter_rows(named=True):
+    for _row in figure_d1_df.iter_rows(named=True):
         if _row["n"] > 0:
             _ax.bar([_row["bin_order"]], [_row["n"]], width=0.72, color=_BLUE)
         else:
@@ -1811,10 +1911,10 @@ def _(
     )
     _fig.tight_layout()
     _fig.subplots_adjust(bottom=0.28)
-    _fig.savefig(FIG_DIR / "D1_imv_offset.png", dpi=150)
+    _fig.savefig(FIG_DIR / "fig_D1__imv_transition_offset.png", dpi=150)
     plt.close(_fig)
-    print(f"D1_imv_offset.png -> {FIG_DIR}")
-    return
+    print(f"fig_D1__imv_transition_offset.png -> {FIG_DIR}")
+    return (figure_d1_df,)
 
 
 @app.cell
@@ -1859,16 +1959,16 @@ def _(
     _MUTED = "#898781"
     _GRID = "#e1e0d9"
 
-    _e1 = pl.read_csv(SHARE_DIR / "sedation_offset_distribution.csv")
-    _agents = sorted(_e1.get_column("med_category").unique().to_list())
+    figure_e1_df = pl.read_csv(SHARE_DIR / "fig_E1__sedation_offset.csv")
+    _agents = sorted(figure_e1_df.get_column("med_category").unique().to_list())
 
     if not _agents:
         # No sedative administration falls inside any index paralytic's ±60-minute
-        # window at this site -- sedation_offset_distribution.csv is published with
+        # window at this site -- fig_E1__sedation_offset.csv is published with
         # zero rows (see the cross-join that builds it) and there is nothing to plot.
         # plt.subplots(0, 1, ...) below would raise; skip with a clear message instead.
         print(
-            "E1_sedation_offset.png skipped -- sedation_offset_distribution.csv has "
+            "fig_E1__sedation_offset.png skipped -- its source CSV has "
             "zero rows at this site (no sedative administration in any index "
             "paralytic's window)"
         )
@@ -1880,7 +1980,7 @@ def _(
         _axes = [_a[0] for _a in _axes]
 
         for _ax, _agent in zip(_axes, _agents):
-            _s = _e1.filter(pl.col("med_category") == _agent).sort("bin_order")
+            _s = figure_e1_df.filter(pl.col("med_category") == _agent).sort("bin_order")
 
             for _row in _s.iter_rows(named=True):
                 if _row["n_admin_windows"] > 0:
@@ -1907,7 +2007,7 @@ def _(
             # visible bar communicates nothing on its own. This annotation carries the
             # panel's true magnitude, read from the same published frame the bars are
             # drawn from -- never recomputed -- so it cannot disagree with
-            # sedation_offset_distribution.csv.
+            # fig_E1__sedation_offset.csv.
             _ax.text(
                 0.01, 0.90,
                 f"n = {_s['n_admin_windows'].sum():,}, peak = {_s['n_admin_windows'].max():,}",
@@ -1941,10 +2041,10 @@ def _(
         _fig.subplots_adjust(
             top=1 - 1.15 / (1.55 * len(_agents) + 2.6), bottom=0.20, hspace=0.62
         )
-        _fig.savefig(FIG_DIR / "E1_sedation_offset.png", dpi=150)
+        _fig.savefig(FIG_DIR / "fig_E1__sedation_offset.png", dpi=150)
         plt.close(_fig)
-        print(f"E1_sedation_offset.png -> {FIG_DIR}")
-    return
+        print(f"fig_E1__sedation_offset.png -> {FIG_DIR}")
+    return (figure_e1_df,)
 
 
 @app.cell
@@ -1956,7 +2056,7 @@ def _(mo):
         One panel per `med_dose_unit`, each with **its own x-axis**. Doses are
         standardised with clifpy before this figure is drawn (P18, amended
         2026-08-10), so `med_dose_unit` here is the preferred unit per `med_category`,
-        not the raw charted one -- `sedation_dose_units.csv` is where the raw mix is
+        not the raw charted one -- `step03__sedation_dose_raw_unit_counts.csv` is where the raw mix is
         published. Putting `mg` and `mcg` on a single shared axis would still draw a
         comparison that is not meaningful at a glance, so separate panels are kept even
         though standardisation means the units within a panel now genuinely agree.
@@ -1979,21 +2079,21 @@ def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
     _GRID = "#e1e0d9"
     _SURFACE = "#ffffff"
 
-    _e2 = pl.read_csv(SHARE_DIR / "sedation_dose.csv")
+    figure_e2_df = pl.read_csv(SHARE_DIR / "fig_E2__sedation_dose_summary.csv")
 
-    _units = sorted(_e2.get_column("med_dose_unit").unique().to_list())
+    _units = sorted(figure_e2_df.get_column("med_dose_unit").unique().to_list())
 
     if not _units:
         # No sedative administration falls inside any index paralytic's window at this
-        # site -- sedation_dose.csv is published with zero rows and there is nothing to
+        # site -- fig_E2__sedation_dose_summary.csv is published with zero rows and there is nothing to
         # plot. plt.subplots(0, 1, ...) below would raise; skip with a clear message.
         print(
-            "E2_sedation_dose.png skipped -- sedation_dose.csv has zero rows at this "
+            "fig_E2__sedation_dose_summary.png skipped -- its source CSV has zero rows at this "
             "site (no sedative administration in any index paralytic's window)"
         )
     else:
         _ratios = [
-            max(1, _e2.filter(pl.col("med_dose_unit") == _u).height) for _u in _units
+            max(1, figure_e2_df.filter(pl.col("med_dose_unit") == _u).height) for _u in _units
         ]
         _n_panels = len(_ratios)
 
@@ -2008,7 +2108,7 @@ def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
         _axes = [_a[0] for _a in _axes]
 
         for _ax, _unit in zip(_axes, _units):
-            _p = _e2.filter(pl.col("med_dose_unit") == _unit).sort("median_dose")
+            _p = figure_e2_df.filter(pl.col("med_dose_unit") == _unit).sort("median_dose")
             _y = list(range(_p.height))
             _ax.barh(_y, _p.get_column("median_dose").to_list(), height=0.4, color=_BLUE)
             # The IQR whisker crosses the bar it belongs to, so it carries a 3px ring in
@@ -2067,16 +2167,16 @@ def _(FIG_DIR, SHARE_DIR, path_effects, pl, plt):
 
         _fig.suptitle(
             "E.2 — sedative dose by agent and standardised unit\n"
-            "one panel per unit; the raw charted mix is in sedation_dose_units.csv, not here (P18)\n"
-            f"{_e2.height} agent row(s) published",
+            "one panel per unit; raw units are in step03__sedation_dose_raw_unit_counts.csv (P18)\n"
+            f"{figure_e2_df.height} agent row(s) published",
             fontsize=11, color=_INK,
         )
         _fig.tight_layout()
         _fig.subplots_adjust(top=1 - 1.15 / _FIG_H, hspace=1.15)
-        _fig.savefig(FIG_DIR / "E2_sedation_dose.png", dpi=150)
+        _fig.savefig(FIG_DIR / "fig_E2__sedation_dose_summary.png", dpi=150)
         plt.close(_fig)
-        print(f"E2_sedation_dose.png -> {FIG_DIR}")
-    return
+        print(f"fig_E2__sedation_dose_summary.png -> {FIG_DIR}")
+    return (figure_e2_df,)
 
 
 @app.cell
@@ -2087,10 +2187,10 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     _GRID = "#e1e0d9"
 
     # Read the PUBLISHED csv, never the in-memory frame (P21).
-    _e3 = pl.read_csv(SHARE_DIR / "sedation_dose_ecdf.csv")
+    figure_e3_df = pl.read_csv(SHARE_DIR / "fig_E3__sedation_dose_ecdf.csv")
 
     _groups = (
-        _e3.select("med_category", "med_dose_unit")
+        figure_e3_df.select("med_category", "med_dose_unit")
         .unique()
         .sort(["med_category", "med_dose_unit"])
         .rows()
@@ -2100,7 +2200,7 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         # No sedative administration falls inside any index paralytic's window at
         # this site. plt.subplots(0, 1, ...) would raise; skip with a clear message.
         print(
-            "E3_sedation_dose_ecdf.png skipped -- sedation_dose_ecdf.csv has zero "
+            "fig_E3__sedation_dose_ecdf.png skipped -- its source CSV has zero "
             "rows at this site (no sedative administration in any index window)"
         )
     else:
@@ -2112,7 +2212,7 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         _axes = [_a[0] for _a in _axes]
 
         for _ax, (_cat, _unit) in zip(_axes, _groups):
-            _p = _e3.filter(
+            _p = figure_e3_df.filter(
                 (pl.col("med_category") == _cat) & (pl.col("med_dose_unit") == _unit)
             ).sort("dose")
             _x = _p.get_column("dose").to_list()
@@ -2150,15 +2250,15 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         _fig.suptitle(
             "E.3 — sedative dose, empirical CDF by agent and charted unit\n"
             "one panel per (agent, raw charted unit); no unit conversion (P41)\n"
-            f"{_e3.height} row(s) published",
+            f"{figure_e3_df.height} row(s) published",
             fontsize=11, color=_INK,
         )
         _fig.tight_layout()
         _fig.subplots_adjust(top=1 - 1.7 / _FIG_H, hspace=0.55)
-        _fig.savefig(FIG_DIR / "E3_sedation_dose_ecdf.png", dpi=150)
+        _fig.savefig(FIG_DIR / "fig_E3__sedation_dose_ecdf.png", dpi=150)
         plt.close(_fig)
-        print(f"E3_sedation_dose_ecdf.png -> {FIG_DIR}")
-    return
+        print(f"fig_E3__sedation_dose_ecdf.png -> {FIG_DIR}")
+    return (figure_e3_df,)
 
 
 if __name__ == "__main__":

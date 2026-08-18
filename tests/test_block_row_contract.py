@@ -4,11 +4,12 @@ Three notebooks consume one frame and the whole no-drift argument rests on them
 agreeing about which rows exist. What can go wrong without announcing itself:
 
   * the p_num = 1 subset drifting from the number of blocks that have an index
-    paralytic, which would make Table 1's N disagree with index_per_block.csv;
+    paralytic, which would make Table 1's N disagree with
+    step02__index_paralytics_per_block.csv;
   * a block-level column (LOS, mortality) varying WITHIN a block, which would
     mean it was computed per event instead of per block and would make the
     index-level table's outcome rows meaningless;
-  * the evidence tier being non-monotone in its inputs.
+  * the evidence category failing to partition the IMV/sedation combinations.
 
 Skipped when the pipeline has not been run -- these assert on real output.
 
@@ -41,18 +42,18 @@ def _dirs():
 @pytest.fixture(scope="module")
 def frame():
     phi, _ = _dirs()
-    path = phi / "index_covariates.parquet"
+    path = phi / "step04__index_covariates.parquet"
     if not path.exists():
-        pytest.skip("index_covariates.parquet absent; run code/04_covariates.py first")
+        pytest.skip("step04__index_covariates.parquet absent; run code/04_covariates.py first")
     return pl.read_parquet(path)
 
 
 @pytest.fixture(scope="module")
 def index_per_block():
     _, share = _dirs()
-    path = share / "index_per_block.csv"
+    path = share / "step02__index_paralytics_per_block.csv"
     if not path.exists():
-        pytest.skip("index_per_block.csv absent; run code/02_index_paralytic.py first")
+        pytest.skip("step02__index_paralytics_per_block.csv absent; run code/02_index_paralytic.py first")
     return pl.read_csv(path)
 
 
@@ -86,9 +87,9 @@ def table1_index():
 @pytest.fixture(scope="module")
 def cpt_cascade():
     _, share = _dirs()
-    path = share / "cpt_cascade.csv"
+    path = share / "fig_F1__cpt_cascade.csv"
     if not path.exists():
-        pytest.skip("cpt_cascade.csv absent; run code/06_reference_cpt.py first")
+        pytest.skip("fig_F1__cpt_cascade.csv absent; run code/06_reference_cpt.py first")
     return pl.read_csv(path)
 
 
@@ -101,12 +102,30 @@ def table1_block_readable():
     return pl.read_csv(path)
 
 
+@pytest.fixture(scope="module")
+def consort_cohort():
+    _, share = _dirs()
+    return pl.read_csv(share / "step01__consort_cohort.csv")
+
+
+@pytest.fixture(scope="module")
+def imv_prior_device():
+    _, share = _dirs()
+    return pl.read_csv(share / "step03__imv_prior_device.csv")
+
+
+@pytest.fixture(scope="module")
+def sofa_coverage():
+    _, share = _dirs()
+    return pl.read_csv(share / "step04__sofa_coverage.csv")
+
+
 def test_p_num_one_subset_matches_index_per_block(frame, index_per_block):
     """The block table's N must equal the blocks that have at least one index."""
     expected = index_per_block.get_column("n_blocks").sum()
     got = frame.filter(pl.col("p_num") == 1).height
     assert got == expected, (
-        f"the p_num = 1 subset has {got:,} rows but index_per_block.csv reports "
+        f"the p_num = 1 subset has {got:,} rows but step02__index_paralytics_per_block.csv reports "
         f"{expected:,} blocks with at least one index paralytic"
     )
 
@@ -143,9 +162,23 @@ def test_block_level_columns_are_constant_within_a_block(frame):
 
 def test_evidence_tier_is_consistent_with_its_inputs(frame):
     bad = frame.filter(
-        ((pl.col("evidence_tier") == 3) & ~(pl.col("imv_transition") & pl.col("any_sedative")))
-        | ((pl.col("evidence_tier") == 2) & ~(pl.col("imv_transition") & ~pl.col("any_sedative")))
-        | ((pl.col("evidence_tier") == 1) & pl.col("imv_transition"))
+        (
+            (pl.col("evidence_tier") == 1)
+            & (pl.col("imv_transition") | pl.col("any_sedative"))
+        )
+        | (
+            (pl.col("evidence_tier") == 2)
+            & ~(pl.col("imv_transition") & ~pl.col("any_sedative"))
+        )
+        | (
+            (pl.col("evidence_tier") == 3)
+            & ~(pl.col("imv_transition") & pl.col("any_sedative"))
+        )
+        | (
+            (pl.col("evidence_tier") == 4)
+            & ~(~pl.col("imv_transition") & pl.col("any_sedative"))
+        )
+        | ~pl.col("evidence_tier").is_in([1, 2, 3, 4])
     )
     assert bad.height == 0, f"{bad.height:,} rows have a tier inconsistent with D/E"
 
@@ -159,8 +192,8 @@ def test_block_and_index_artifacts_agree_on_n(
     Three independently-computed block counts must be identical:
 
       * table1_by_agent_block.json's own n_rows row
-      * cpt_cascade.csv's n_blocks, summed across the three evidence tiers
-      * index_per_block.csv's n_blocks, summed across the >=1-index grid
+      * fig_F1__cpt_cascade.csv's n_blocks, summed across the four evidence categories
+      * step02__index_paralytics_per_block.csv's n_blocks, summed across the >=1-index grid
 
     A fourth, cpt_offset_distribution.csv, was checked here until 2026-08-14, when
     P30 was withdrawn and that artifact with it.
@@ -180,14 +213,14 @@ def test_block_and_index_artifacts_agree_on_n(
 
     assert _t1_block_n_rows == _cpt_cascade_n == _index_per_block_n, (
         "the three block counts disagree: table1_by_agent_block.json n_rows="
-        f"{_t1_block_n_rows}, cpt_cascade.csv sum(n_blocks)={_cpt_cascade_n}, "
-        f"index_per_block.csv sum(n_blocks)={_index_per_block_n}"
+        f"{_t1_block_n_rows}, fig_F1__cpt_cascade.csv sum(n_blocks)={_cpt_cascade_n}, "
+        f"step02__index_paralytics_per_block.csv sum(n_blocks)={_index_per_block_n}"
     )
 
     _t1_index_n_rows = table1_index.filter(pl.col("statistic") == "n_rows").get_column("overall")[0]
     assert _t1_index_n_rows == frame.height, (
         f"table1_by_agent_index.json reports n_rows={_t1_index_n_rows} but "
-        f"index_covariates.parquet has {frame.height:,} rows"
+        f"step04__index_covariates.parquet has {frame.height:,} rows"
     )
 
 
@@ -200,6 +233,101 @@ def test_agent_stratum_collapses_only_combinations(frame):
     assert single.filter(pl.col("agent_label").str.contains(r"\+")).height == 0, (
         "a co-administration label was not collapsed into 'combination'"
     )
+
+
+def test_paralytic_cohort_and_index_blocks_reconcile(frame, consort_cohort):
+    analytic_n = consort_cohort.filter(pl.col("step") == "ANALYTIC COHORT").get_column(
+        "n_encounters"
+    )[0]
+    assert analytic_n == frame.get_column("encounter_block").n_unique()
+    assert consort_cohort.filter(
+        pl.col("step") == "include: >=1 qualifying paralytic administration"
+    ).height == 1
+
+
+def test_added_covariates_obey_their_contract(frame):
+    for _h in (1, 6, 24):
+        assert f"lowest_dbp_{_h}h" in frame.columns
+
+    sofa_parts = [
+        "sofa_cv_97",
+        "sofa_coag",
+        "sofa_liver",
+        "sofa_resp",
+        "sofa_cns",
+        "sofa_renal",
+    ]
+    assert frame.filter(
+        pl.col("sofa_total") != pl.sum_horizontal([pl.col(c) for c in sofa_parts])
+    ).height == 0
+
+    icu_cols = [
+        c for c in frame.columns
+        if c.startswith("icu_type_") and not c.endswith("_available")
+    ]
+    assert frame.filter(
+        pl.sum_horizontal([pl.col(c).cast(pl.Int8) for c in icu_cols])
+        != (pl.col("location_at_index") == "icu").cast(pl.Int8)
+    ).height == 0
+
+    agents = ["norepinephrine", "vasopressin", "epinephrine", "phenylephrine", "dopamine"]
+    for _h in (1, 6, 24):
+        any_col = f"vasopressor_{_h}h"
+        agent_cols = [f"vasopressor_{agent}_{_h}h" for agent in agents]
+        if frame.get_column(any_col).null_count() < frame.height:
+            assert frame.filter(
+                pl.col(any_col)
+                != pl.any_horizontal([pl.col(c) for c in agent_cols])
+            ).height == 0
+
+    devices = [
+        "imv", "nippv", "cpap", "high_flow_nc", "face_mask",
+        "trach_collar", "nasal_cannula", "room_air", "other",
+    ]
+    for device in devices:
+        assert frame.filter(
+            pl.col(f"respiratory_device_{device}_1h")
+            & ~pl.col(f"respiratory_device_{device}_6h")
+        ).height == 0
+        assert frame.filter(
+            pl.col(f"respiratory_device_{device}_6h")
+            & ~pl.col(f"respiratory_device_{device}_24h")
+        ).height == 0
+
+
+def test_sofa_coverage_is_complete_component_inventory(sofa_coverage):
+    assert set(sofa_coverage.get_column("component")) == {
+        "sofa_cv_97",
+        "sofa_coag",
+        "sofa_liver",
+        "sofa_resp",
+        "sofa_cns",
+        "sofa_renal",
+    }
+    assert sofa_coverage.filter(
+        ~pl.col("pct_events_available").is_between(0, 100)
+    ).height == 0
+
+
+def test_prior_device_null_states_have_distinct_labels(imv_prior_device):
+    labels = set(imv_prior_device.get_column("prior_device_category"))
+    assert "(none charted)" not in labels
+    assert "(block opens on IMV)" in labels
+    assert "(prior row device not charted)" in labels
+
+
+def test_readable_table_contains_requested_rows(table1_block_readable):
+    variables = table1_block_readable.get_column("variable")
+    for text in (
+        "Lowest diastolic blood pressure",
+        "SOFA score",
+        "Any vasopressor",
+        "Respiratory support: room air",
+        "Location at the index paralytic — hospital ward",
+        "ICU type: medical_icu",
+        "Intubation context category",
+    ):
+        assert variables.str.contains(text, literal=True).any(), text
 
 
 def test_the_readable_table_restates_the_long_table(table1_block, table1_block_readable):

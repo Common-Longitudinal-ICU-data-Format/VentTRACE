@@ -90,10 +90,51 @@ def _(Path, json):
     STRATA = ["rocuronium", "succinylcholine", "vecuronium", "combination"]
 
     LOOKBACK_HOURS = [1, 6, 24]
+    VASOPRESSORS = [
+        "norepinephrine",
+        "vasopressin",
+        "epinephrine",
+        "phenylephrine",
+        "dopamine",
+    ]
+    RESPIRATORY_DEVICES = [
+        "room air",
+        "nasal cannula",
+        "cpap",
+        "nippv",
+        "high flow nc",
+        "face mask",
+        "imv",
+        "trach collar",
+        "other",
+    ]
+    ICU_TYPES = [
+        "general_icu",
+        "cardiac_icu",
+        "cardiothoracic_surgical_icu",
+        "mixed_cardiothoracic_icu",
+        "surgical_icu",
+        "burn_icu",
+        "neuro_icu",
+        "neurosurgical_icu",
+        "mixed_neuro_icu",
+        "medical_icu",
+    ]
 
     print(f"site   : {SITE}")
     print(f"strata : {' | '.join(STRATA)}")
-    return FIG_DIR, LOOKBACK_HOURS, PHI_DIR, SHARE_DIR, SITE, STRATA, config
+    return (
+        FIG_DIR,
+        ICU_TYPES,
+        LOOKBACK_HOURS,
+        PHI_DIR,
+        RESPIRATORY_DEVICES,
+        SHARE_DIR,
+        SITE,
+        STRATA,
+        VASOPRESSORS,
+        config,
+    )
 
 
 @app.cell
@@ -167,7 +208,7 @@ def _(pl):
 
         The level list is fixed rather than observed so a category absent at this site is
         published as an explicit zero instead of a missing row -- the same principle as
-        `index_per_block.csv`'s contiguous n_index grid and Figure A.1's baseline
+        `step02__index_paralytics_per_block.csv`'s contiguous n_index grid and Figure A.1's baseline
         diamonds. A missing row and a zero row are indistinguishable to a reader; only
         one of them is a measurement.
 
@@ -215,7 +256,16 @@ def _(pl):
 
 
 @app.cell
-def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
+def _(
+    ICU_TYPES,
+    LOOKBACK_HOURS,
+    RESPIRATORY_DEVICES,
+    VASOPRESSORS,
+    binary_rows,
+    categorical_rows,
+    continuous_rows,
+    pl,
+):
     EVENT = "index event"
     BLOCK = "encounter block; repeated for each index event in the index-level table"
 
@@ -231,12 +281,12 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
 
         `event_unit` is P35's whole purpose (FIX 3 of the 2026-08-12 final review): the
         unit stamped on the *substantive* per-event rows -- demographics, physiology,
-        life support, evidence tier. It used to be the module constant EVENT
+        life support, evidence category. It used to be the module constant EVENT
         unconditionally, which is correct for the index table (each row IS an index
         event) but wrong for the block table, where each row is measured at the block's
         p_num = 1 event and stands for the block. Publishing "index event" there made
         `table1_by_agent_block`'s evidence_tier[1]_n = 1084 carry a unit that
-        contradicts both `cpt_cascade.csv` (the identical 1,084 published as n_blocks)
+        contradicts both `fig_F1__cpt_cascade.csv` (the identical 1,084 published as n_blocks)
         and this same file's own n_rows row (which already said "encounter block"). A
         unit column that is wrong is worse than no unit column at all, because a reader
         trusts it exactly where it lies.
@@ -299,13 +349,14 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
                   ["n_rows", f"{column}_n_nonnull"],
                   f"rows with no {column}", unit, digits=0)
 
-        def _bin(column, group, label, rule, unit):
+        def _bin(column, group, label, rule, unit, show_missing=True):
             rows.extend(binary_rows(df, column, rule, unit))
             _show(group, f"{label} — n (%)", "n_pct",
                   [f"{column}_n", f"{column}_pct"], rule, unit, digits=0)
-            _show(group, f"{label} — missing, n", "missing",
-                  ["n_rows", f"{column}_n_nonnull"],
-                  f"rows with no {column}", unit, digits=0)
+            if show_missing:
+                _show(group, f"{label} — missing, n", "missing",
+                      ["n_rows", f"{column}_n_nonnull"],
+                      f"rows with no {column}", unit, digits=0)
 
         def _cat(column, group, label, rule, unit, levels):
             rows.extend(categorical_rows(df, column, rule, unit, levels))
@@ -320,7 +371,19 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
                   f"rows with an absent (null) {column}, not the literal string", unit, digits=0)
 
         _count("n_rows", COHORT, f"Total {table_unit}s", "rows in this table's unit", table_unit, float(df.height))
-        _count("n_blocks", COHORT, "Distinct encounter blocks", "distinct encounter_block", "encounter block", float(df.get_column("encounter_block").n_unique()))
+        _block_label = (
+            "Distinct encounter blocks (QC; equals total above)"
+            if table_unit == "encounter block"
+            else "Distinct encounter blocks"
+        )
+        _count(
+            "n_blocks",
+            COHORT,
+            _block_label,
+            "unique encounter_block; same-patient hospitalizations separated by <6h are stitched into one block",
+            "encounter block",
+            float(df.get_column("encounter_block").n_unique()),
+        )
         # Patient granularity, not block: a patient can span more than one block, so this
         # is neither a block count nor repeated per index event.
         _count("n_patients", COHORT, "Distinct patients", "distinct patient_id", "patient", float(df.get_column("patient_id").n_unique()))
@@ -335,9 +398,17 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
         _cat("ethnicity_category", DEMOG, "Ethnicity", "patient.ethnicity_category, lower-cased", event_unit, ethnicity_levels)
 
         _cont("cci", COMORB, "Charlson comorbidity index", "Charlson via clifpy on the hospitalization containing t0", event_unit)
+        _cont(
+            "sofa_total",
+            COMORB,
+            "SOFA score in the 24 h before the index paralytic",
+            "clifpy.compute_sofa_polars worst values in [t0-24h, t0]; missing component scores filled with 0",
+            event_unit,
+        )
 
         for _short, _dir, _label, _units in (
             ("sbp", "lowest", "Lowest systolic blood pressure", "mmHg"),
+            ("dbp", "lowest", "Lowest diastolic blood pressure", "mmHg"),
             ("hr", "highest", "Highest heart rate", "bpm"),
             ("spo2", "lowest", "Lowest SpO2", "%"),
         ):
@@ -347,19 +418,122 @@ def _(LOOKBACK_HOURS, binary_rows, categorical_rows, continuous_rows, pl):
                       f"{_dir} vitals {_short} in [t0-{_h}h, t0]", event_unit)
         _cont("weight_kg", PHYS, "Weight, kg", "most recent vitals weight at or before t0", event_unit)
 
-        for _prefix, _label, _rule in (
-            ("vasopressor", "Vasopressor", "any medication_admin_continuous vasopressor row in [t0-{h}h, t0]"),
-            ("crrt", "CRRT", "any crrt_therapy recorded_dttm in [t0-{h}h, t0]"),
-        ):
-            for _h in LOOKBACK_HOURS:
-                _bin(f"{_prefix}_{_h}h", LIFE, f"{_label} within {_h} h before",
-                     _rule.format(h=_h), event_unit)
+        for _h in LOOKBACK_HOURS:
+            _bin(
+                f"vasopressor_{_h}h",
+                LIFE,
+                f"Any vasopressor within {_h} h before",
+                f"any medication_admin_continuous vasopressor row in [t0-{_h}h, t0]",
+                event_unit,
+            )
+            for _agent in VASOPRESSORS:
+                _bin(
+                    f"vasopressor_{_agent}_{_h}h",
+                    LIFE,
+                    f"  {_agent} within {_h} h before",
+                    f"{_agent} medication_admin_continuous row in [t0-{_h}h, t0]",
+                    event_unit,
+                    show_missing=False,
+                )
+
+        for _h in LOOKBACK_HOURS:
+            _bin(
+                f"crrt_{_h}h",
+                LIFE,
+                f"CRRT within {_h} h before",
+                f"any crrt_therapy recorded_dttm in [t0-{_h}h, t0]",
+                event_unit,
+            )
+
+        for _h in LOOKBACK_HOURS:
+            for _device in RESPIRATORY_DEVICES:
+                _bin(
+                    f"respiratory_device_{_device.replace(' ', '_')}_{_h}h",
+                    LIFE,
+                    f"Respiratory support: {_device} within {_h} h before",
+                    f"waterfalled respiratory_support device_category {_device} in [t0-{_h}h, t0]",
+                    event_unit,
+                    show_missing=False,
+                )
 
         _bin("imv_transition", CONTEXT, "New transition onto IMV at the index paralytic", "device change onto imv within +/-60 min of t0 (sub-analysis D)", event_unit)
         _bin("any_sedative", CONTEXT, "Sedative within +/-60 min of the index paralytic", "sedative charted within +/-60 min of t0 (sub-analysis E)", event_unit)
         _cat("no_transition_reason", CONTEXT, "Reason no IMV transition was found", "why sub-analysis D found no transition", event_unit, ["already_on_imv", "no_transition_in_window", "no_device_record"])
-        _cat("location_at_index", CONTEXT, "Location at the index paralytic", "adt row where in_dttm <= t0 < out_dttm", event_unit, ["ed", "icu", "other", "unknown"])
-        _cat("evidence_tier", CONTEXT, "Evidence tier", "1 index only, 2 +imv transition, 3 +imv +sedation (P31)", event_unit, [1, 2, 3])
+        _location_rule = "adt row where in_dttm <= t0 < out_dttm"
+        _location_levels = ["ed", "icu", "ward", "procedural", "other", "unknown"]
+        rows.extend(
+            categorical_rows(
+                df,
+                "location_at_index",
+                _location_rule,
+                event_unit,
+                _location_levels,
+            )
+        )
+        for _level in ("ed", "icu"):
+            _display_level = {"ed": "ED", "icu": "ICU"}[_level]
+            _show(
+                CONTEXT,
+                f"Location at the index paralytic — {_display_level}, n (%)",
+                "n_pct",
+                [
+                    f"location_at_index[{_level}]_n",
+                    f"location_at_index[{_level}]_pct",
+                ],
+                _location_rule,
+                event_unit,
+                digits=0,
+            )
+        for _icu_type in ICU_TYPES:
+            _bin(
+                f"icu_type_{_icu_type}",
+                CONTEXT,
+                f"  ICU type: {_icu_type}",
+                f"CLIF adt.location_type == {_icu_type} at t0; denominator is all rows",
+                event_unit,
+                show_missing=False,
+            )
+        _bin(
+            "icu_type_unspecified",
+            CONTEXT,
+            "  ICU type: unspecified",
+            "location_category is icu and location_type is absent or outside the CLIF vocabulary",
+            event_unit,
+            show_missing=False,
+        )
+        for _level in ("ward", "procedural", "other", "unknown"):
+            _display_level = "hospital ward" if _level == "ward" else _level
+            _show(
+                CONTEXT,
+                f"Location at the index paralytic — {_display_level}, n (%)",
+                "n_pct",
+                [
+                    f"location_at_index[{_level}]_n",
+                    f"location_at_index[{_level}]_pct",
+                ],
+                _location_rule,
+                event_unit,
+                digits=0,
+            )
+        _show(
+            CONTEXT,
+            "Location at the index paralytic — missing, n",
+            "count",
+            ["location_at_index_missing_n"],
+            "rows with an absent (null) location_at_index, not the literal string",
+            event_unit,
+            digits=0,
+        )
+        _cat(
+            "evidence_tier",
+            CONTEXT,
+            "Intubation context category",
+            "1 paralytic only, 2 paralytic +imv without sedation, "
+            "3 paralytic +imv +sedation, "
+            "4 paralytic +sedation without imv (P31)",
+            event_unit,
+            [1, 2, 3, 4],
+        )
 
         _bin("hospital_mortality", OUTCOME, "Hospital mortality", "death_dttm inside a member stay, or discharge_category expired", _block_unit)
         _bin("icu_mortality", OUTCOME, "ICU mortality", "death_dttm inside an adt icu interval; independent of hospital_mortality (P37 amended)", _block_unit)
@@ -381,7 +555,7 @@ def _(pl):
         `NA` means *not measured*: the statistic is null because the column is null,
         which at this site means the source table was absent. It is never a zero. A
         measured zero prints as `0` or `0 (0.0%)`, and keeping the two typographically
-        distinct in the readable table is the same distinction `covariate_coverage.csv`
+        distinct in the readable table is the same distinction `fig_T2__source_coverage.csv`
         and Figure T.2 exist to make -- a reader who cannot tell "this site does not
         chart CRRT" from "no patient had CRRT" has been handed a clinical finding that
         is really a data-availability one.
@@ -477,7 +651,7 @@ def _(
     publish_json,
     table1_rows,
 ):
-    index_covariates = pl.read_parquet(PHI_DIR / "index_covariates.parquet")
+    index_covariates = pl.read_parquet(PHI_DIR / "step04__index_covariates.parquet")
 
     # Level lists are taken from the WHOLE frame, not per stratum, so every stratum
     # column reports the same rows in the same order and the CSV can be read across.
@@ -592,7 +766,7 @@ def _(
                 "table": f"table1_by_agent_{label}",
                 "unit": _unit,
                 "event_unit": _event_unit,
-                "source": "index_covariates.parquet",
+                "source": "step04__index_covariates.parquet",
                 "strata": STRATA,
                 "value_columns": ["overall", *STRATA],
                 "n_rows": float(df.height),
@@ -630,26 +804,35 @@ def _(plt):
 
 
 @app.cell
-def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, json, mark_zero, pl, plt):
+def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, json, mark_zero, pl, plt, publish):
     # Fixed categorical colours, never cycled: one colour per life-support modality
     # wherever it appears.
     # Proning was withdrawn from the covariate set on 2026-08-14; two modalities remain.
     _COLORS = {"vasopressor": "#2a78d6", "crrt": "#eb6834"}
 
-    # Read from the published JSON, not from an in-memory frame: the convention set in
-    # `02`/`03` is that a figure draws only from an artifact a reader can also open, so
-    # no number reaches a plot that is not in a published file beside it. That artifact
-    # is JSON rather than CSV since 2026-08-14 (P39 amended); `rows` is the same long
-    # table the CSV carried.
+    # Derive the purpose-built T.1 CSV from the stable Table 1 JSON, then read that CSV
+    # back for plotting. The figure and its inspectable data therefore share one stem,
+    # while the consortium Table 1 contract remains unchanged (P39/P45).
     with open(SHARE_DIR / "table1_by_agent_block.json", "r") as _f:
-        _t1 = pl.DataFrame(json.load(_f)["rows"])
+        _table1_df = pl.DataFrame(json.load(_f)["rows"])
+    _statistics = [
+        f"{_modality}_{_hours}h_pct"
+        for _modality in _COLORS
+        for _hours in LOOKBACK_HOURS
+    ]
+    publish(
+        _table1_df.filter(pl.col("statistic").is_in(_statistics)),
+        SHARE_DIR / "fig_T1__organ_support_by_window.csv",
+        "fig_T1__organ_support_by_window",
+    )
+    figure_t1_df = pl.read_csv(SHARE_DIR / "fig_T1__organ_support_by_window.csv")
 
     _fig, _ax = plt.subplots(figsize=(10, 6))
     _width = 0.26
 
     for _i, (_modality, _color) in enumerate(_COLORS.items()):
         for _j, _h in enumerate(LOOKBACK_HOURS):
-            _row = _t1.filter(pl.col("statistic") == f"{_modality}_{_h}h_pct")
+            _row = figure_t1_df.filter(pl.col("statistic") == f"{_modality}_{_h}h_pct")
             _v = _row["overall"][0] if _row.height else None
             # Centred on the tick for however many modalities there are, rather than
             # the literal -1 that only centred three. Dropping proning would otherwise
@@ -697,18 +880,18 @@ def _(FIG_DIR, LOOKBACK_HOURS, SHARE_DIR, json, mark_zero, pl, plt):
         "the 1 h to 24 h ramp is where 'already shocked' separates from 'crashed at intubation'"
     )
     _fig.tight_layout()
-    _fig.savefig(FIG_DIR / "T1_life_support_by_window.png", dpi=150)
+    _fig.savefig(FIG_DIR / "fig_T1__organ_support_by_window.png", dpi=150)
     plt.close(_fig)
-    print(f"T1_life_support_by_window.png -> {FIG_DIR}")
-    return
+    print(f"fig_T1__organ_support_by_window.png -> {FIG_DIR}")
+    return (figure_t1_df,)
 
 
 @app.cell
 def _(FIG_DIR, SHARE_DIR, pl, plt):
-    _cov = pl.read_csv(SHARE_DIR / "covariate_coverage.csv").sort("source")
+    figure_t2_df = pl.read_csv(SHARE_DIR / "fig_T2__source_coverage.csv").sort("source")
 
     _fig, _ax = plt.subplots(figsize=(9, 4.5))
-    for _i, _row in enumerate(_cov.iter_rows(named=True)):
+    for _i, _row in enumerate(figure_t2_df.iter_rows(named=True)):
         _color = "#1baf7a" if _row["available"] else "#b0aca2"
         _ax.barh([_i], [_row["pct_blocks_covered"]], color=_color, height=0.6)
         # Three states here too, for the same reason T.1 has three. A zero-length bar
@@ -724,8 +907,8 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
                 va="center", fontsize=8, color="#0b0b0b",
             )
 
-    _ax.set_yticks(list(range(_cov.height)))
-    _ax.set_yticklabels(_cov.get_column("source").to_list(), fontsize=9)
+    _ax.set_yticks(list(range(figure_t2_df.height)))
+    _ax.set_yticklabels(figure_t2_df.get_column("source").to_list(), fontsize=9)
     _ax.set_xlabel("% of encounter blocks with at least one row in the source table")
     _ax.set_xlim(0, 100)
     _ax.invert_yaxis()
@@ -736,10 +919,10 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         "a covariate's zero means nothing until this figure says the table was there"
     )
     _fig.tight_layout()
-    _fig.savefig(FIG_DIR / "T2_source_coverage.png", dpi=150)
+    _fig.savefig(FIG_DIR / "fig_T2__source_coverage.png", dpi=150)
     plt.close(_fig)
-    print(f"T2_source_coverage.png -> {FIG_DIR}")
-    return
+    print(f"fig_T2__source_coverage.png -> {FIG_DIR}")
+    return (figure_t2_df,)
 
 
 if __name__ == "__main__":

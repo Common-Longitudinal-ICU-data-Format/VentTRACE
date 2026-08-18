@@ -37,6 +37,7 @@ NOTEBOOKS = {
 }
 
 FUNC_NAME = "convert_doses_to_preferred_units"
+FILTER_FUNC_NAME = "filter_doses_for_summary"
 RATE_FUNC_NAME = "rate_unit_expr"
 
 
@@ -81,6 +82,10 @@ RATE_EXPRESSIONS = {
     label: _load_from_notebook(path, RATE_FUNC_NAME, {"pl": pl})
     for label, path in NOTEBOOKS.items()
 }
+SUMMARY_FILTERS = {
+    label: _load_from_notebook(path, FILTER_FUNC_NAME, {"pl": pl})
+    for label, path in NOTEBOOKS.items()
+}
 
 # The spec's exact constant (brief, P18): mg for everything except fentanyl.
 PREFERRED_UNITS = {
@@ -105,6 +110,17 @@ UNIT_OVERRIDES = {
     ("fentanyl", "mg/kg"): "mg",
 }
 
+SUMMARY_UPPER_BOUNDS = {
+    "etomidate": 200.0,
+    "fentanyl": 500.0,
+    "midazolam": 50.0,
+    "propofol": 500.0,
+    "rocuronium": 400.0,
+    "succinylcholine": 400.0,
+    "vecuronium": 30.0,
+}
+INVALID_SUMMARY_UNITS = [("propofol", "mcg")]
+
 CONVERTERS = {
     label: partial(convert, unit_overrides=UNIT_OVERRIDES)
     for label, convert in _RAW_CONVERTERS.items()
@@ -123,6 +139,112 @@ def test_both_notebooks_define_the_function(label):
 @pytest.mark.parametrize("label", LABELS)
 def test_both_notebooks_define_the_same_global_unit_overrides(label):
     assert _load_literal_assignment(NOTEBOOKS[label], "DOSE_UNIT_OVERRIDES") == UNIT_OVERRIDES
+
+
+@pytest.mark.parametrize("label", LABELS)
+def test_both_notebooks_define_the_same_summary_filter_rules(label):
+    assert (
+        _load_literal_assignment(NOTEBOOKS[label], "DOSE_SUMMARY_UPPER_BOUNDS")
+        == SUMMARY_UPPER_BOUNDS
+    )
+    assert (
+        _load_literal_assignment(NOTEBOOKS[label], "INVALID_DOSE_SUMMARY_UNITS")
+        == INVALID_SUMMARY_UNITS
+    )
+
+
+@pytest.mark.parametrize("label", LABELS)
+def test_summary_filter_uses_strict_clinical_bounds_and_leaves_ketamine_unfiltered(label):
+    df = pl.DataFrame(
+        {
+            "row_id": list(range(18)),
+            "med_category": [
+                "etomidate", "etomidate",
+                "fentanyl", "fentanyl",
+                "midazolam", "midazolam",
+                "propofol", "propofol", "propofol",
+                "rocuronium", "rocuronium",
+                "succinylcholine", "succinylcholine",
+                "vecuronium", "vecuronium", "vecuronium",
+                "ketamine", "ketamine",
+            ],
+            "med_dose_unit": [
+                "mg", "mg",
+                "mcg", "mcg",
+                "mg", "mg",
+                "mg", "mg", "mcg",
+                "mg", "mg",
+                "mg", "mg",
+                "mg", "mg", "mg",
+                "mg", "mg",
+            ],
+            "med_dose_converted": [
+                199.0, 200.0,
+                499.0, 500.0,
+                49.0, 50.0,
+                499.0, 500.0, 10.0,
+                399.0, 400.0,
+                399.0, 400.0,
+                -1.0, 29.0, 30.0,
+                0.0, 5_000.0,
+            ],
+        }
+    )
+
+    out = SUMMARY_FILTERS[label](
+        df, SUMMARY_UPPER_BOUNDS, INVALID_SUMMARY_UNITS
+    )
+
+    assert out.get_column("row_id").to_list() == [0, 2, 4, 6, 9, 11, 14, 16, 17]
+
+
+@pytest.mark.parametrize("label", LABELS)
+def test_summary_filter_rejects_non_positive_doses_for_bounded_agents(label):
+    df = pl.DataFrame(
+        {
+            "med_category": ["rocuronium", "rocuronium", "rocuronium"],
+            "med_dose_unit": ["mg", "mg", "mg"],
+            "med_dose_converted": [-1.0, 0.0, 1.0],
+        }
+    )
+
+    out = SUMMARY_FILTERS[label](
+        df, SUMMARY_UPPER_BOUNDS, INVALID_SUMMARY_UNITS
+    )
+
+    assert out.get_column("med_dose_converted").to_list() == [1.0]
+
+
+@pytest.mark.parametrize("label", LABELS)
+def test_summary_filter_normalizes_propofol_raw_unit_for_matching(label):
+    df = pl.DataFrame(
+        {
+            "med_category": [" PROPOFOL ", "propofol"],
+            "med_dose_unit": [" MCG ", "mg"],
+            "med_dose_converted": [10.0, 10.0],
+        }
+    )
+
+    out = SUMMARY_FILTERS[label](
+        df, SUMMARY_UPPER_BOUNDS, INVALID_SUMMARY_UNITS
+    )
+
+    assert out.height == 1
+    assert out.get_column("med_dose_unit").to_list() == ["mg"]
+
+
+@pytest.mark.parametrize("label", LABELS)
+def test_dose_summary_cells_publish_mean_and_sample_sd(label):
+    tree = ast.parse(NOTEBOOKS[label].read_text())
+    keyword_names = [
+        keyword.arg
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+    ]
+
+    assert "mean_dose" in keyword_names
+    assert "sd_dose" in keyword_names
 
 
 @pytest.mark.parametrize("label", LABELS)
@@ -316,7 +438,8 @@ def test_the_row_key_round_trips_so_duplicate_rows_cannot_fan_out(label):
 @pytest.mark.parametrize("label", LABELS)
 def test_n_in_preferred_unit_counts_rows_already_in_the_preferred_unit(label):
     """Pins the derivation both notebooks use for the `n_in_preferred_unit` column in
-    index_paralytic_dose.csv / sedation_dose.csv: a row-wise comparison of the RAW
+    step02__index_paralytic_dose_summary.csv / fig_E2__sedation_dose_summary.csv:
+    a row-wise comparison of the RAW
     `med_dose_unit` against `med_dose_unit_converted`, summed per med_category.
 
     Ketamine at this site is the motivating case: 8 of 13 administrations were

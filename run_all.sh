@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the VentTRACE pipeline, in order, logging each step.
 #
-#   ./run_all.sh            # 01 .. 06
+#   ./run_all.sh            # 01 .. 07
 #   ./run_all.sh 02 03      # only those steps
 #
 # Always launches from the repo root: config's output_directory is "./output",
@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
   exit 1
 }
 
-STEPS=(01_cohort 02_index_paralytic 03_context 04_covariates 05_table_one 06_reference_cpt)
+STEPS=(01_cohort 02_index_paralytic 03_context 04_covariates 05_table_one 06_reference_cpt 07_artifact_manifest)
 
 if [ $# -gt 0 ]; then
   picked=()
@@ -45,4 +45,5 @@ for step in "${STEPS[@]}"; do
   echo "--- $step ok in $((SECONDS - start))s"
 done
 
-echo; echo "done: ${#STEPS[@]} steps, $(ls output/final_no_phi | wc -l | tr -d ' ') artifacts in output/final_no_phi"
+artifact_count=$(uv run python -c 'from pathlib import Path; print(sum(p.is_file() for p in Path("output/final_no_phi").rglob("*")))')
+echo; echo "done: ${#STEPS[@]} steps, $artifact_count artifacts in output/final_no_phi"

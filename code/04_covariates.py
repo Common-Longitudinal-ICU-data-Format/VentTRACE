@@ -12,6 +12,8 @@ def _():
 
     import polars as pl
 
+    from clifpy import compute_sofa_polars
+
     from clifpy.tables import (
         Adt,
         CrrtTherapy,
@@ -36,6 +38,7 @@ def _():
         Patient,
         Path,
         Vitals,
+        compute_sofa_polars,
         json,
         mo,
         pl,
@@ -51,8 +54,8 @@ def _(mo):
 
         The sole owner of this study's analytic row. Everything downstream — both Table 1s
         and the CPT cascade — aggregates the single frame this notebook writes, and none of
-        them re-derives a block, re-selects `p_num`, or re-computes a tier. That is what
-        keeps `table1_by_agent_block.json` and `cpt_cascade.csv` from disagreeing about N.
+        them re-derives a block, re-selects `p_num`, or re-computes a category. That is what
+        keeps `table1_by_agent_block.json` and `fig_F1__cpt_cascade.csv` from disagreeing about N.
 
         One row per index paralytic event. Block-level attributes (LOS, mortality, the
         block's index count) are constant within a block and repeat down its rows; the
@@ -98,15 +101,44 @@ def _(Path, json):
         "dopamine",
     ]
 
+    RESPIRATORY_DEVICES = [
+        "imv",
+        "nippv",
+        "cpap",
+        "high flow nc",
+        "face mask",
+        "trach collar",
+        "nasal cannula",
+        "room air",
+        "other",
+    ]
+
+    ICU_TYPES = [
+        "general_icu",
+        "cardiac_icu",
+        "cardiothoracic_surgical_icu",
+        "mixed_cardiothoracic_icu",
+        "surgical_icu",
+        "burn_icu",
+        "neuro_icu",
+        "neurosurgical_icu",
+        "mixed_neuro_icu",
+        "medical_icu",
+    ]
+
     print(f"site           : {SITE}")
     print(f"lookback hours : {LOOKBACK_HOURS}")
     print(f"vasopressors   : {' | '.join(VASOPRESSORS)}")
+    print(f"resp devices   : {' | '.join(RESPIRATORY_DEVICES)}")
+    print(f"icu types      : {' | '.join(ICU_TYPES)}")
     return (
         DATA_DIR,
         FIG_DIR,
         FILETYPE,
+        ICU_TYPES,
         LOOKBACK_HOURS,
         PHI_DIR,
+        RESPIRATORY_DEVICES,
         SHARE_DIR,
         SITE,
         TIMEZONE,
@@ -174,11 +206,14 @@ def _(mo):
         `index_paralytic.parquet` has, plus D's transition result and E's sedation result,
         so reading both would be a redundant join on the same key.
 
-        The **evidence tier** (P31) is computed here, per event, from that event's own D
-        and E flags. Tier 3 requires both on the *same* event — which is exactly what P15
-        bought by making D and E share one window predicate. The cascade in `06` reads
-        this column from the `p_num = 1` row only; the tier exists on every row because the
-        index-level Table 1 reports it too.
+        The **evidence category** (P31) is computed here, per event, from that event's own
+        D and E flags. The four categories are the complete IMV-transition × sedation
+        partition. Category 3 requires both on the *same* event — which is exactly what
+        P15 bought by making D and E share one window predicate. The cascade in `06` reads
+        this column from the `p_num = 1` row only; the category exists on every row because
+        the index-level Table 1 reports it too. The persisted column remains named
+        `evidence_tier` for the consortium artifact contract, although the values are
+        categorical rather than ordinal.
 
         `agent_stratum` collapses `agent_label` into the Table 1 columns: any label
         containing `+` is a co-administration and becomes `combination`; everything else
@@ -192,15 +227,16 @@ def _(mo):
 @app.cell
 def _(PHI_DIR, pl):
     def evidence_tier(imv_col, sed_col):
-        """The block's evidence tier, P31, computed per event from that event's own flags.
+        """The block's evidence category, P31, from one event's own context flags.
 
-        3 = an IMV device transition AND a sedative in this event's own +/-60 min window
-        2 = an IMV device transition, no sedative
-        1 = neither
+        1 = neither an IMV transition nor sedation
+        2 = an IMV transition, no sedation
+        3 = an IMV transition and sedation
+        4 = sedation, no IMV transition
 
         Tier 3 conjoins D and E on the SAME event rather than on the block. A block whose
         first paralytic had a transition and whose fifth had sedation describes two
-        clinical acts days apart, and calling that tier 3 would manufacture evidence that
+        clinical acts days apart, and calling that category 3 would manufacture evidence that
         no single intubation ever produced.
         """
         return (
@@ -208,11 +244,13 @@ def _(PHI_DIR, pl):
             .then(pl.lit(3))
             .when(pl.col(imv_col))
             .then(pl.lit(2))
+            .when(pl.col(sed_col))
+            .then(pl.lit(4))
             .otherwise(pl.lit(1))
             .cast(pl.Int8)
         )
 
-    index_context = pl.read_parquet(PHI_DIR / "index_context.parquet")
+    index_context = pl.read_parquet(PHI_DIR / "step03__index_context.parquet")
 
     spine = index_context.select(
         "index_paralytic_id",
@@ -228,7 +266,7 @@ def _(PHI_DIR, pl):
     ).with_columns(
         evidence_tier("imv_transition", "any_sedative").alias("evidence_tier"),
         # Table 1 stratum. `+` is the co-administration marker `02` builds by joining the
-        # sorted agent set; index_composition.csv already separates that from same-agent
+        # sorted agent set; step02__index_paralytic_composition.csv already separates that from same-agent
         # redose, and this collapse keeps the two consistent.
         pl.when(pl.col("agent_label").str.contains(r"\+", literal=False))
         .then(pl.lit("combination"))
@@ -282,7 +320,7 @@ def _(mo):
 
 @app.cell
 def _(PHI_DIR, pl):
-    cohort_index = pl.read_parquet(PHI_DIR / "cohort_index.parquet")
+    cohort_index = pl.read_parquet(PHI_DIR / "step01__cohort_index.parquet")
 
     bridge = (
         cohort_index.select(["encounter_block", "patient_id", "list_hospitalization_id"])
@@ -349,7 +387,13 @@ def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_na
         data_directory=DATA_DIR,
         filetype=FILETYPE,
         timezone=TIMEZONE,
-        columns=["hospitalization_id", "location_category", "in_dttm", "out_dttm"],
+        columns=[
+            "hospitalization_id",
+            "location_category",
+            "location_type",
+            "in_dttm",
+            "out_dttm",
+        ],
         filters={"hospitalization_id": bridge_hosp_ids},
     )
     _adt_pd = _adt_table.df.copy()
@@ -358,12 +402,15 @@ def _(Adt, DATA_DIR, FILETYPE, TIMEZONE, bridge, bridge_hosp_ids, pl, to_site_na
 
     adt = (
         pl.from_pandas(_adt_pd)
-        .with_columns(pl.col("location_category").str.to_lowercase())
+        .with_columns(
+            pl.col("location_category").str.to_lowercase(),
+            pl.col("location_type").str.to_lowercase(),
+        )
         .join(bridge.select("hospitalization_id", "encounter_block"), on="hospitalization_id", how="inner")
     )
 
     # 01's cohort inclusion step already requires >=1 ADT row in {ed, icu} for every
-    # block in the cohort (see consort_cohort.csv). So a block with ZERO adt rows here
+    # block in the cohort (see step01__consort_cohort.csv). So a block with ZERO adt rows here
     # is not a site fact -- it is this notebook's load or filter dropping rows. Checked
     # before the icu subset, and before block_outcomes fills a missing los_icu_days with
     # 0.0, because that fill is only correct once a missing block is ruled out.
@@ -599,7 +646,7 @@ def _(adt_icu, epoch_minutes, hospitalization, patient, pl, resolve_mortality):
 
 
 @app.cell
-def _(adt, block_outcomes, hospitalization, patient, pl, spine):
+def _(ICU_TYPES, adt, block_outcomes, hospitalization, patient, pl, spine):
     # The hospitalization containing t0 (spec §3.2). An interval join, not a "first
     # hospitalization" shortcut: the ED presentation and the inpatient admission carry
     # different ages and different diagnosis lists, and the paralytic belongs to one.
@@ -641,10 +688,16 @@ def _(adt, block_outcomes, hospitalization, patient, pl, spine):
         .first()
         .select(
             "index_paralytic_id",
-            pl.when(pl.col("location_category").is_in(["ed", "icu"]))
+            pl.when(
+                pl.col("location_category").is_in(["ed", "icu", "ward", "procedural"])
+            )
             .then(pl.col("location_category"))
             .otherwise(pl.lit("other"))
             .alias("location_at_index"),
+            pl.when(pl.col("location_category") == "icu")
+            .then(pl.col("location_type"))
+            .otherwise(None)
+            .alias("location_type_at_index"),
         )
     )
 
@@ -662,6 +715,21 @@ def _(adt, block_outcomes, hospitalization, patient, pl, spine):
         # No ADT row covers t0 -- a real charting gap, and a distinct value from `other`,
         # which means "in a location that is neither ED nor ICU".
         .with_columns(pl.col("location_at_index").fill_null("unknown"))
+        .with_columns(
+            *[
+                (
+                    (pl.col("location_at_index") == "icu")
+                    & (pl.col("location_type_at_index") == _icu_type)
+                )
+                .fill_null(False)
+                .alias(f"icu_type_{_icu_type}")
+                for _icu_type in ICU_TYPES
+            ],
+            (
+                (pl.col("location_at_index") == "icu")
+                & ~pl.col("location_type_at_index").is_in(ICU_TYPES).fill_null(False)
+            ).alias("icu_type_unspecified"),
+        )
     )
 
     assert spine_resolved.height == spine.height, "attribute resolution changed the row count"
@@ -679,7 +747,7 @@ def _(mo):
         """
         ## Life support before the index
 
-        Three sources, three windows, one predicate (P33). Every exposure is a **presence
+        Life-support sources, three windows, one predicate (P33). Every exposure is a **presence
         test** — did any row for this patient land in `[t₀ - Xh, t₀]` — because that is all
         P32 permits continuous medications to supply. No dose, no rate, no infusion-derived
         index event.
@@ -687,7 +755,7 @@ def _(mo):
         **An absent optional table yields null, never `false`.** "No vasopressor row in 24
         h" is returned identically by a patient on no pressors and by a site that does not
         populate `medication_admin_continuous`. A `false` would make the second look like
-        the first; a null cannot be misread, and `covariate_coverage.csv` is what qualifies
+        the first; a null cannot be misread, and `fig_T2__source_coverage.csv` is what qualifies
         it.
 
         **Do NOT apply `rate_unit_expr` here.** `02` and `03` drop rate-charted rows from
@@ -765,7 +833,43 @@ def _(LOOKBACK_HOURS, in_lookback, pl):
             .with_columns([pl.col(c).fill_null(False) for c in cols])
         )
 
-    return exposure_flags, load_optional
+    def category_exposure_flags(
+        events, source, dttm_col, category_col, prefix, categories
+    ):
+        """Nonexclusive exposure flags for every category and look-back window."""
+        cols = [
+            f"{prefix}_{category.replace(' ', '_')}_{h}h"
+            for category in categories
+            for h in LOOKBACK_HOURS
+        ]
+        if source is None:
+            return events.select(
+                "index_paralytic_id",
+                *[pl.lit(None, dtype=pl.Boolean).alias(c) for c in cols],
+            )
+
+        _joined = events.select(
+            "index_paralytic_id", "encounter_block", "t_dttm"
+        ).join(
+            source.select("encounter_block", dttm_col, category_col),
+            on="encounter_block",
+            how="left",
+        )
+        return _joined.group_by("index_paralytic_id").agg(
+            *[
+                (
+                    in_lookback("t_dttm", dttm_col, h)
+                    & (pl.col(category_col) == category)
+                )
+                .any()
+                .fill_null(False)
+                .alias(f"{prefix}_{category.replace(' ', '_')}_{h}h")
+                for category in categories
+                for h in LOOKBACK_HOURS
+            ]
+        )
+
+    return category_exposure_flags, exposure_flags, load_optional
 
 
 @app.cell
@@ -842,12 +946,33 @@ def _(
 
 
 @app.cell
-def _(crrt, exposure_flags, spine_resolved, vasopressor):
+def _(
+    VASOPRESSORS,
+    category_exposure_flags,
+    crrt,
+    exposure_flags,
+    spine_resolved,
+    vasopressor,
+):
     _events = spine_resolved.select("index_paralytic_id", "encounter_block", "t_dttm")
 
     exposures = (
         exposure_flags(_events, vasopressor, "admin_dttm", "vasopressor")
-        .join(exposure_flags(_events, crrt, "recorded_dttm", "crrt"), on="index_paralytic_id")
+        .join(
+            category_exposure_flags(
+                _events,
+                vasopressor,
+                "admin_dttm",
+                "med_category",
+                "vasopressor",
+                VASOPRESSORS,
+            ),
+            on="index_paralytic_id",
+        )
+        .join(
+            exposure_flags(_events, crrt, "recorded_dttm", "crrt"),
+            on="index_paralytic_id",
+        )
     )
 
     assert exposures.height == spine_resolved.height, "exposure join changed the row count"
@@ -862,12 +987,47 @@ def _(crrt, exposure_flags, spine_resolved, vasopressor):
 
 
 @app.cell
+def _(
+    PHI_DIR,
+    RESPIRATORY_DEVICES,
+    category_exposure_flags,
+    pl,
+    spine_resolved,
+):
+    resp_waterfall = pl.read_parquet(PHI_DIR / "step01__cohort_resp_waterfall.parquet")
+    _run_ids = resp_waterfall.get_column("cohort_run_id").unique().to_list()
+    _expected_run_ids = spine_resolved.get_column("cohort_run_id").unique().to_list()
+    assert not _run_ids or _run_ids == _expected_run_ids, (
+        "cohort_resp_waterfall and the analytic spine carry different cohort_run_ids"
+    )
+
+    _events = spine_resolved.select(
+        "index_paralytic_id", "encounter_block", "t_dttm"
+    )
+    respiratory_exposures = category_exposure_flags(
+        _events,
+        resp_waterfall,
+        "recorded_dttm",
+        "device_category",
+        "respiratory_device",
+        RESPIRATORY_DEVICES,
+    )
+    assert respiratory_exposures.height == spine_resolved.height, (
+        "respiratory exposure aggregation changed the event count"
+    )
+    print("respiratory support before the index:")
+    for _c in sorted(c for c in respiratory_exposures.columns if c != "index_paralytic_id"):
+        print(f"  {_c:38s} {respiratory_exposures.get_column(_c).sum():,}")
+    return respiratory_exposures, resp_waterfall
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
         ## Physiology and comorbidity
 
-        Worst value in each look-back window — lowest SBP, highest HR, lowest SpO₂ — which
+        Worst value in each look-back window — lowest SBP, lowest DBP, highest HR, lowest SpO₂ — which
         is what makes "was this a crashing patient" answerable. Weight is the most recent
         value at or before `t₀` with no look-back limit: a weight recorded on admission is
         still the patient's weight a week later, and bounding it would null out most of the
@@ -896,6 +1056,7 @@ def _(
 ):
     _VITAL_SPECS = [
         ("sbp", "lowest", "sbp"),
+        ("dbp", "lowest", "dbp"),
         ("heart_rate", "highest", "hr"),
         ("spo2", "lowest", "spo2"),
     ]
@@ -1083,11 +1244,130 @@ def _(
 
 
 @app.cell
-def _(PHI_DIR, comorbidity, exposures, physiology, pl, spine_resolved):
+def _(
+    DATA_DIR,
+    FILETYPE,
+    SHARE_DIR,
+    SITE,
+    TIMEZONE,
+    bridge,
+    compute_sofa_polars,
+    pl,
+    publish,
+    spine_resolved,
+):
+    _sofa_cohort = (
+        spine_resolved.select(
+            "index_paralytic_id", "encounter_block", "t_dttm"
+        )
+        .join(
+            bridge.select("encounter_block", "hospitalization_id"),
+            on="encounter_block",
+            how="inner",
+        )
+        .select(
+            pl.col("hospitalization_id").cast(pl.String),
+            "index_paralytic_id",
+            start_dttm=pl.col("t_dttm") - pl.duration(hours=24),
+            end_dttm=pl.col("t_dttm"),
+        )
+    )
+
+    sofa_raw = compute_sofa_polars(
+        data_directory=DATA_DIR,
+        cohort_df=_sofa_cohort,
+        filetype=FILETYPE,
+        id_name="index_paralytic_id",
+        extremal_type="worst",
+        fill_na_scores_with_zero=True,
+        remove_outliers=True,
+        timezone=TIMEZONE,
+    )
+
+    _component_inputs = {
+        "sofa_cv_97": [
+            "map",
+            "norepinephrine_mcg_kg_min",
+            "epinephrine_mcg_kg_min",
+            "dopamine_mcg_kg_min",
+            "dobutamine_mcg_kg_min",
+        ],
+        "sofa_coag": ["platelet_count"],
+        "sofa_liver": ["bilirubin_total"],
+        "sofa_resp": ["p_f"],
+        "sofa_cns": ["gcs_total"],
+        "sofa_renal": ["creatinine"],
+    }
+    _available_exprs = []
+    for _component, _inputs in _component_inputs.items():
+        _present = [c for c in _inputs if c in sofa_raw.columns]
+        _available_exprs.append(
+            (
+                pl.any_horizontal([pl.col(c).is_not_null() for c in _present])
+                if _present
+                else pl.lit(False)
+            ).alias(f"{_component}_available")
+        )
+    sofa_raw = sofa_raw.with_columns(*_available_exprs)
+
+    _score_cols = list(_component_inputs)
+    _availability_cols = [f"{c}_available" for c in _score_cols]
+    sofa = (
+        spine_resolved.select("index_paralytic_id")
+        .join(
+            sofa_raw.select(
+                "index_paralytic_id", *_score_cols, *_availability_cols
+            ),
+            on="index_paralytic_id",
+            how="left",
+        )
+        .with_columns(
+            *[pl.col(c).fill_null(0).cast(pl.Int8) for c in _score_cols],
+            *[pl.col(c).fill_null(False) for c in _availability_cols],
+        )
+        .with_columns(
+            pl.sum_horizontal([pl.col(c) for c in _score_cols])
+            .cast(pl.Int8)
+            .alias("sofa_total")
+        )
+    )
+    assert sofa.height == spine_resolved.height, "SOFA join changed the event count"
+
+    sofa_coverage = pl.DataFrame(
+        [
+            {
+                "component": component,
+                "n_events_available": int(sofa.get_column(f"{component}_available").sum()),
+                "pct_events_available": round(
+                    100.0 * sofa.get_column(f"{component}_available").mean(), 2
+                ),
+            }
+            for component in _score_cols
+        ]
+    ).with_columns(pl.lit(SITE).alias("site_name"))
+    publish(sofa_coverage, SHARE_DIR / "step04__sofa_coverage.csv", "step04__sofa_coverage")
+    print("SOFA component coverage:")
+    print(sofa_coverage)
+    return sofa, sofa_coverage
+
+
+@app.cell
+def _(
+    PHI_DIR,
+    comorbidity,
+    exposures,
+    physiology,
+    pl,
+    respiratory_exposures,
+    sofa,
+    spine_resolved,
+):
     index_covariates = (
         spine_resolved.join(exposures, on="index_paralytic_id", how="left")
+        .join(respiratory_exposures, on="index_paralytic_id", how="left")
         .join(physiology, on="index_paralytic_id", how="left")
         .join(comorbidity, on="index_paralytic_id", how="left")
+        .join(sofa, on="index_paralytic_id", how="left")
         .sort(["encounter_block", "p_num", "index_paralytic_id"])
     )
 
@@ -1116,9 +1396,9 @@ def _(PHI_DIR, comorbidity, exposures, physiology, pl, spine_resolved):
     )
 
     PHI_DIR.mkdir(parents=True, exist_ok=True)
-    index_covariates.write_parquet(PHI_DIR / "index_covariates.parquet")
+    index_covariates.write_parquet(PHI_DIR / "step04__index_covariates.parquet")
 
-    print(f"index_covariates : {index_covariates.height:,} rows, "
+    print(f"step04__index_covariates.parquet : {index_covariates.height:,} rows, "
           f"{len(index_covariates.columns)} columns -> {PHI_DIR}")
     print(f"  blocks         : {index_covariates.get_column('encounter_block').n_unique():,}")
     print(f"  p_num == 1     : {index_covariates.filter(pl.col('p_num') == 1).height:,}")
@@ -1134,6 +1414,7 @@ def _(
     index_covariates,
     pl,
     publish,
+    resp_waterfall,
     vasopressor,
     vitals,
 ):
@@ -1184,12 +1465,17 @@ def _(
         [
             _cov("medication_admin_continuous", False, vasopressor),
             _cov("crrt_therapy", False, crrt),
+            _cov("respiratory_support", True, resp_waterfall),
             _cov("vitals", False, vitals),
             _cov("hospital_diagnosis", False, diagnosis),
         ]
     ).with_columns(pl.lit(SITE).alias("site_name")).sort("source")
 
-    publish(covariate_coverage, SHARE_DIR / "covariate_coverage.csv", "covariate_coverage")
+    publish(
+        covariate_coverage,
+        SHARE_DIR / "fig_T2__source_coverage.csv",
+        "fig_T2__source_coverage",
+    )
     return (covariate_coverage,)
 
 

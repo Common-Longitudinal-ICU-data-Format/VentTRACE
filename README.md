@@ -29,7 +29,7 @@ paralytic, and does not adjudicate whether an intubation occurred.
 ## Required CLIF tables and fields
 
 1. **hospitalization**: `patient_id`, `hospitalization_id`, `admission_dttm`, `age_at_admission`
-2. **adt**: `hospitalization_id`, `location_category` (ED / ICU presence)
+2. **adt**: `hospitalization_id`, `location_category`, `location_type`, `in_dttm`, `out_dttm`
 3. **respiratory_support**: `hospitalization_id`, `recorded_dttm`, `device_category`,
    `tracheostomy`, and the fields `clifpy`'s waterfall needs to infer device from ventilator
    settings
@@ -51,30 +51,43 @@ paralytic, and does not adjudicate whether an intubation occurred.
 9. **vitals** *(optional — the pipeline runs without it and publishes 0% coverage)*:
    `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value`
 10. **hospital_diagnosis** *(optional — the pipeline runs without it and publishes 0% coverage)*:
-    `hospitalization_id`, `diagnosis_code`, `diagnosis_code_format`
+     `hospitalization_id`, `diagnosis_code`, `diagnosis_code_format`
+11. **labs** *(optional SOFA input; missing component scores default to 0)*: creatinine,
+    platelet count, arterial PaO2, and total bilirubin
+12. **patient_assessments** *(optional SOFA input; missing component scores default to 0)*:
+    `gcs_total`
 
 `position` is **not** read. Proning was withdrawn from the covariate set on 2026-08-14 at the
 study lead's direction; a site does not need the table and its absence is not reported.
 
 `patient` and `patient_procedures` are required; `medication_admin_continuous`, `crrt_therapy`,
-`vitals` and `hospital_diagnosis` are optional — absent, their derived columns are
-null and `covariate_coverage.csv` publishes 0% for them. `04_covariates.py` also re-opens
+`vitals`, `hospital_diagnosis`, `labs`, and `patient_assessments` are optional. Missing SOFA
+component scores default to 0, while `step04__sofa_coverage.csv` publishes component availability.
+`04_covariates.py` also re-opens
 `hospitalization` and `adt`, already required above; that is no new contract. See
 [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §2 for the full per-notebook table map.
 
 ## Cohort identification
 
-Adults (≥18 at admission), ED or ICU at some point in the stay, at least one raw charted
-`device_category == 'imv'` row, no tracheostomy signal in the first 24 hours. Hospitalizations
-less than 6 hours apart for the same patient are stitched into one `encounter_block`, the
-analytic unit for the whole pipeline. See [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §3 for
-the full CONSORT funnel.
+Adults (≥18 at admission), ED or ICU at some point in the stay, at least one qualifying
+rocuronium, succinylcholine, or vecuronium administration (`given` or `bolus`, non-rate unit),
+and no tracheostomy signal in the first 24 hours. A raw IMV row is not required because a patient
+who dies immediately after intubation may never have one charted. Hospitalizations less than 6
+hours apart for the same patient are stitched into one `encounter_block`, the analytic unit for
+the whole pipeline. See [`docs/pipeline_flow.md`](docs/pipeline_flow.md) §3 for the full funnel.
 
 ## Expected results
 
 Aggregate counts, rates, quantiles and figures — never a row-level record — written to
 `output/final_no_phi/`. That directory, and only that directory, is what a site shares with the
 project PI / consortium.
+
+Figure data and PNGs use the same auditable stem, for example
+`fig_E2__sedation_dose_summary.csv` and
+`figures/fig_E2__sedation_dose_summary.png`. Other outputs begin with their producer step,
+for example `step03__sedation_summary.csv`. `artifact_manifest.csv` records each artifact's
+producer, dataframe, sources, row count, size and SHA-256. The four `table1_by_agent_*` names
+remain stable for cross-site pooling.
 
 > [!WARNING]
 > **Never upload patient-level data to Box.** Only `output/final_no_phi/` may be shared — no
@@ -99,7 +112,7 @@ project PI / consortium.
 
 3. **Run.**
    ```
-   ./run_all.sh            # 01_cohort -> ... -> 06_reference_cpt, in order
+   ./run_all.sh            # 01_cohort -> ... -> 07_artifact_manifest, in order
    ./run_all.sh 02 03      # or just a subset of steps
    ```
    Each run is logged to `output/logs/run_<UTC timestamp>/`. Results land in

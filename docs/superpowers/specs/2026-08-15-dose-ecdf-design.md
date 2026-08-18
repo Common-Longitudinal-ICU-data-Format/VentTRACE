@@ -2,7 +2,7 @@
 
 **Project:** VentTRACE **Date:** 2026-08-15 **Status:** Design, approved for planning
 
-**Amends:** `2026-08-10-paralytic-index-design.md` (P18) and `2026-08-12-block-summary-and-cpt-comparator-design.md`. Both stand. This document adds one decision, P41, and changes nothing either of them already publishes.
+**Amends:** `2026-08-10-paralytic-index-design.md` (P18) and `2026-08-12-block-summary-and-cpt-comparator-design.md`. Both stand. This document adds one decision, P41. P43 (2026-08-17) later changed the converted summary tables but deliberately left P41's raw-unit ECDFs unchanged.
 
 Decision numbering continues from P40. Section numbering restarts.
 
@@ -10,9 +10,9 @@ Decision numbering continues from P40. Section numbering restarts.
 
 ## 1. Purpose
 
-P18 publishes a dose as three numbers — median, p25, p75 — on a unit-converted scale, keyed on `med_category` alone. That is the whole published shape of a dose in this study.
+At the time of this amendment, P18 published a dose as three numbers — median, p25, p75 — on a unit-converted scale, keyed on `med_category` alone. P43 later added mean/SD and clinical filtering to that summary.
 
-It is thinner than the data supports, and the pipeline already says so in its own margin. The comment at `code/02_index_paralytic.py:1313-1325` works out that polars places the q-th quantile of n sorted values at fractional index `(n-1)*q`, so whenever `(n-1)` is a multiple of 4 the published p25, median and p75 are **three verbatim charted doses** rather than synthesised statistics. Ketamine, n = 13, is the live instance at this site: `sedation_dose.csv` publishes `0.03 / 0.15 / 16.0`, and all three are individual charted values.
+It is thinner than the data supports, and the pipeline already says so in its own margin. The comment at `code/02_index_paralytic.py:1313-1325` works out that polars places the q-th quantile of n sorted values at fractional index `(n-1)*q`, so whenever `(n-1)` is a multiple of 4 the published p25, median and p75 are **three verbatim charted doses** rather than synthesised statistics. Ketamine, n = 13, is the live instance at this site: `fig_E2__sedation_dose_summary.csv` publishes `0.03 / 0.15 / 16.0`, and all three are individual charted values.
 
 This amendment publishes the distribution instead of three points that stand in for it: for every `(med_category, med_dose_unit)` pair, the **empirical cumulative distribution function** over the charted doses — every distinct dose value, how many administrations carried it, the running count, and the cumulative proportion.
 
@@ -20,7 +20,7 @@ The study lead's framing: *"for all the diff meds and unit do ECDF extract"*, an
 
 ### What this does not change
 
-Nothing. `index_paralytic_dose.csv`, `sedation_dose.csv`, `paralytic_dose_units.csv` and `sedation_dose_units.csv` are published exactly as they are today, on the same keys, with the same values. Figure E.2 continues to read `sedation_dose.csv`. The ECDF is **purely additive** — a fifth and sixth dose artifact, not a replacement for the first four.
+At implementation time, nothing changed in the four existing dose tables. P43 later changed the two converted summary tables and Figure E.2 while preserving `step02__paralytic_dose_raw_unit_counts.csv`, `step03__sedation_dose_raw_unit_counts.csv`, both raw-unit ECDFs, and their figures. P41 remains an additive QC distribution, not the clinically filtered summary population.
 
 The alternative was put to the study lead and declined: the ECDF's `n_total` column carries every count that the two `*_dose_units.csv` files publish, which makes them exact duplicates by the same argument that retired Table 1's long CSV in `69a7c63`. Retiring them was offered and refused in favour of leaving already-reviewed artifacts untouched.
 
@@ -30,7 +30,7 @@ The alternative was put to the study lead and declined: the ECDF's `n_total` col
 
 | \# | Decision | Rationale |
 |---|---|---|
-| P41 | **Dose distributions are published as full ECDFs keyed on the raw charted `(med_category, med_dose_unit)` pair — one row per distinct dose value, carrying `n_at_dose`, `n_cum`, `n_total` and `ecdf`.** Amount units only; rate-charted rows are not published in any form. Additive to P18's median/IQR tables, which are unchanged. | Set by the study lead. Three quantiles cannot show bimodality, cannot show that 363 of 575 vecuronium administrations are the single value 10 mg, nor that 4 rocuronium administrations are charted at 0.0 mg, and — per the pipeline's own comment at `02:1317` — frequently *are* individual charted doses anyway, so they do not even buy the distance from the raw data they appear to. The ECDF is the complete aggregate: any quantile, any threshold count, any cross-site pooled distribution is recoverable from it, and a consortium partner never has to ask a site to re-run for a statistic nobody thought of first. Keying on the **raw** unit rather than the converted one is what makes it a diagnostic as well as a description: P18's conversion folds ketamine's 8 `mcg` rows in with its 5 `mg` rows and produces a median that sits inside the artifact rather than near the clinical dose range, and an ECDF on the raw unit shows that split directly instead of relying on a reader to cross-reference `sedation_dose_units.csv` and infer it. |
+| P41 | **Dose distributions are published as full ECDFs keyed on the raw charted `(med_category, med_dose_unit)` pair — one row per distinct dose value, carrying `n_at_dose`, `n_cum`, `n_total` and `ecdf`.** Amount units only; rate-charted rows are not published in any form. Additive to P18's converted summary and unchanged by P43's later summary-only plausibility filter. | Set by the study lead. Three quantiles cannot show bimodality, cannot show that 363 of 575 vecuronium administrations are the single value 10 mg, nor that 4 rocuronium administrations are charted at 0.0 mg. The raw ECDF is the complete QC aggregate: any quantile, threshold count or cross-site pooled raw distribution is recoverable from it. Keying on the **raw** unit makes it diagnostic: inaccurate units and implausible values excluded from P43's clinical summary remain visible here rather than disappearing silently. |
 
 ### The disclosure consequence, stated rather than discovered
 
@@ -38,7 +38,7 @@ A full ECDF over distinct values publishes every charted dose in a small group. 
 
 This is permitted, deliberately, and not by oversight. The n ≥ 10 small-cell rule was **withdrawn** by the study lead on 2026-08-10 (P21, amended; `docs/pipeline_flow.md` §6), and the boundary that replaced it is **row-level versus aggregate, not cell size**. A dose value with a count attached describes a dose, not a person; the cohort it is drawn from is defined by a published inclusion rule; and no identifier and no timestamp accompanies it — which is the whole of what `publish()` checks.
 
-It is also not a new exposure. `sedation_dose.csv` already publishes three of ketamine's thirteen charted doses verbatim under P18, as its own margin note records. The ECDF makes the exposure legible instead of incidental: a reader of an ECDF row with `n_total = 3` can see that the group is three administrations, whereas a reader of a p25/median/p75 triple cannot tell whether it was synthesised or copied.
+It is also not a new exposure. `fig_E2__sedation_dose_summary.csv` already publishes three of ketamine's thirteen charted doses verbatim under P18, as its own margin note records. The ECDF makes the exposure legible instead of incidental: a reader of an ECDF row with `n_total = 3` can see that the group is three administrations, whereas a reader of a p25/median/p75 triple cannot tell whether it was synthesised or copied.
 
 ------------------------------------------------------------------------
 
@@ -50,8 +50,8 @@ Two notebooks touched, `02` and `03`. `01`, `04`, `05` and `06` are not modified
 
 | notebook | new cells | writes |
 |---|---|---|
-| `02_index_paralytic.py` | `ecdf_by_group` helper; one publish cell; one figure cell | `output/final_no_phi/paralytic_dose_ecdf.csv`, `figures/B1_paralytic_dose_ecdf.png` |
-| `03_context.py` | `ecdf_by_group` helper; one publish cell; one figure cell | `output/final_no_phi/sedation_dose_ecdf.csv`, `figures/E3_sedation_dose_ecdf.png` |
+| `02_index_paralytic.py` | `ecdf_by_group` helper; one publish cell; one figure cell | `output/final_no_phi/fig_B1__paralytic_dose_ecdf.csv`, `figures/fig_B1__paralytic_dose_ecdf.png` |
+| `03_context.py` | `ecdf_by_group` helper; one publish cell; one figure cell | `output/final_no_phi/fig_E3__sedation_dose_ecdf.csv`, `figures/fig_E3__sedation_dose_ecdf.png` |
 
 `B` is the free figure letter in `02` (which owns `A1` and `C1`); `E3` continues `03`'s `E1`/`E2` sedation series.
 
@@ -62,7 +62,7 @@ Two notebooks touched, `02` and `03`. `01`, `04`, `05` and `06` are not modified
 | `02` | `dose_converted` | `code/02_index_paralytic.py:1292` | 2,160 doses |
 | `03` | `sedation_dose_converted` | `code/03_context.py:1322` | 3,570 (index paralytic, administration) pairs |
 
-These are the **same frames**, grouped on the **same keys**, that already produce `paralytic_dose_units.csv` and `sedation_dose_units.csv`. `n_total` for a group is therefore identical to that group's `n` in those files, by construction rather than by agreement — the two cannot disagree without one of them being edited to stop using the frame.
+These are the **same frames**, grouped on the **same keys**, that already produce `step02__paralytic_dose_raw_unit_counts.csv` and `step03__sedation_dose_raw_unit_counts.csv`. `n_total` for a group is therefore identical to that group's `n` in those files, by construction rather than by agreement — the two cannot disagree without one of them being edited to stop using the frame.
 
 The ECDF reads the **raw** `med_dose` and `med_dose_unit` columns from those frames, never `med_dose_converted` / `med_dose_unit_converted`. Both pairs are present on the frame; P41 uses the raw pair.
 
@@ -117,7 +117,7 @@ vecuronium,mg,100.0,7,575,575,1.0
 
 ### 4.1 Expected size at this site
 
-`paralytic_dose_ecdf.csv` — **118 rows** over 2,160 doses:
+`fig_B1__paralytic_dose_ecdf.csv` — **118 rows** over 2,160 doses:
 
 | med_category | med_dose_unit | n | distinct doses |
 |---|---|---|---|
@@ -125,7 +125,7 @@ vecuronium,mg,100.0,7,575,575,1.0
 | rocuronium | mg | 1,582 | 87 |
 | vecuronium | mg | 575 | 29 |
 
-`sedation_dose_ecdf.csv` — **81 rows** over 3,570 pairs:
+`fig_E3__sedation_dose_ecdf.csv` — **81 rows** over 3,570 pairs:
 
 | med_category | med_dose_unit | n | distinct doses |
 |---|---|---|---|
@@ -142,7 +142,7 @@ Both are smaller than several artifacts already published. Row count scales with
 
 ## 5. Figures
 
-One step plot per notebook — `figures/B1_paralytic_dose_ecdf.png` from `02` and `figures/E3_sedation_dose_ecdf.png` from `03` — one panel per `(med_category, med_dose_unit)` group, following the conventions every existing figure cell in this pipeline already uses:
+One step plot per notebook — `figures/fig_B1__paralytic_dose_ecdf.png` from `02` and `figures/fig_E3__sedation_dose_ecdf.png` from `03` — one panel per `(med_category, med_dose_unit)` group, following the conventions every existing figure cell in this pipeline already uses:
 
 - **Read the published CSV back** via `pl.read_csv(SHARE_DIR / ...)`, never the in-memory frame. A figure that disagrees with its own CSV is a bug that only this convention can catch.
 - **Palette:** `_BLUE = "#2a78d6"`, `_INK = "#0b0b0b"`, `_SECOND = "#52514e"`, `_MUTED = "#898781"`, `_GRID = "#e1e0d9"`, `_SURFACE = "#ffffff"`.
@@ -178,7 +178,7 @@ New `tests/test_dose_ecdf.py`, following `tests/test_dose_conversion.py` exactly
 
 | file | change |
 |---|---|
-| `docs/pipeline_flow.md` | P41 added to the §7 rule table; the two CSVs and two figures added to the §2 artifact inventory; §4's and §5's dose narratives (the `paralytic_dose_units.csv` and `sedation_dose_units.csv` paragraphs) pointed at the ECDF beside the counts table |
+| `docs/pipeline_flow.md` | P41 added to the §7 rule table; the two CSVs and two figures added to the §2 artifact inventory; §4's and §5's dose narratives point at the raw-unit count and ECDF files beside each other |
 | `docs/superpowers/specs/2026-08-10-paralytic-index-design.md` | P18 annotated to note it is extended, not superseded, by P41 |
 | `code/README.md` | no change — the writes column already reads "several `output/final_no_phi/*.csv` + `figures/`" for both `02` and `03` |
 | `README.md` | no change — it describes the study, not the artifact inventory |

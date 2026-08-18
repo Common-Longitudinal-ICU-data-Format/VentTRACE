@@ -13,7 +13,12 @@ def _():
     import pandas as pd
     import polars as pl
 
-    from clifpy.tables import Adt, Hospitalization, RespiratorySupport
+    from clifpy.tables import (
+        Adt,
+        Hospitalization,
+        MedicationAdminIntermittent,
+        RespiratorySupport,
+    )
     from clifpy.utils.stitching_encounters import stitch_encounters
     from clifpy.utils.waterfall import process_resp_support_waterfall
 
@@ -25,6 +30,7 @@ def _():
     return (
         Adt,
         Hospitalization,
+        MedicationAdminIntermittent,
         Path,
         RespiratorySupport,
         json,
@@ -43,19 +49,20 @@ def _(mo):
         """
         # 01 — Cohort and CONSORT
 
-        Builds the analytic cohort. Unchanged by the paralytic-index overhaul (spec P2) —
-        the cohort definition, the stitching, and the waterfall don't know or care which
-        drug is being studied.
+        Builds the analytic cohort around a qualifying paralytic administration. Respiratory
+        charting supplies context and the tracheostomy exclusion, but is not an inclusion
+        requirement: a patient who dies immediately after intubation may never receive a
+        charted IMV row.
 
         **The analytic unit is the stitched `encounter_block`, not `hospitalization_id`.**
 
         Stages, each reporting a CONSORT row:
 
-        1. **Step 0** — restrict to patients with at least one IMV row ever (efficiency only)
+        1. **Step 0** — restrict to patients with at least one qualifying paralytic ever
         2. **Stitch** — merge hospitalizations less than `stitch_hours` apart into one encounter
-        3. **Include** — adult, date window, at least one ED or ICU location, at least one IMV row
+        3. **Include** — adult, date window, at least one ED or ICU location, at least one paralytic
         4. **Exclude** — tracheostomy or trach collar within `trach_window_hours` of block admission
-        5. **Waterfall** the respiratory table and publish the raw charted IMV rows
+        5. **Waterfall** any available respiratory rows and publish raw charted IMV QC
 
         `01` resolves no index event. The paralytic administration is the index now — `02`
         folds paralytic administrations into index events (anchor-and-close at 15 minutes,
@@ -85,6 +92,9 @@ def _(Path, json):
     DATE_START = config["date_start"]
     DATE_END = config["date_end"]
 
+    PARALYTICS = ["rocuronium", "succinylcholine", "vecuronium"]
+    MAR_ACTIONS = ["given", "bolus"]
+
     OUTPUT_DIR = Path(config["output_directory"])
     PHI_DIR = OUTPUT_DIR / "intermediate_phi"
     SHARE_DIR = OUTPUT_DIR / "final_no_phi"
@@ -110,6 +120,8 @@ def _(Path, json):
         DATE_START,
         FILETYPE,
         MIN_AGE,
+        MAR_ACTIONS,
+        PARALYTICS,
         PHI_DIR,
         SHARE_DIR,
         SITE,
@@ -190,17 +202,17 @@ def _():
 def _(mo):
     mo.md(
         """
-        ## Step 0 — the IMV-ever pre-filter
+        ## Step 0 — the paralytic-ever pre-filter
 
         Stitching joins the full hospitalization and ADT tables and iterates to a fixed
         point. Restrict it to patients who could possibly qualify.
 
-        The filter is **patient-level, not hospitalization-level**: a patient's IMV may be
+        The filter is **patient-level, not hospitalization-level**: a patient's paralytic may be
         charted under a different `hospitalization_id` than the one that will anchor their
         encounter block, so filtering hospitalizations here would discard the very rows
         stitching exists to reunite.
 
-        This changes no result — every criterion below requires an IMV row, so a patient
+        This changes no result — every criterion below requires a qualifying paralytic, so a patient
         with none could never enter the cohort by any path.
         """
     )
@@ -208,40 +220,70 @@ def _(mo):
 
 
 @app.cell
-def _(DATA_DIR, FILETYPE, Hospitalization, RespiratorySupport, TIMEZONE, pl, to_site_naive):
-    # Only the id column, only IMV rows — the cheapest possible pass over the big table.
-    #
-    # The filter lists casing variants (D22). It runs inside from_file, on raw site data,
-    # which is the one comparison in this pipeline that happens before our own
-    # lower-casing — so it is the one place D21 cannot protect. A site charting 'imv'
-    # would otherwise load zero rows and hand us an empty cohort with no error at all.
-    _imv_rows = RespiratorySupport.from_file(
+def _(
+    DATA_DIR,
+    FILETYPE,
+    Hospitalization,
+    MAR_ACTIONS,
+    MedicationAdminIntermittent,
+    PARALYTICS,
+    TIMEZONE,
+    pl,
+    to_site_naive,
+):
+    def _rate_unit_expr():
+        _time_units = (
+            "s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
+            "h|hr|hrs|hour|hours|d|day|days"
+        )
+        return (
+            pl.col("med_dose_unit")
+            .str.strip_chars()
+            .str.to_lowercase()
+            .str.contains(rf"(?:/|\bper\s+)(?:{_time_units})$")
+            .fill_null(False)
+        )
+
+    _category_variants = sorted(
+        {v for c in PARALYTICS for v in (c, c.title(), c.upper())}
+    )
+    _med = MedicationAdminIntermittent.from_file(
         data_directory=DATA_DIR,
         filetype=FILETYPE,
         timezone=TIMEZONE,
-        columns=["hospitalization_id", "device_category"],
-        filters={"device_category": ["IMV", "imv", "Imv"]},
+        columns=[
+            "hospitalization_id",
+            "med_category",
+            "mar_action_category",
+            "med_dose_unit",
+        ],
+        filters={"med_category": _category_variants},
     )
-
-    _imv_pl = pl.from_pandas(_imv_rows.df[["hospitalization_id", "device_category"]])
-    print("raw device_category casings the load actually returned:")
-    print(_imv_pl.get_column("device_category").value_counts(sort=True))
-
-    # The real match is on the lower-cased column (D21). The filter above is a coarse
-    # pre-screen; this is the comparison that decides anything.
-    imv_hosp_ids = (
-        _imv_pl.with_columns(device_category=pl.col("device_category").str.to_lowercase())
-        .filter(pl.col("device_category") == "imv")
+    _med_pl = pl.from_pandas(_med.df).with_columns(
+        med_category=pl.col("med_category").str.to_lowercase(),
+        mar_action_category=pl.col("mar_action_category").str.to_lowercase(),
+    )
+    _qualifying = _med_pl.filter(
+        pl.col("med_category").is_in(PARALYTICS)
+        & pl.col("mar_action_category").is_in(MAR_ACTIONS)
+        & ~_rate_unit_expr()
+    )
+    paralytic_hosp_ids = (
+        _qualifying
         .get_column("hospitalization_id")
         .unique()
     )
-
-    assert imv_hosp_ids.len() > 0, (
-        "no hospitalization has an IMV respiratory row. Either the site charts a "
-        "device_category casing missing from the filter list above, or device_category "
-        "uses a different vocabulary entirely. Check the value counts printed above."
+    assert paralytic_hosp_ids.len() > 0, (
+        "no hospitalization has a qualifying paralytic administration. Check the "
+        "med_category and mar_action_category vocabularies before trusting an empty cohort."
     )
-    print(f"\nhospitalizations with >=1 IMV row : {imv_hosp_ids.len():,}")
+    print("qualifying paralytic administrations:")
+    print(
+        _qualifying.group_by(["med_category", "mar_action_category"])
+        .agg(n=pl.len())
+        .sort("n", descending=True)
+    )
+    print(f"hospitalizations with >=1 qualifying paralytic : {paralytic_hosp_ids.len():,}")
 
     # Full hospitalization table — needed unfiltered so we can map IMV hospitalizations
     # to patients, then pull back *all* hospitalizations of those patients.
@@ -255,16 +297,16 @@ def _(DATA_DIR, FILETYPE, Hospitalization, RespiratorySupport, TIMEZONE, pl, to_
         )
     )
 
-    patients_imv_ever = (
-        hosp_all.filter(pl.col("hospitalization_id").is_in(imv_hosp_ids.implode()))
+    patients_paralytic_ever = (
+        hosp_all.filter(pl.col("hospitalization_id").is_in(paralytic_hosp_ids.implode()))
         .get_column("patient_id")
         .unique()
     )
-    return hosp_all, imv_hosp_ids, patients_imv_ever
+    return hosp_all, paralytic_hosp_ids, patients_paralytic_ever
 
 
 @app.cell
-def _(consort_add, hosp_all, patients_imv_ever, pl):
+def _(consort_add, hosp_all, patients_paralytic_ever, pl):
     n_patients_source = hosp_all.get_column("patient_id").n_unique()
     n_hosp_source = hosp_all.height
 
@@ -276,17 +318,20 @@ def _(consort_add, hosp_all, patients_imv_ever, pl):
         f"{n_hosp_source:,} hospitalizations",
     )
 
-    # All hospitalizations belonging to an IMV-ever patient, including their non-IMV ones.
-    hosp_imv_patients = hosp_all.filter(pl.col("patient_id").is_in(patients_imv_ever.implode()))
+    # Pull every hospitalization for each qualifying patient so stitching can reunite an
+    # ED paralytic with the inpatient admission that follows it.
+    hosp_paralytic_patients = hosp_all.filter(
+        pl.col("patient_id").is_in(patients_paralytic_ever.implode())
+    )
 
     consort_add(
-        "step 0: patients with >=1 IMV row ever",
+        "step 0: patients with >=1 qualifying paralytic ever",
         None,
-        hosp_imv_patients.get_column("patient_id").n_unique(),
-        n_patients_source - hosp_imv_patients.get_column("patient_id").n_unique(),
-        f"{hosp_imv_patients.height:,} hospitalizations",
+        hosp_paralytic_patients.get_column("patient_id").n_unique(),
+        n_patients_source - hosp_paralytic_patients.get_column("patient_id").n_unique(),
+        f"{hosp_paralytic_patients.height:,} hospitalizations",
     )
-    return (hosp_imv_patients,)
+    return (hosp_paralytic_patients,)
 
 
 @app.cell
@@ -318,11 +363,11 @@ def _(
     FILETYPE,
     STITCH_HOURS,
     TIMEZONE,
-    hosp_imv_patients,
+    hosp_paralytic_patients,
     pl,
     stitch_encounters,
 ):
-    _cohort_hosp_ids = hosp_imv_patients.get_column("hospitalization_id").to_list()
+    _cohort_hosp_ids = hosp_paralytic_patients.get_column("hospitalization_id").to_list()
 
     _adt = Adt.from_file(
         data_directory=DATA_DIR,
@@ -342,7 +387,7 @@ def _(
     print(adt_pl.get_column("location_category").value_counts(sort=True))
 
     _hosp_stitched_pd, _adt_stitched_pd, _mapping_pd = stitch_encounters(
-        hospitalization=hosp_imv_patients.to_pandas(),
+        hospitalization=hosp_paralytic_patients.to_pandas(),
         adt=adt_pl.to_pandas(),
         time_interval=STITCH_HOURS,
     )
@@ -490,24 +535,27 @@ def _(adt_pl, cohort_date, consort_add, encounter_mapping, pl):
 
 
 @app.cell
-def _(cohort_loc, consort_add, encounter_mapping, imv_hosp_ids, pl):
-    # Evaluated on the RAW table (imv_hosp_ids came from unmodified respiratory_support),
-    # so cohort membership never depends on a device value the waterfall imputed.
-    blocks_with_imv = (
-        encounter_mapping.filter(pl.col("hospitalization_id").is_in(imv_hosp_ids.implode()))
+def _(cohort_loc, consort_add, encounter_mapping, paralytic_hosp_ids, pl):
+    blocks_with_paralytic = (
+        encounter_mapping.filter(
+            pl.col("hospitalization_id").is_in(paralytic_hosp_ids.implode())
+        )
         .get_column("encounter_block")
         .unique()
     )
 
-    cohort_imv = cohort_loc.filter(pl.col("encounter_block").is_in(blocks_with_imv.implode()))
+    cohort_paralytic = cohort_loc.filter(
+        pl.col("encounter_block").is_in(blocks_with_paralytic.implode())
+    )
 
     consort_add(
-        "include: >=1 raw IMV respiratory row",
-        cohort_imv.height,
-        cohort_imv.get_column("patient_id").n_unique(),
-        cohort_loc.height - cohort_imv.height,
+        "include: >=1 qualifying paralytic administration",
+        cohort_paralytic.height,
+        cohort_paralytic.get_column("patient_id").n_unique(),
+        cohort_loc.height - cohort_paralytic.height,
+        "rocuronium/succinylcholine/vecuronium; given/bolus; non-rate unit",
     )
-    return (cohort_imv,)
+    return (cohort_paralytic,)
 
 
 @app.cell
@@ -543,14 +591,14 @@ def _(
     FILETYPE,
     RespiratorySupport,
     TIMEZONE,
-    cohort_imv,
+    cohort_paralytic,
     encounter_mapping,
     pl,
 ):
     # One load of the raw respiratory table for every hospitalization in the cohort —
     # reused for the trach exclusion and for the waterfall below.
     cohort_hosp_ids = (
-        cohort_imv.select(pl.col("list_hospitalization_id").explode())
+        cohort_paralytic.select(pl.col("list_hospitalization_id").explode())
         .get_column("list_hospitalization_id")
         .unique()
         .to_list()
@@ -588,26 +636,11 @@ def _(
     print("\nlower-cased device_category across the cohort:")
     print(resp_raw.get_column("device_category").value_counts(sort=True))
 
-    # Cross-check the D22 variant list rather than trusting it. This load is NOT filtered
-    # on device_category, so if the from_file filter missed a casing, some hospitalization
-    # here will have a lower-cased 'imv' row that never made it into imv_hosp_ids.
-    _imv_here = (
-        resp_raw.filter(pl.col("device_category") == "imv")
-        .get_column("hospitalization_id")
-        .unique()
-    )
-    _missed = set(_imv_here.to_list()) - set(imv_hosp_ids.to_list())
-    assert not _missed, (
-        f"{len(_missed):,} hospitalizations have an 'imv' row that the from_file casing "
-        "filter did not return. Add the missing casing to the filter list in step 0 — "
-        "the cohort is currently undersized and nothing else would have told you."
-    )
-    print(f"\nD22 cross-check passed: no 'imv' row was missed by the load filter.")
     return resp_raw, resp_utc_pd
 
 
 @app.cell
-def _(TRACH_WINDOW_HOURS, cohort_imv, consort_add, pl, resp_raw):
+def _(TRACH_WINDOW_HOURS, cohort_paralytic, consort_add, pl, resp_raw):
     # `tracheostomy` is tested for truthiness, not identity: the waterfall coerces it to
     # 1.0/0.0 (waterfall.py:152-159). This runs on the raw table where it is still a bool,
     # but writing it to survive either representation costs nothing.
@@ -617,7 +650,7 @@ def _(TRACH_WINDOW_HOURS, cohort_imv, consort_add, pl, resp_raw):
 
     blocks_with_early_trach = (
         resp_raw.join(
-            cohort_imv.select(["encounter_block", "admission_dttm"]),
+            cohort_paralytic.select(["encounter_block", "admission_dttm"]),
             on="encounter_block",
             how="inner",
         )
@@ -632,13 +665,15 @@ def _(TRACH_WINDOW_HOURS, cohort_imv, consort_add, pl, resp_raw):
         .unique()
     )
 
-    cohort = cohort_imv.filter(~pl.col("encounter_block").is_in(blocks_with_early_trach.implode()))
+    cohort = cohort_paralytic.filter(
+        ~pl.col("encounter_block").is_in(blocks_with_early_trach.implode())
+    )
 
     consort_add(
         f"exclude: trach signal within {TRACH_WINDOW_HOURS}h",
         cohort.height,
         cohort.get_column("patient_id").n_unique(),
-        cohort_imv.height - cohort.height,
+        cohort_paralytic.height - cohort.height,
         "tracheostomy truthy OR device_category=='trach collar'",
     )
     consort_add(
@@ -700,35 +735,51 @@ def _(
     )
     _resp_in = resp_utc_pd[resp_utc_pd["hospitalization_id"].isin(_cohort_hosp_set)].copy()
 
-    _waterfalled = process_resp_support_waterfall(
-        _resp_in,
-        id_col="hospitalization_id",
-        # D6. This flag CANNOT change device_category: waterfall.py:274 ffills it
-        # unconditionally, and bfill reaches only num_cols_fill (fio2_set, peep_set,
-        # tidal_volume_set, ...) at :320-336 -- after the device heuristics at :199-226
-        # have already run. We read device_category and nothing else out of this frame,
-        # so the flag is inert here. Set as specified rather than silently dropped.
-        bfill=True,
-        verbose=True,
-    )
-
-    # The waterfall preserves UTC on input rows and creates UTC scaffold rows. Convert its
-    # result back to the configured site timezone before stripping the timezone.
-    _waterfalled["recorded_dttm"] = (
-        _waterfalled["recorded_dttm"].dt.tz_convert(TIMEZONE).dt.tz_localize(None)
-    )
-
-    resp_waterfall = (
-        pl.from_pandas(
-            _waterfalled[["hospitalization_id", "recorded_dttm", "device_category"]]
+    if _resp_in.empty:
+        resp_waterfall = (
+            encounter_mapping.select("hospitalization_id", "encounter_block")
+            .head(0)
+            .with_columns(
+                pl.lit(None, dtype=pl.Datetime).alias("recorded_dttm"),
+                pl.lit(None, dtype=pl.String).alias("device_category"),
+            )
+            .select(
+                "hospitalization_id",
+                "recorded_dttm",
+                "device_category",
+                "encounter_block",
+            )
         )
-        # Belt and braces: the column arrives lower-cased both because we lower-cased it
-        # on load and because the waterfall lower-cases it again. Stating it here means the
-        # invariant holds even if either of those two facts changes.
-        .with_columns(device_category=pl.col("device_category").str.to_lowercase())
-        .join(encounter_mapping, on="hospitalization_id", how="inner")
-        .sort(["encounter_block", "recorded_dttm"])
-    )
+    else:
+        _waterfalled = process_resp_support_waterfall(
+            _resp_in,
+            id_col="hospitalization_id",
+            # D6. This flag CANNOT change device_category: waterfall.py:274 ffills it
+            # unconditionally, and bfill reaches only num_cols_fill (fio2_set, peep_set,
+            # tidal_volume_set, ...) at :320-336 -- after the device heuristics at :199-226
+            # have already run. We read device_category and nothing else out of this frame,
+            # so the flag is inert here. Set as specified rather than silently dropped.
+            bfill=True,
+            verbose=True,
+        )
+
+        # The waterfall preserves UTC on input rows and creates UTC scaffold rows. Convert its
+        # result back to the configured site timezone before stripping the timezone.
+        _waterfalled["recorded_dttm"] = (
+            _waterfalled["recorded_dttm"].dt.tz_convert(TIMEZONE).dt.tz_localize(None)
+        )
+
+        resp_waterfall = (
+            pl.from_pandas(
+                _waterfalled[["hospitalization_id", "recorded_dttm", "device_category"]]
+            )
+            # Belt and braces: the column arrives lower-cased both because we lower-cased it
+            # on load and because the waterfall lower-cases it again. Stating it here means the
+            # invariant holds even if either of those two facts changes.
+            .with_columns(device_category=pl.col("device_category").str.to_lowercase())
+            .join(encounter_mapping, on="hospitalization_id", how="inner")
+            .sort(["encounter_block", "recorded_dttm"])
+        )
 
     # The waterfall's device heuristics can invent categories the raw table never had, so
     # assert the vocabulary is the one we expect rather than discovering it downstream.
@@ -742,7 +793,6 @@ def _(
     assert _seen <= _MCIDE_DEVICE_LOWER, (
         f"waterfall emitted device_category values outside mCIDE: {sorted(_seen - _MCIDE_DEVICE_LOWER)}"
     )
-    assert "imv" in _seen, "no 'imv' rows survived the waterfall — t0 would be null everywhere"
 
     # Defense in depth for the timezone boundary. The waterfall only ever ADDS rows, at
     # HH:59:59 scaffold positions; it never invents a timestamp anywhere else. So every
@@ -784,12 +834,10 @@ def _(mo):
         (spec P6, resolved entirely in `02`) — there is no episode or t0 concept left for
         `01` to compute.
 
-        What `01` publishes instead is the raw charted IMV rows, block-keyed
-        (`cohort_resp_imv_raw.parquet`). This is a leftover from the superseded
-        ventilator-anchored design, where it fed a charting-delay comparison against the
-        waterfalled IMV row. That comparison was not carried into `02` or `03` — nothing in
-        the live pipeline reads this file. It remains written because `01`'s logic is
-        unchanged by this overhaul (spec P2).
+        What `01` publishes instead is the available raw charted IMV rows, block-keyed
+        (`cohort_resp_imv_raw.parquet`). It is now a sparse QC artifact: a cohort block may
+        legitimately have no row because cohort entry depends on the paralytic, not on
+        respiratory charting.
         """
     )
     return
@@ -810,19 +858,11 @@ def _(PHI_DIR, cohort, pl, resp_raw):
         .sort(["encounter_block", "recorded_dttm"])
     )
 
-    assert cohort_resp_imv_raw.height > 0, (
-        "no raw charted imv rows survived the block join -- every block entered the "
-        "cohort on one (D23 still governs admission), so this cannot legitimately be empty"
-    )
     _blocks = cohort_resp_imv_raw.get_column("encounter_block").n_unique()
-    assert _blocks == cohort.height, (
-        f"{cohort.height - _blocks:,} cohort blocks have no raw charted imv row. That is "
-        "the inclusion criterion (§5.5), so the two comparisons have diverged."
-    )
 
-    cohort_resp_imv_raw.write_parquet(PHI_DIR / "cohort_resp_imv_raw.parquet")
-    print(f"cohort_resp_imv_raw.parquet  {cohort_resp_imv_raw.height:,} rows -> {PHI_DIR}")
-    print(f"  blocks represented         {_blocks:,}")
+    cohort_resp_imv_raw.write_parquet(PHI_DIR / "step01__cohort_resp_imv_raw.parquet")
+    print(f"step01__cohort_resp_imv_raw.parquet  {cohort_resp_imv_raw.height:,} rows -> {PHI_DIR}")
+    print(f"  blocks represented         {_blocks:,} / {cohort.height:,}")
 
     cohort_index = cohort.sort("encounter_block")
     return cohort_index, cohort_resp_imv_raw
@@ -844,7 +884,7 @@ def _(mo):
 
 
 @app.cell
-def _(cohort_index, pl, resp_waterfall):
+def _(cohort_index, cohort_resp_imv_raw, pl, resp_waterfall):
     # QC 1 -- how much stitching actually did.
     #
     # A waterfall-minus-raw charting-delay delta used to head this cell under the
@@ -878,11 +918,6 @@ def _(cohort_index, pl, resp_waterfall):
         .agg(hospitalization_id=pl.col("hospitalization_id").first())
     )
     _joined = _first_hosp.join(_imv_hosp, on="encounter_block", how="inner")
-    assert _joined.height == cohort_index.height, (
-        f"QC 2 resolved a first-IMV row for only {_joined.height:,} of "
-        f"{cohort_index.height:,} blocks -- the percentage below would be computed on a "
-        "biased subset."
-    )
     qc_pct_imv_elsewhere = (
         100.0
         * _joined.filter(
@@ -890,11 +925,28 @@ def _(cohort_index, pl, resp_waterfall):
         ).height
         / max(_joined.height, 1)
     )
+    qc_pct_blocks_with_resp = (
+        100.0
+        * resp_waterfall.get_column("encounter_block").n_unique()
+        / max(cohort_index.height, 1)
+    )
+    qc_pct_blocks_with_raw_imv = (
+        100.0
+        * cohort_resp_imv_raw.get_column("encounter_block").n_unique()
+        / max(cohort_index.height, 1)
+    )
     print(
         f"\nQC 2 -- % of blocks whose first IMV row falls outside the block's first "
-        f"hospitalization: {qc_pct_imv_elsewhere:.1f}"
+        f"hospitalization, among blocks with IMV: {qc_pct_imv_elsewhere:.1f}"
     )
-    return qc_blocks_per_encounter, qc_pct_imv_elsewhere
+    print(f"QC 3 -- % of blocks with respiratory rows: {qc_pct_blocks_with_resp:.1f}")
+    print(f"QC 4 -- % of blocks with raw charted IMV: {qc_pct_blocks_with_raw_imv:.1f}")
+    return (
+        qc_blocks_per_encounter,
+        qc_pct_blocks_with_raw_imv,
+        qc_pct_blocks_with_resp,
+        qc_pct_imv_elsewhere,
+    )
 
 
 @app.cell
@@ -917,6 +969,8 @@ def _(
     pl,
     publish,
     qc_blocks_per_encounter,
+    qc_pct_blocks_with_raw_imv,
+    qc_pct_blocks_with_resp,
     qc_pct_imv_elsewhere,
     resp_waterfall,
 ):
@@ -945,12 +999,15 @@ def _(
         "encounter_block is not unique in cohort_index."
     )
 
-    cohort.write_parquet(PHI_DIR / "cohort.parquet")
-    resp_waterfall.write_parquet(PHI_DIR / "cohort_resp_waterfall.parquet")
-    cohort_index_out.write_parquet(PHI_DIR / "cohort_index.parquet")
+    cohort.write_parquet(PHI_DIR / "step01__cohort.parquet")
+    resp_waterfall_out = resp_waterfall.with_columns(
+        cohort_run_id=pl.lit(COHORT_RUN_ID)
+    )
+    resp_waterfall_out.write_parquet(PHI_DIR / "step01__cohort_resp_waterfall.parquet")
+    cohort_index_out.write_parquet(PHI_DIR / "step01__cohort_index.parquet")
 
     consort_df = pl.DataFrame(consort_rows)
-    publish(consort_df, SHARE_DIR / "consort_cohort.csv", "consort_cohort")
+    publish(consort_df, SHARE_DIR / "step01__consort_cohort.csv", "step01__consort_cohort")
 
     cohort_qc = pl.DataFrame(
         [
@@ -959,16 +1016,18 @@ def _(
             {"stat": "stitch_hours", "value": str(STITCH_HOURS)},
             {"stat": "trach_window_hours", "value": str(TRACH_WINDOW_HOURS)},
             {"stat": "max_hosp_per_block", "value": str(qc_blocks_per_encounter.get_column("n_hospitalizations").max())},
-            {"stat": "pct_first_imv_outside_first_hosp", "value": f"{qc_pct_imv_elsewhere:.2f}"},
+            {"stat": "pct_blocks_with_respiratory_rows", "value": f"{qc_pct_blocks_with_resp:.2f}"},
+            {"stat": "pct_blocks_with_raw_imv", "value": f"{qc_pct_blocks_with_raw_imv:.2f}"},
+            {"stat": "pct_first_imv_outside_first_hosp_among_imv_blocks", "value": f"{qc_pct_imv_elsewhere:.2f}"},
         ]
     )
-    publish(cohort_qc, SHARE_DIR / "cohort_qc.csv", "cohort_qc")
+    publish(cohort_qc, SHARE_DIR / "step01__cohort_qc.csv", "step01__cohort_qc")
 
-    print(f"cohort.parquet                 {cohort.height:,} rows  -> {PHI_DIR}")
-    print(f"cohort_resp_waterfall.parquet  {resp_waterfall.height:,} rows")
-    print(f"cohort_index.parquet           {cohort_index_out.height:,} rows")
-    print(f"consort_cohort.csv             {consort_df.height} steps -> {SHARE_DIR}")
-    print(f"cohort_qc.csv                  {cohort_qc.height} stats")
+    print(f"step01__cohort.parquet                 {cohort.height:,} rows  -> {PHI_DIR}")
+    print(f"step01__cohort_resp_waterfall.parquet  {resp_waterfall_out.height:,} rows")
+    print(f"step01__cohort_index.parquet           {cohort_index_out.height:,} rows")
+    print(f"step01__consort_cohort.csv             {consort_df.height} steps -> {SHARE_DIR}")
+    print(f"step01__cohort_qc.csv                  {cohort_qc.height} stats")
     print("\nCONSORT")
     print(consort_df)
     return cohort_index_out, consort_df

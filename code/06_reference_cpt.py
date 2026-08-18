@@ -75,7 +75,12 @@ def _(Path, json):
     # that bills no intubations.
     CPT_FORMAT_VARIANTS = ["cpt", "CPT", "Cpt", "cpt4", "CPT4"]
 
-    TIER_LABELS = {1: "index only", 2: "index + imv transition", 3: "index + imv + sedation"}
+    TIER_LABELS = {
+        1: "paralytic only",
+        2: "paralytic + imv transition, no sedation",
+        3: "paralytic + imv + sedation",
+        4: "paralytic + sedation, no imv transition",
+    }
 
     print(f"site : {SITE}")
     print(f"cpt  : {CPT_INTUBATION}  formats {CPT_FORMAT_VARIANTS}")
@@ -168,8 +173,8 @@ def _(
     pl,
     to_site_naive,
 ):
-    index_covariates = pl.read_parquet(PHI_DIR / "index_covariates.parquet")
-    cohort_index = pl.read_parquet(PHI_DIR / "cohort_index.parquet")
+    index_covariates = pl.read_parquet(PHI_DIR / "step04__index_covariates.parquet")
+    cohort_index = pl.read_parquet(PHI_DIR / "step01__cohort_index.parquet")
 
     # P27: the denominator is the blocks that HAVE an index paralytic, not the cohort.
     blocks = index_covariates.filter(pl.col("p_num") == 1)
@@ -241,19 +246,19 @@ def _(
     # pct_blocks_with_any_cpt_format_row near zero should treat F as not run rather
     # than as a null result" cannot be read by an operator whose notebook already
     # aborted. At MIMIC this passed with exactly one row. A loud print, not an assert:
-    # the empty result is what cpt_cascade_qc.csv exists to publish.
+    # the empty result is what fig_F1__cpt_cascade_qc.csv exists to publish.
     if procedures_all.height == 0:
         print(
             "\n"
             "WARNING: zero rows matched CPT_FORMAT_VARIANTS for this cohort's "
             "hospitalizations.\n"
-            "  Sub-analysis F cannot answer its question at this site -- every tier of "
+            "  Sub-analysis F cannot answer its question at this site -- every category of "
             "the cascade\n"
             "  below will show 0% coded, and that 0% is indistinguishable from a "
             "broken CPT extract\n"
-            "  from inside this notebook. See cpt_cascade_qc.csv "
+            "  from inside this notebook. See fig_F1__cpt_cascade_qc.csv "
             "(pct_blocks_with_any_cpt_format_row)\n"
-            "  before reading cpt_cascade.csv as a measurement of agreement.\n"
+            "  before reading fig_F1__cpt_cascade.csv as a measurement of agreement.\n"
         )
 
     cpt_flags = cpt_block_flag(procedures, bridge)
@@ -274,10 +279,10 @@ def _(SHARE_DIR, SITE, TIER_LABELS, blocks, cpt_flags, pl, publish):
         "a block in the denominator has no CPT flag -- the bridge lost a block"
     )
 
-    # Fixed 1..3 grid: a tier with no blocks is published as an explicit zero rather
+    # Fixed 1..4 grid: a category with no blocks is published as an explicit zero rather
     # than being absent from the table (P21's published-zero convention).
     cpt_cascade = (
-        pl.DataFrame({"evidence_tier": [1, 2, 3]})
+        pl.DataFrame({"evidence_tier": [1, 2, 3, 4]})
         .with_columns(pl.col("evidence_tier").cast(pl.Int8))
         .join(
             _joined.group_by("evidence_tier").agg(
@@ -309,10 +314,10 @@ def _(SHARE_DIR, SITE, TIER_LABELS, blocks, cpt_flags, pl, publish):
     )
 
     assert cpt_cascade.get_column("n_blocks").sum() == blocks.height, (
-        "the cascade's tiers do not partition the denominator"
+        "the cascade's categories do not partition the denominator"
     )
 
-    publish(cpt_cascade, SHARE_DIR / "cpt_cascade.csv", "cpt_cascade")
+    publish(cpt_cascade, SHARE_DIR / "fig_F1__cpt_cascade.csv", "fig_F1__cpt_cascade")
     return (cpt_cascade,)
 
 
@@ -347,7 +352,11 @@ def _(SHARE_DIR, SITE, blocks, cpt_flags, pl, procedures_all, publish, bridge):
         ]
     ).with_columns(pl.lit(SITE).alias("site_name")).sort("stat")
 
-    publish(cpt_cascade_qc, SHARE_DIR / "cpt_cascade_qc.csv", "cpt_cascade_qc")
+    publish(
+        cpt_cascade_qc,
+        SHARE_DIR / "fig_F1__cpt_cascade_qc.csv",
+        "fig_F1__cpt_cascade_qc",
+    )
     return (cpt_cascade_qc,)
 
 
@@ -357,17 +366,17 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     _CODED = "#1baf7a"
     _NOT = "#b0aca2"
 
-    _c = pl.read_csv(SHARE_DIR / "cpt_cascade.csv").sort("evidence_tier")
-    _total = _c.get_column("n_blocks").sum()
+    figure_f1_df = pl.read_csv(SHARE_DIR / "fig_F1__cpt_cascade.csv").sort("evidence_tier")
+    _total = figure_f1_df.get_column("n_blocks").sum()
 
     # FIX 4 (2026-08-12 final review). Standing alone in a slide, the mosaic below reads
     # as "the paralytic index agrees with billing X% of the time" with no defence against
     # X being near zero for a site-level reason rather than a clinical one. Every other
     # artifact in sub-analysis F carries that defence -- the module docstring, P26, the
     # QC table itself -- except the one artifact most likely to be shown without any of
-    # them attached. The number comes from cpt_cascade_qc.csv, never recomputed here, so
+    # them attached. The number comes from fig_F1__cpt_cascade_qc.csv, never recomputed here, so
     # nothing appears on the figure that is not already in a published CSV (spec §7).
-    _qc = pl.read_csv(SHARE_DIR / "cpt_cascade_qc.csv")
+    _qc = pl.read_csv(SHARE_DIR / "fig_F1__cpt_cascade_qc.csv")
     _coverage_pct = _qc.filter(pl.col("stat") == "pct_blocks_with_any_cpt_format_row")["value"][0]
 
     # 5% chosen as the threshold: MIMIC's observed value is 0.06%, two orders of
@@ -389,22 +398,21 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     if _coverage_pct < _COVERAGE_THRESHOLD:
         _coverage_line2 = (
             f"below {_COVERAGE_THRESHOLD:.0f}%, sub-analysis F cannot answer its question "
-            "here (see cpt_cascade_qc.csv)"
+            "here (see fig_F1__cpt_cascade_qc.csv)"
         )
     else:
-        _coverage_line2 = "(see cpt_cascade_qc.csv)"
+        _coverage_line2 = "(see fig_F1__cpt_cascade_qc.csv)"
 
     _fig, _ax = plt.subplots(figsize=(10, 6.8))
 
-    # A mosaic, not grouped bars. The tiers are very unequal -- tier 1 in the thousands
-    # against tiers 2-3 in the hundreds -- and grouped bars would render the small tiers
-    # as hairlines. Row height proportional to n_blocks encodes the size disparity and
-    # the split encodes the coded fraction, in one mark.
+    # A mosaic, not grouped bars. The categories can be very unequal, and grouped bars
+    # would render small categories as hairlines. Row height proportional to n_blocks
+    # encodes the size disparity and the split encodes the coded fraction, in one mark.
     _y = 0.0
-    for _row in _c.iter_rows(named=True):
+    for _row in figure_f1_df.iter_rows(named=True):
         _h = _row["n_blocks"] / _total if _total else 0.0
         if _h == 0:
-            # A tier with no blocks: a published zero, drawn as a hairline rule so the
+            # A category with no blocks: a published zero, drawn as a hairline rule so the
             # row is visibly present and visibly empty rather than absent.
             _ax.plot([0, 1], [_y, _y], color="0.3", linewidth=1.2, linestyle=":")
             _ax.text(0.5, _y, f"{_row['tier_label']} — 0 blocks", ha="center", va="bottom", fontsize=8)
@@ -432,7 +440,7 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     _ax.set_yticks([])
     _ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
     _ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
-    _ax.set_xlabel("share of the tier's blocks carrying a CPT 31500")
+    _ax.set_xlabel("share of the category's blocks carrying a CPT 31500")
     for _spine in ("top", "right", "left"):
         _ax.spines[_spine].set_visible(False)
 
@@ -442,18 +450,18 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     ]
     _ax.legend(handles=_handles, loc="lower center", bbox_to_anchor=(0.5, -0.32), ncol=2, fontsize=8, frameon=False)
     _ax.set_title(
-        "F.1 — CPT agreement by paralytic evidence tier\n"
-        "row height is the tier's share of blocks; CPT is a comparator, not a reference standard (P26)\n"
+        "F.1 — CPT coding by paralytic context category\n"
+        "row height is the category's share of blocks; CPT is a comparator, not a reference standard (P26)\n"
         f"{_coverage_line1}\n"
         f"{_coverage_line2}",
         fontsize=10,
     )
     _fig.tight_layout()
     _fig.subplots_adjust(left=0.24, bottom=0.20, top=0.78)
-    _fig.savefig(FIG_DIR / "F1_cpt_cascade.png", dpi=150)
+    _fig.savefig(FIG_DIR / "fig_F1__cpt_cascade.png", dpi=150)
     plt.close(_fig)
-    print(f"F1_cpt_cascade.png -> {FIG_DIR}")
-    return
+    print(f"fig_F1__cpt_cascade.png -> {FIG_DIR}")
+    return (figure_f1_df,)
 
 
 if __name__ == "__main__":

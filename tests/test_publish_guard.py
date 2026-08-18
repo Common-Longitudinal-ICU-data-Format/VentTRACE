@@ -146,6 +146,18 @@ def test_the_returned_frame_equals_the_input(tmp_path):
     assert returned.equals(df)
 
 
+def test_controlled_manifest_ids_are_provenance_not_person_ids(tmp_path):
+    df = pl.DataFrame(
+        {
+            "artifact_id": ["A1.figure"],
+            "figure_id": ["A1"],
+            "cohort_run_id": ["run-1"],
+            "n": [1],
+        }
+    )
+    publish(df, tmp_path / "out.csv", "manifest")
+
+
 def test_publish_reports_what_it_wrote(tmp_path, capsys):
     publish(_agg_frame(), tmp_path / "out.csv", "gap_distribution")
     out = capsys.readouterr().out

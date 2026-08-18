@@ -58,7 +58,7 @@ machinery at all — there is nothing to agree with, because there is exactly on
 │  B  anchor-and-close at 15 min   →  2,117 INDEX PARALYTICS       │
 │  C  gap distribution between index paralytics                    │
 └───────┬──────────────────────────────────────────────────────────┘
-        │  index_paralytic.parquet — one row per index paralytic
+        │  step02__index_paralytic.parquet — one row per index paralytic
         │
 ┌───────▼──────────────────────────────────────────────────────────┐
 │ 03_context.py           WHAT SURROUNDS IT                        │
@@ -66,7 +66,7 @@ machinery at all — there is nothing to agree with, because there is exactly on
 │  D  first non-IMV → IMV transition in t ± 60 min                 │
 │  E  sedatives charted in t ± 60 min, with dose                   │
 └───────┬──────────────────────────────────────────────────────────┘
-        │  index_context.parquet
+        │  step03__index_context.parquet
         │
 ┌───────▼──────────────────────────────────────────────────────────┐
 │ 04_covariates.py        THE ANALYTIC ROW                         │
@@ -74,7 +74,7 @@ machinery at all — there is nothing to agree with, because there is exactly on
 │  demographics · comorbidity · physiology and life support in     │
 │  1/6/24h look-backs · block-level LOS and mortality               │
 └───────┬──────────────────────────────────────────────────────────┘
-        │  index_covariates.parquet — PHI, the sole owner of the analytic row
+        │  step04__index_covariates.parquet — PHI, the sole owner of the analytic row
         │
 ┌───────▼──────────────────────────────────────────────────────────┐
 │ 05_table_one.py         TABLE 1                                  │
@@ -86,14 +86,20 @@ machinery at all — there is nothing to agree with, because there is exactly on
 ┌───────▼──────────────────────────────────────────────────────────┐
 │ 06_reference_cpt.py     THE CPT 31500 COMPARATOR                 │
 │                                                                  │
-│  three evidence tiers vs a block-level billing flag, plus the    │
-│  day offset between the index paralytic and the nearest code     │
+│  four mutually exclusive IMV/sedation context categories vs a    │
+│  block-level billing flag                                         │
 └───────┬──────────────────────────────────────────────────────────┘
         │
-   output/final_no_phi/   aggregates + figures, no row-level records
+┌───────▼──────────────────────────────────────────────────────────┐
+│ 07_artifact_manifest.py AUDIT AND CONTROL                        │
+│                                                                  │
+│  reject stale/missing files · record dataframe lineage + SHA-256 │
+└───────┬──────────────────────────────────────────────────────────┘
+        │
+    output/final_no_phi/   aggregates + figures, no row-level records
 ```
 
-Six notebooks, run in order, each named for the CLIF table it opens rather than for a step
+Six notebooks and one artifact-audit step run in order. Each analysis notebook is named for the CLIF table it opens rather than for a step
 number that would drift as the design changes. `01` touches `hospitalization`, `adt` and
 `respiratory_support`. `02` touches exactly one table —
 `medication_admin_intermittent`, filtered to the three paralytics. `03` touches the waterfalled
@@ -101,14 +107,22 @@ device timeline from `01` and `medication_admin_intermittent` again, filtered to
 `04` is the sole owner of the study's analytic row — one row per index paralytic — and is the
 only notebook that opens `patient`, `vitals`, `medication_admin_continuous`, `crrt_therapy`
 and `hospital_diagnosis`, re-opening `hospitalization` and `adt` alongside them; its
-output, `index_covariates.parquet`, is PHI (it carries `t_dttm` and the identifier columns) and
-is never published. `05` opens nothing new — it reads `index_covariates.parquet` alone and
-publishes Table 1 twice, once by block and once by index event, in three forms each. `06` opens `patient_procedures`,
-the only notebook in the pipeline that does, alongside `index_covariates.parquet` and
-`cohort_index.parquet`. `medication_admin_continuous` is opened only by `04`; every dose measured
+output, `step04__index_covariates.parquet`, is PHI (it carries `t_dttm` and the identifier columns) and
+is never published. `05` opens nothing new — it reads `step04__index_covariates.parquet` alone and
+publishes Table 1 twice, once by block and once by index event, in two stable forms each. `06` opens `patient_procedures`,
+the only notebook in the pipeline that does, alongside `step04__index_covariates.parquet` and
+`step01__cohort_index.parquet`. `medication_admin_continuous` is opened only by `04`; every dose measured
 in `02`/`03` is a discrete charted push, not a continuous infusion.
 
-**New artifacts in `output/final_no_phi/`:** `covariate_coverage.csv` (from `04` — the null rate
+**Artifact names are part of the audit trail.** Every plotted dataframe is named
+`figure_<id>_df`; its data and PNG share one stem, such as
+`fig_E2__sedation_dose_summary.csv` and
+`figures/fig_E2__sedation_dose_summary.png`. Supporting outputs use
+`stepNN__<description>`. `artifact_manifest.csv` records the producer, figure ID, primary
+dataframe, sources, row count, byte size and SHA-256. The four `table1_by_agent_*` filenames
+remain unchanged as consortium pooling contracts.
+
+**New artifacts in `output/final_no_phi/`:** `fig_T2__source_coverage.csv` (from `04` — the null rate
 of every derived covariate, including 0% for any optional CLIF table a site's extract lacks);
 `table1_by_agent_block.*` and `table1_by_agent_index.*` (from `05` — identical statistic
 inventories, denominated in encounter blocks and in index events respectively, each published
@@ -117,8 +131,8 @@ form plus a provenance header — read by this pipeline's own figure T.1, by its
 coordinating centre pooling sites alike. **The Table 1 JSONs are the only artifacts in
 `final_no_phi/` that are not CSVs**, and the only published tables a reader must unwrap
 (`payload["rows"]`) before reading; the long form carried its own `.csv` until 2026-08-14, when
-the study lead withdrew it as an exact duplicate of that array); `cpt_cascade.csv` and `cpt_cascade_qc.csv` (from `06` — the three-tier evidence
-cascade against the CPT `31500` billing flag, and its QC). §2's table map above and
+the study lead withdrew it as an exact duplicate of that array); `fig_F1__cpt_cascade.csv` and `fig_F1__cpt_cascade_qc.csv` (from `06` — four mutually exclusive
+paralytic context categories against the CPT `31500` billing flag, and its QC). §2's table map above and
 `code/README.md`'s table carry the same rows. The CPT comparison is **presence within the
 encounter block**: all the codes for all the block's member hospitalizations are pooled, and one
 `31500` anywhere in that pool means the block has an intubation. No date is compared — P30's
@@ -126,12 +140,12 @@ encounter block**: all the codes for all the block's member hospitalizations are
 `31500` is a **comparator, not a reference standard** (spec P26 —
 [`superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md`](superpowers/specs/2026-08-12-block-summary-and-cpt-comparator-design.md)),
 and a site whose extract lacks professional billing sees an empty cascade —
-`cpt_cascade_qc.csv`'s `pct_blocks_with_any_cpt_format_row` says so before the cascade itself does.
-`02` and `03` also write `paralytic_dose_ecdf.csv` and `sedation_dose_ecdf.csv` with figures
-`B1_paralytic_dose_ecdf.png` and `E3_sedation_dose_ecdf.png` (P41) — the full empirical CDF of
+`fig_F1__cpt_cascade_qc.csv`'s `pct_blocks_with_any_cpt_format_row` says so before the cascade itself does.
+`02` and `03` also write `fig_B1__paralytic_dose_ecdf.csv` and `fig_E3__sedation_dose_ecdf.csv` with figures
+of the same stems (P41) — the full empirical CDF of
 charted dose per `(med_category, med_dose_unit)`, on the raw unit rather than the converted one,
 so P18's unit fold is visible rather than inferred. `02` and `03` additionally write
-`paralytic_dose_unit_corrections.csv` and `sedation_dose_unit_corrections.csv`, the per-agent
+`step02__paralytic_dose_unit_corrections.csv` and `step03__sedation_dose_unit_corrections.csv`, the per-agent
 counts of charted `mg/kg` rows treated as absolute `mg` for P42's converted calculation.
 
 ---
@@ -149,7 +163,7 @@ or cares which drug is being studied.
 | age | ≥ 18 at admission |
 | dates | 2018-01-01 … 2025-12-31 (skipped at MIMIC — its timestamps are date-shifted, so a calendar filter is meaningless there) |
 | location | ED **or** ICU at some point in the block |
-| ventilation | at least one raw charted `device_category == 'imv'` row |
+| index signal | at least one qualifying rocuronium, succinylcholine, or vecuronium administration: `given`/`bolus`, non-rate unit |
 | exclusion | tracheostomy in the first 24 h — `tracheostomy` truthy **or** `device_category == 'trach collar'` |
 
 **Stitching comes first.** An ED presentation and the inpatient admission that follows it can
@@ -158,44 +172,33 @@ are merged into one `encounter_block`, and every notebook after `01` keys on the
 than the raw id. Without this, a paralytic charted in the ED and a ventilator transition charted
 after transfer would read as unrelated — one clinical act split by an administrative boundary.
 
-**The waterfall makes the device record continuous.** Raw `respiratory_support` is charted
+**The waterfall makes the available device record continuous.** Raw `respiratory_support` is charted
 irregularly. `clifpy`'s `process_resp_support_waterfall` inserts hourly scaffold rows,
 forward-fills `device_category`, and relabels a row with a null device to `imv` when the
 ventilator settings on it look like a ventilator. Sub-analysis D reads this output, not the raw
-table — see §5.
+table — see §5. A block without a raw IMV row remains eligible; missing respiratory context is
+reported as `no_device_record` rather than excluding a patient who died before IMV was charted.
 
-The funnel, as it stands for this cohort run:
+The funnel is evaluated in this order:
 
 ```
-   223,452 patients  (546,028 hospitalizations, source data)
-        │
-        │  step 0: keep patients with >=1 IMV row ever (efficiency pre-filter only)
+source hospitalizations
+        │  keep all hospitalizations for patients with >=1 qualifying paralytic
+        │  stitch same-patient hospitalizations <6h apart → encounter_block
+        │  age >=18
+        │  admission date window (skipped at MIMIC)
+        │  >=1 ADT row in {ed, icu}
+        │  >=1 qualifying paralytic administration in the stitched block
+        │  exclude trach signal in the first 24h
         ▼
-   31,533 patients   (110,320 hospitalizations)
-        │
-        │  stitch hospitalizations <6h apart  →  encounter_block
-        ▼
-   109,275 encounter blocks · 31,533 patients
-        │  −0          age >= 18
-        │  −0          date window (skipped — MIMIC)
-        │  −20,561     >=1 ADT row in {ed, icu}
-        ▼
-   88,714
-        │  −53,572     >=1 raw charted IMV row
-        ▼
-   35,142
-        │  −1,125      trach signal in first 24h
-        ▼
-   34,017 ENCOUNTER BLOCKS · 31,124 PATIENTS   ← the analytic cohort
+ANALYTIC COHORT
 ```
 
-Two QC facts worth carrying: at most 4 hospitalizations were stitched into a single block, and
-in 0.57% of blocks the first charted IMV row falls in a hospitalization *other than* the block's
-first — direct, measured evidence for why stitching matters rather than an assumption that it
-does.
+`step01__cohort_qc.csv` reports the hospitalization count per block, respiratory-row coverage, raw-IMV
+coverage, and where the first IMV row falls among blocks that have one.
 
-**Outputs consumed downstream:** `cohort_index.parquet` (the join spine — `encounter_block`,
-`patient_id`, `cohort_run_id`, `list_hospitalization_id`) and `cohort_resp_waterfall.parquet`
+**Outputs consumed downstream:** `step01__cohort_index.parquet` (the join spine — `encounter_block`,
+`patient_id`, `cohort_run_id`, `list_hospitalization_id`) and `step01__cohort_resp_waterfall.parquet`
 (the gap-free device timeline). `02` explodes `list_hospitalization_id` to reach the medication
 table; `03` reads the waterfall for sub-analysis D. Neither notebook re-derives a block, and
 neither ever names a raw `hospitalization_id` outside the one bridge step that reaches it (§4).
@@ -215,7 +218,7 @@ The bridge from `hospitalization_id` to `encounter_block` is the one place this 
 allowed to name a hospitalization; the column is dropped the moment the join lands, so a
 paralytic charted in the ED cannot fail to pair with one charted on the floor after transfer.
 
-### A — the co-administration gap distribution
+### A — the paralytic administration gap distribution
 
 Every **unordered pair** of paralytic administrations within a block, same-agent pairs included,
 computed **before** the fold and depending on nothing it decides — this is the evidence for the
@@ -255,14 +258,14 @@ The fold produces **2,117 index paralytics** — **1,555 rocuronium** and **562 
 across **1,547 encounter blocks**. Most blocks have exactly one (1,204 of 1,547 — 77.8%); 236
 have two; the tail runs out to 12 in a single block. Co-administration inside an index event —
 folding *more than one agent* together — does not occur at this site: `agent_label` in
-`index_paralytic_summary.csv` carries only single-agent labels, zero of them cross-agent. What
+`step02__index_paralytic_summary.csv` carries only single-agent labels, zero of them cross-agent. What
 is not rare is the same-agent **redose**: 42 of 2,117 index paralytics (2.0%) fold more than one
-*administration* of the same agent together (`n_coadmin` in `index_paralytic_summary.csv`).
+*administration* of the same agent together (`n_coadmin` in `step02__index_paralytic_summary.csv`).
 
 Two facts are the design working, made visible in the published output rather than merely
 asserted:
 
-- **`max_span_min` is exactly 15.0 for both agents** — `index_paralytic_summary.csv`. That is
+- **`max_span_min` is exactly 15.0 for both agents** — `step02__index_paralytic_summary.csv`. That is
   the assertable invariant P6 bought by choosing anchor-and-close over transitive chaining: no
   index event, however many administrations it folds, can span more than the threshold that
   defines it.
@@ -271,7 +274,8 @@ asserted:
   (1,582 already charted in `mg`, 3 charted in `mcg` folded in by the conversion), median 50
   (IQR 50–100). Vecuronium: `mg` only, n=575, median 10 (IQR 6–10). The raw unit mix that the
   withdrawn version of P18 published as separate rows is now a counts-only table with no dose
-  statistics attached — `paralytic_dose_units.csv`. `paralytic_dose_ecdf.csv` carries the same
+  statistics attached — `step02__paralytic_dose_raw_unit_counts.csv`.
+  `fig_B1__paralytic_dose_ecdf.csv` carries the same
   counts with the whole distribution attached: `n_total` there equals `n` here by construction,
   since both are grouped from one frame on one pair of keys.
 
@@ -282,14 +286,14 @@ The identical construction as A — all unordered pairs, the identical 15-bin gr
 mass concentrated in the multi-day bins (234 beyond 7 days, 227 in 3–7 days) — the spacing of
 genuinely separate paralytic episodes within a stay, not redosing.
 
-**`index_gap_distribution.csv` has a count of zero in every bin below 15 minutes** — `0`,
+**`fig_C1__index_paralytic_pair_gaps.csv` has a count of zero in every bin below 15 minutes** — `0`,
 `(0,1]`, `(1,2]`, `(2,5]`, `(5,10]`, `(10,15]`. That is not a data gap. It is the fold's defining
 property made visible: an anchor at `t` closes at `t + 15` inclusive, so the next anchor is the
 first administration *strictly after* `t + 15` — two index paralytics cannot be closer together
 than the threshold that separates them, by construction. `02` asserts these six bins are empty
 on every run; a non-zero count there would be a bug in the fold, not a finding.
 
-**Output:** `index_paralytic.parquet`, written to `output/intermediate_phi/` — it carries
+**Output:** `step02__index_paralytic.parquet`, written to `output/intermediate_phi/` — it carries
 `t_dttm`, a real timestamp, so it is PHI and is never published. It is the spine `03` joins to.
 
 ---
@@ -336,7 +340,7 @@ some point, did the device change around *this* paralytic", a narrower and answe
 Where the transition sits relative to `t`: slightly more land *before* the paralytic (279 of 484,
 57.6% — the vent came first) than after (205, 42.4%), and the single busiest 5-minute bin is
 `[0,5)` with 50 — the paralytic and the device transition most often land within minutes of each
-other. What the airway was immediately before a transition (`imv_prior_device.csv`): nasal
+other. What the airway was immediately before a transition (`step03__imv_prior_device.csv`): nasal
 cannula most often (129), then a block that opens on IMV with nothing charted before it at all
 (111 — the patient arrived already-tubed), face mask (110), high-flow NC (64), NIPPV (40).
 
@@ -361,8 +365,12 @@ without. Of 2,117 index paralytics, **1,399 (66.1%) had at least one sedative ch
 window and **718 (33.9%) had none**. The most common charted sets: fentanyl+propofol (383),
 propofol alone (324), fentanyl alone (242), fentanyl+midazolam (202), midazolam alone (128).
 
-Dose statistics, standardised with clifpy to one preferred unit per `med_category` and keyed on
-`med_category` alone (P18, amended 2026-08-10): fentanyl standardises to `mcg` (n=1,514, median
+Dose statistics are standardised with clifpy to one preferred unit per `med_category`, clinically
+filtered, and keyed on `med_category` alone (P18/P43). Both tables publish mean, sample SD,
+median, p25 and p75. Included values satisfy `0 < dose <` the agent-specific upper bound:
+etomidate 200 mg, fentanyl 500 mcg, midazolam 50 mg, propofol 500 mg, rocuronium 400 mg,
+succinylcholine 400 mg and vecuronium 30 mg; ketamine is unchanged. Raw propofol `mcg` entries
+are excluded from these summaries. The historical run below predates P43: fentanyl standardises to `mcg` (n=1,514, median
 50, IQR 50–100), midazolam to `mg` (n=610, median 2, IQR 2–2 — a strikingly fixed induction
 dose), propofol to `mg` (n=1,433 — 1,427 already charted in `mg`, 6 charted in `mcg` folded in by
 the conversion — median 20, IQR 10–40). Ketamine standardises to `mg` and pools both charted
@@ -370,23 +378,24 @@ units into one row: n=13 (8 charted in `mcg`, 5 in `mg`), median 0.15, IQR 0.03�
 p25/median/p75 indices land exactly on charted observations rather than an interpolated value —
 see the quantile note in `02`/`03`. The raw unit mix that the withdrawn version of P18 published
 as separate rows is now a counts-only table with no dose statistics attached —
-`sedation_dose_units.csv`. `sedation_dose_ecdf.csv` is the same population with the distribution
-attached, and is where ketamine's 8 `mcg` and 5 `mg` administrations appear as two distributions
-rather than one pooled median. `sedation_dose_unit_corrections.csv` reports, including explicit
+`step03__sedation_dose_raw_unit_counts.csv`. `fig_E3__sedation_dose_ecdf.csv` retains the raw, unfiltered QC population and
+is where inaccurate units and outliers remain auditable, including ketamine's charted `mcg` and
+`mg` administrations as separate distributions. `step03__sedation_dose_unit_corrections.csv` reports, including explicit
 zeros, how many administration-window pairs per sedative had exact `mg/kg` interpreted as `mg`.
 
 **What E's counts count: pairs, not administrations.** A block can hold several index
 paralytics, and a single physical administration inside two overlapping ±60-minute windows
 contributes a row to each. That is intentional — the administration genuinely happened within
-±60 minutes of both — but it means `sedation_offset_distribution.csv` and `sedation_dose.csv`
+±60 minutes of both — but it means `fig_E1__sedation_offset.csv` and
+`fig_E2__sedation_dose_summary.csv`
 publish **3,570 (index paralytic, administration) pairs**, not 3,570 distinct drug
 administrations. The column is named `n_admin_windows` for exactly this reason, and reading it
 as a count of doses given would overstate the true administration count by an unstated margin.
-`sedation_dose_ecdf.csv`'s `n_total` is drawn from the same pairs, for the same reason — it is
-not comparable row-for-row with `paralytic_dose_ecdf.csv`'s `n_total`, which counts
+`fig_E3__sedation_dose_ecdf.csv`'s `n_total` is drawn from the same pairs, for the same reason — it is
+not comparable row-for-row with `fig_B1__paralytic_dose_ecdf.csv`'s `n_total`, which counts
 administrations, despite the two files sharing a column name and schema.
 
-**Output:** `index_context.parquet` — `index_paralytic.parquet` plus D's and E's columns, one
+**Output:** `step03__index_context.parquet` — `step02__index_paralytic.parquet` plus D's and E's columns, one
 row per index paralytic, written to `output/intermediate_phi/`. It carries raw timestamps
 (`t_dttm`, `imv_transition_dttm`, per-dose `admin_dttm` inside `sedatives`) and is never
 published in any form.
@@ -396,11 +405,13 @@ published in any form.
 ## 6. The disclosure boundary
 
 **`output/intermediate_phi/` is row-level PHI and never leaves the site.** It holds real
-timestamps and, upstream of the drop points described above, real identifiers — `cohort.parquet`,
-`cohort_resp_imv_raw.parquet`, `cohort_resp_waterfall.parquet`, `cohort_index.parquet`,
-`index_paralytic.parquet`, `index_context.parquet`, `index_covariates.parquet`. Nothing in this
+timestamps and, upstream of the drop points described above, real identifiers —
+`step01__cohort.parquet`, `step01__cohort_resp_imv_raw.parquet`,
+`step01__cohort_resp_waterfall.parquet`, `step01__cohort_index.parquet`,
+`step02__index_paralytic.parquet`, `step03__index_context.parquet`,
+`step04__index_covariates.parquet`. Nothing in this
 directory is a deliverable.
-Copying a file out of it, by any means, is a data breach. `index_covariates.parquet` carries
+Copying a file out of it, by any means, is a data breach. `step04__index_covariates.parquet` carries
 `index_paralytic_id`, `encounter_block`, `patient_id`, `p_num` and `t_dttm` — `publish()` refuses
 it by construction, and `tests/test_publish_guard.py`'s
 `test_index_covariates_column_set_is_refused` pins exactly that refusal.
@@ -452,7 +463,7 @@ is now the one thing `publish()` checks.
 
 | # | Rule | Where | Effect / value |
 |---|---|---|---|
-| P2 | `01` is unchanged: adults, 2018–2025, ED/ICU, ever-IMV, no trach in 24h; stitch <6h apart | `01` | 34,017 blocks / 31,124 patients |
+| P2 | **amended 2026-08-17** — adults, date window, ED/ICU, >=1 qualifying paralytic, no trach in 24h; stitch <6h apart; raw IMV is not required | `01` | respiratory absence becomes context/QC rather than exclusion |
 | P3 | paralytic list: `rocuronium`, `succinylcholine`, `vecuronium` (`cisatracurium`/`atracurium` excluded — maintenance agents, not induction) | `02` | 1,585 roc + 575 vec administered (succinylcholine absent at this site) |
 | P4 | an administration is `mar_action_category ∈ {given, bolus}` | `02`, `03` | |
 | P5 | analytic unit is `encounter_block`; `hospitalization_id` named only at the bridge, dropped the instant the join lands | `02`, `03` | |
@@ -473,6 +484,9 @@ is now the one thing `publish()` checks.
 | P21 / P23 | the disclosure boundary is row-level vs. aggregate; `publish()` refuses an identifier or a datetime column; nothing else is filtered | `utils/suppress.py` | see §6 |
 | P41 | **added 2026-08-15** — dose distributions also published as full ECDFs keyed on the raw charted `(med_category, med_dose_unit)` pair; one row per distinct dose with `n_at_dose`, `n_cum`, `n_total`, `ecdf`. Amount units only. Additive to P18 | `02`, `03` | 118 + 81 rows; ketamine's `mcg`/`mg` split visible without conversion |
 | P42 | every study medication charted as exact `mg/kg` is treated as mislabeled absolute `mg` for calculation; raw-unit outputs remain unchanged and correction counts are published | `02`, `03` | every other `/kg` unit still fails |
+| P43 | converted dose summaries publish mean/SD and median/IQR after strict clinical plausibility filtering; propofol `mcg` is invalid for summaries; raw-unit QC remains unchanged | `02`, `03` | `0 < dose <` each supplied upper bound; ketamine unfiltered |
+| P44 | Table 1 adds DBP, per-device respiratory support, per-agent vasopressors, CLIF ICU types, and `compute_sofa_polars` over `[t0-24h,t0]` | `04`, `05` | missing SOFA components score 0; coverage is published separately |
+| P45 | figure dataframes use `figure_<id>_df`; each plotted CSV and PNG shares `fig_<ID>__<description>`; support outputs use `stepNN__<description>`; Table 1 pooling names remain stable | everywhere | `07_artifact_manifest.py` rejects stale, missing or undeclared outputs and records checksums |
 
 ---
 
