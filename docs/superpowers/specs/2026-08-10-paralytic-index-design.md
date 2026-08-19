@@ -16,7 +16,7 @@ The deliverable answers four questions:
 
 1. **How are paralytic administrations distributed in time relative to one another?** Two paralytics two minutes apart are one clinical act; two paralytics two days apart are two. The distribution of those gaps is the evidence for where the boundary between them lies.
 2. **Given a 15-minute boundary, how many distinct index paralytic events does a hospitalization have, and how far apart are they?**
-3. **Does the ventilator record show a transition onto invasive ventilation around the index paralytic?** Not "was IMV charted" — a patient already ventilated satisfies that without anything having happened — but *did the device change*, within the configured ±60-minute IMV window.
+3. **Does the ventilator record show a transition onto invasive ventilation around the index paralytic?** Not "was IMV charted" — a patient already ventilated satisfies that without anything having happened — but *did the device change*, from 30 minutes before through 60 minutes after the index.
 4. **Was a sedative charted within the configured ±5-minute sedation window, and at what dose?**
 
 There is no second method, no reference standard and no agreement statistic. There is one index definition and four sub-analyses hanging off it.
@@ -48,10 +48,10 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | P9 | **Sub-analysis A enumerates all unordered pairs within a block, same-agent pairs included, and does not restrict to adjacent administrations.** | Set by the study lead. Adjacent-only would miss `roc 12:00 … vec 12:10` whenever anything is charted between them, and the sub-15-minute mass is exactly where the threshold decision lives. The quadratic growth is accepted; §7.1 caps and asserts the total pair count so an unexpectedly dense site fails loudly instead of silently producing a differently-shaped histogram. |
 | P10 | **The 7-day cap is a bin, not a filter.** Pairs separated by more than 7 days are counted in a `>7d` overflow bin. | A filter would make the histogram's own denominator depend on the cap, so two sites with different long-stay mixes would not be comparable even on the short bins. An overflow bin keeps the denominator whole and makes the discarded mass visible. |
 | P11 | **The gap bin edges are a module constant, not a config key.** | They are an analysis grid, not a site parameter. A site that changed its bins would make its histogram non-comparable with every other site's, which is the one thing a multi-site distribution exists for. The superseded design used the same reasoning for its threshold sweep grid. |
-| P12 | **Sub-analysis D detects a *transition*, not a state.** A waterfalled row is a transition when `device_category == 'imv'` and either there is no preceding row in the block or the preceding row's `device_category != 'imv'`. `null` is not `imv`, so `null → imv` is a transition; a block whose first row is `imv` has that row as a transition. | Set by the study lead, twice and explicitly. "Was IMV charted in ±60 min" is satisfied by a patient who has been on the ventilator for a week — it reports the state of the airway, not an event. A transition reports an event. The block-opens-on-IMV case counts because a patient whose record begins on a ventilator did have an airway secured; that it happened before the extract's first row is a property of the extract, not evidence that nothing occurred. Sub-analysis D publishes `prior_device_category` so this case is countable and separable at read time. |
+| P12 | **Sub-analysis D detects a *transition*, not a state.** A waterfalled row is a transition when `device_category == 'imv'` and either there is no preceding row in the block or the preceding row's `device_category != 'imv'`. `null` is not `imv`, so `null → imv` is a transition; a block whose first row is `imv` has that row as a transition. | Set by the study lead, twice and explicitly. "Was IMV charted nearby" is satisfied by a patient who has been on the ventilator for a week — it reports the state of the airway, not an event. A transition reports an event. The block-opens-on-IMV case counts because a patient whose record begins on a ventilator did have an airway secured; that it happened before the extract's first row is a property of the extract, not evidence that nothing occurred. Sub-analysis D publishes `prior_device_category` so this case is countable and separable at read time. |
 | P13 | **The transition is computed on the waterfalled timeline, not on raw `respiratory_support`.** | Two reasons. **Mechanical:** a transition needs "the row before", and only the waterfall's gap-free hourly scaffold makes that well defined; on raw charting the previous non-null row may be many hours back. **Clinical:** the waterfall relabels a null-device row to `imv` when the ventilator settings on it look like a ventilator, and the superseded build measured that inference as landing at or before the human device entry in 100% of cases — exactly zero delay in 77.3% of episodes, but 55 min at p95 and 540 min at p99. An intubation is a high-stress event and nobody stops to fill in the device field; the ventilator's settings reach the chart the moment it is connected. The waterfall is therefore the record closer to the event. |
 | P14 | **No de-bouncing rule is applied to transitions. `n_transitions_in_window` is published instead.** | The waterfall's hourly scaffold means a brief non-IMV blip manufactures a spurious transition, and the superseded design had a "sustained" test to suppress exactly that. Reintroducing it here would be a second threshold with no evidence behind it — the sub-analysis A distribution says nothing about device continuity — so the effect is measured and left visible rather than tuned away. A reader who wants a stricter reading can compute it from the published counts. |
-| P15 | **AMENDED 2026-08-18: sub-analyses D and E share one inclusive symmetric-window predicate but supply independent configured widths.** D uses `imv_window_minutes = 60`; E uses `sedation_window_minutes = 5`. | Set by the study lead. Sharing boundary semantics prevents one implementation from excluding an endpoint the other includes, while independent parameters prevent a change to the sedation definition from changing IMV detection. Detection logic and histogram grids remain separate. |
+| P15 | **AMENDED 2026-08-19: sub-analyses D and E share one inclusive window predicate but supply independent configured bounds.** D uses `imv_window_before_minutes = 30` and `imv_window_after_minutes = 60`; E uses `sedation_window_minutes = 5` symmetrically. | Set by the study lead. Sharing boundary semantics prevents one implementation from excluding an endpoint the other includes, while independent parameters prevent a change to the sedation definition from changing IMV detection. Detection logic and histogram grids remain separate. |
 | P16 | **The sedative list is `midazolam`, `etomidate`, `ketamine`, `propofol`, `fentanyl`.** Sedation is a **covariate of the index paralytic, not a detector.** | Set by the study lead, unchanged from the superseded `SED` list. These are the induction agents, and the question the window asks is whether the paralytic was given as part of an induction or to a patient already sedated. Benzodiazepine and opioid adjuncts (`lorazepam`, `diazepam`, `morphine`, `hydromorphone`) were considered and declined: they would blur "induction happened here" with "this patient was comfortable", and `fentanyl` already straddles that line. |
 | P17 | **Every sedative administration in the window is kept, not only the nearest per agent.** | The superseded design deduplicated by `med_category` because it was building a *rank ladder* and one patient redosed six times would have dominated a timing distribution of ranks. This study publishes an offset *histogram*, where every administration is a legitimate observation of when sedation was charted. Deduplicating would delete the redosing pattern the histogram is meant to show. |
 | P18 | **AMENDED 2026-08-10 by the study lead: doses are standardised with clifpy, not published raw.** `clifpy.utils.unit_converter.convert_dose_units_by_med_category` converts every intermittent dose to one preferred unit per `med_category` — `mcg` for fentanyl, `mg` for every other agent in this study, matching how each is conventionally charted. Dose statistics are then keyed on `med_category` **alone**. The raw `med_dose_unit` mix is not discarded: it is published separately, as a count of administrations per `(med_category, med_dose_unit)` with no dose statistics attached. **Extended, not superseded, by P41 (2026-08-15):** the converted median/IQR published here stays exactly as it is; the full ECDF on the *raw* charted unit is published alongside it. | **Supersedes the original decision, which forbade conversion anywhere.** That decision rested on two objections and the amendment answers both. *Heterogeneity would be hidden* — it is not; it moves to a table whose only job is to show it, which is a better instrument than a dose statistic that happens to be split by unit. *It cannot be done correctly without a weight the study does not carry* — clifpy takes `weight_kg` from the vitals table for `/kg` dosing, and for this study the question does not arise: every unit observed is a plain amount (`mg`, `mcg`), because only `medication_admin_intermittent` is opened and a discrete push is charted as a quantity, not a rate. A site that charts a paralytic per kilogram must supply vitals or the notebook fails loudly rather than converting on a missing weight. The concrete cost of the original decision: propofol was published as `mg, n = 1,427` beside `mcg, n = 6`, two rows a reader must combine by hand and cannot, since 6 doses charged in micrograms are almost certainly a charting artifact rather than a thousand-fold smaller dose. Keying on the unit made a data-quality signal look like a clinical finding. One consequence worth stating: standardising folds every small unit-fragment group into its parent — propofol `mcg` n = 6 into propofol n = 1,433, rocuronium `mcg` n = 3 into n = 1,585 — so the published quartiles are no longer computed over groups small enough for the triple to be inverted back to individual charted doses. That was an open concern under P21 and this decision closes it as a side effect rather than by suppression. |
@@ -67,12 +67,13 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | P45 | **Generated artifact names encode ownership and figure lineage.** Every plotted dataframe is `figure_<id>_df`; its published CSV and PNG share `fig_<ID>__<description>`. Supporting outputs use `stepNN__<description>`, including PHI intermediates. The four `table1_by_agent_*` pooling names remain unchanged. `07_artifact_manifest.py` rejects stale, missing or undeclared shareable files and publishes producer, dataframe, sources, row count, size and SHA-256. | Set by the study lead for audit and control. A figure and its data can be paired by basename without reading code, while every non-figure file identifies its producer. Table 1 is the explicit exception because those names are an external consortium contract. |
 | P46 | **Dose/weight is an additive analysis using a separate corrected selector: latest valid 20-300 kg current-hospital weight at or before the event, otherwise latest prior-hospital weight within 28 days.** Existing raw ECDFs and Table 1 weight remain unchanged. Step 04 also publishes block-first event counts by configured healthcare system, event-time hospital, academic status and year; normalized ECDFs; etomidate/ketamine p1-p99; local four-tier integer counts; and a dose-specific eligibility flow. | Set by the study lead. Site tier numerators and denominators are collected now for later pooled logit random-effects analysis; local plots do not imply pooled estimates before all sites report. Full contract: `2026-08-18-dose-weight-and-site-counts-design.md`. |
 | P47 | **AMENDED 2026-08-18: every study medication has one required site-configured unit and only `mar_action_category == "given"` rows in that exact normalized unit enter any analysis.** `config["medication_dose_units"]` must specify all eight agents. Non-fentanyl agents allow `mg` or `mg/kg`; fentanyl allows `mcg` or `mcg/kg`. Values and units are never converted or relabeled. A configured `/kg` value is already normalized, needs no weight, and is not checked against an absolute-unit upper bound. | Set by the study lead after reviewing Rush and UCMC unit distributions. This supersedes P4, P18, P25 and P42, plus the action/unit clauses of P2, P41, P43 and P46. It removes `bolus`, prevents minority-unit rows from changing event denominators, and makes the selected site unit explicit and reproducible. |
-| P48 | **Figure D.2 is a fixed ±6-hour sensitivity view of the same P12 transitions, using one nearest transition per index paralytic and 30-minute bins.** An exact-distance tie selects the earlier transition. D.2 does not modify the configured ±60-minute D.1 detector, persisted `imv_transition`, or downstream cohort definitions. | Set by the study lead to show where a device transition falls beyond the primary window without turning IMV state rows into transitions or changing the primary analysis. One selected event per index preserves the D.1 counting unit; nearest selection answers temporal proximity over the wider window. |
+| P48 | **Figure D.2 is a fixed ±6-hour sensitivity view of the same P12 transitions, using one nearest transition per index paralytic and 30-minute bins.** An exact-distance tie selects the earlier transition. D.2 does not modify the configured -30/+60-minute D.1 detector, persisted `imv_transition`, or downstream cohort definitions. | Set by the study lead to show where a device transition falls beyond the primary window without turning IMV state rows into transitions or changing the primary analysis. One selected event per index preserves the D.1 counting unit; nearest selection answers temporal proximity over the wider window. |
+| P49 | **AMENDED 2026-08-19: strict medication dose bounds are required in `config["medication_dose_upper_bounds"]` and are part of medication eligibility alongside action and unit.** Eligible configured absolute-unit rows satisfy `0 < dose < bound`: etomidate 200 mg, fentanyl 500 mcg, ketamine 100 mg, midazolam 50 mg, propofol 500 mg, rocuronium 400 mg, succinylcholine 400 mg, and vecuronium 30 mg. Configured `/kg` rows remain exempt from absolute bounds but must be positive and finite. Ineligible paralytics do not form indexes; ineligible sedatives do not satisfy sedation context or enter dose artifacts. | Set by the study lead after reviewing the observed distributions. Ketamine's strict 100 mg bound is the observed UCMC p95 and intentionally excludes values equal to 100 mg for consistency with every other strict boundary. This supersedes P43's summary-only scope and P47's action/unit-only eligibility definition. |
+| P50 | **Figure 1 is the main analysis CONSORT and ends at Table 1.** It starts with every qualifying paralytic administration, shows the 15-minute formed index and within-index same-agent merge, then applies the persisted IMV-transition and sedation flags before splitting into all valid index events and one first-valid index per block. Every stage carries source-administration, post-merge medication-entry, index, and block counts; every gate carries the removed counts and reason. Subanalyses do not alter this flow. | Set by the study lead so the 99K rocuronium index denominator and its losses are visible in one primary artifact rather than reconstructed across subanalysis outputs. Step 05 aggregates existing fields only: it does not duplicate medication, IMV-window, or sedation-window logic. |
 
-P47 is the active medication action/unit contract. Earlier conversion, override, rate-only,
-and `given`/`bolus` language is retained above as decision history but is no longer operative.
-P43's mean/SD and median/IQR outputs remain; its absolute upper bounds apply only when the
-configured unit is absolute.
+P49 is the active medication action/unit/dose eligibility contract. Earlier conversion,
+override, rate-only, summary-only, and `given`/`bolus` language is retained above as decision
+history but is no longer operative. P43's mean/SD and median/IQR outputs remain.
 
 ------------------------------------------------------------------------
 
@@ -83,7 +84,7 @@ code/
   01_cohort.py            qualifying-paralytic cohort + stitch + CONSORT + waterfall
   02_index_paralytic.py   paralytic administrations → sub-analyses A, B, C
                           → index_paralytic.parquet
-  03_context.py           index paralytic ± 60 min → D; ± 5 min → E
+  03_context.py           index paralytic −30/+60 min → D; ± 5 min → E
                           → index_context.parquet
 utils/
   config.py               UNCHANGED
@@ -111,8 +112,8 @@ utils/
         │
   03_context.py
         │
-        │  D  first non-IMV → IMV transition in t ± 60   (waterfall)
-        │  E  sedatives in t ± 60, with dose and unit
+        │  D  first non-IMV → IMV transition in t − 30/+60   (waterfall)
+        │  E  sedatives in t ± 5, with dose and unit
         ▼
    final_no_phi/ ................. aggregates + figures, no row-level records
 ```
@@ -356,7 +357,7 @@ block opens on imv  →  that first row IS a transition
 imv → imv  →  not a transition
 ```
 
-For each index paralytic, scan `[t − imv_window_minutes, t + imv_window_minutes]` — inclusive at both ends — and keep the **earliest** transition inside it.
+For each index paralytic, scan `[t − imv_window_before_minutes, t + imv_window_after_minutes]` — inclusive at both ends — and keep the **earliest** transition inside it.
 
 Recorded per index paralytic:
 
@@ -378,7 +379,7 @@ Recorded per index paralytic:
 | table | contents |
 |---|---|
 | `step03__imv_transition_summary.csv` | `imv_transition` × `no_transition_reason` → n; and `prior_device_category` → n among transitions |
-| `fig_D1__imv_transition_offset.csv` | 5-minute bins across the configured IMV window (`[−60, +60]`) → n |
+| `fig_D1__imv_transition_offset.csv` | 5-minute bins across the configured IMV window (`[−30, +60]`) → n |
 | `fig_D2__imv_transition_offset_6h.csv` | nearest transition per index in 30-minute bins across `[−360, +360]` → n |
 | `step03__imv_prior_device.csv` | `prior_device_category` × `transition_opens_block` → n, among transitions |
 | `step03__imv_transitions_per_window.csv` | `n_transitions_in_window` → n, contiguous from 1 to the observed maximum (the P14 de-bouncing evidence, one row per index paralytic that had a transition) |
@@ -389,9 +390,9 @@ Recorded per index paralytic:
 30-minute bins, earlier transition winning an exact-distance tie. It is drawn from
 `fig_D2__imv_transition_offset_6h.csv` and written to the same-stem PNG.
 
-Offset bins are `[−60,−55)`, … , `[55, 60]` — 24 bins, left-closed and right-open except the last, which is closed so an offset of exactly `+60` has a home.
+Offset bins are `[−30,−25)`, … , `[55, 60]` — 18 bins, left-closed and right-open except the last, which is closed so an offset of exactly `+60` has a home.
 
-**Assertions:** `|imv_offset_minutes| ≤ imv_window_minutes` on every recorded transition; `imv_transition` true implies `imv_transition_dttm` and `imv_offset_minutes` non-null and `no_transition_reason` null, and false implies the converse.
+**Assertions:** `-imv_window_before_minutes ≤ imv_offset_minutes ≤ imv_window_after_minutes` on every recorded transition; `imv_transition` true implies `imv_transition_dttm` and `imv_offset_minutes` non-null and `no_transition_reason` null, and false implies the converse.
 
 ### 7.5 E — sedation in its configured window
 
@@ -461,7 +462,8 @@ output/final_no_phi/              shareable aggregates — no row-level records 
     "timezone": "US/Eastern",
     "output_directory": "./output",
     "collapse_gap_minutes": 15,
-    "imv_window_minutes": 60,
+    "imv_window_before_minutes": 30,
+    "imv_window_after_minutes": 60,
     "sedation_window_minutes": 5,
     "stitch_hours": 6,
     "trach_window_hours": 24,
@@ -505,7 +507,7 @@ new       tests/test_pair_gaps.py
 new       tests/test_imv_transition.py
               the four cases of P12 — non-imv→imv, null→imv,
               block-opens-on-imv, imv→imv — plus first-transition-in-window
-              selection when several transitions fall inside ±60, and each
+              selection when several transitions fall inside −30/+60, and each
               of the three no_transition_reason values.
 ```
 

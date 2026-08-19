@@ -38,6 +38,7 @@ EXPECTED_UNITS = {
 UPPER_BOUNDS = {
     "etomidate": 200.0,
     "fentanyl": 500.0,
+    "ketamine": 100.0,
     "midazolam": 50.0,
     "propofol": 500.0,
     "rocuronium": 400.0,
@@ -69,11 +70,52 @@ SUMMARY_FILTERS = {
     label: _load_function(path, "filter_doses_for_summary")
     for label, path in DOSE_NOTEBOOKS.items()
 }
+ELIGIBILITY_EXPRESSIONS = {
+    label: _load_function(path, "medication_dose_eligible_expr")
+    for label, path in MEDICATION_NOTEBOOKS.items()
+}
 
 
 def test_template_configures_every_study_medication():
     config = json.loads((ROOT / "config" / "config_template.json").read_text())
     assert config["medication_dose_units"] == EXPECTED_UNITS
+    assert config["medication_dose_upper_bounds"] == UPPER_BOUNDS
+
+
+@pytest.mark.parametrize("label,eligible_expr", ELIGIBILITY_EXPRESSIONS.items())
+def test_medication_eligibility_uses_strict_configured_dose_bounds(
+    label, eligible_expr
+):
+    frame = pl.DataFrame(
+        {
+            "row_id": list(range(9)),
+            "med_category": [
+                "ketamine", "ketamine", "fentanyl", "fentanyl", "rocuronium",
+                "rocuronium", "rocuronium", "rocuronium", "rocuronium",
+            ],
+            "med_dose": [99.0, 100.0, 499.0, 500.0, 399.0, 400.0, 0.0, None, 500.0],
+            "med_dose_unit": [
+                "mg", "mg", "mcg", "mcg", "mg", "mg", "mg", "mg", "mg/kg",
+            ],
+        }
+    )
+    out = frame.filter(eligible_expr(EXPECTED_UNITS, UPPER_BOUNDS))
+    assert out["row_id"].to_list() == [0, 2, 4], label
+
+
+@pytest.mark.parametrize("label,eligible_expr", ELIGIBILITY_EXPRESSIONS.items())
+def test_configured_per_kg_eligibility_bypasses_absolute_bound(label, eligible_expr):
+    units = {**EXPECTED_UNITS, "rocuronium": "mg/kg"}
+    frame = pl.DataFrame(
+        {
+            "row_id": [0, 1, 2],
+            "med_category": ["rocuronium"] * 3,
+            "med_dose": [500.0, 0.0, 399.0],
+            "med_dose_unit": ["mg/kg", "mg/kg", "mg"],
+        }
+    )
+    out = frame.filter(eligible_expr(units, UPPER_BOUNDS))
+    assert out["row_id"].to_list() == [0], label
 
 
 @pytest.mark.parametrize("label,path", MEDICATION_NOTEBOOKS.items())
@@ -154,7 +196,7 @@ def test_absolute_bounds_do_not_apply_to_configured_per_kg_units(label, filter_d
         }
     )
     out = filter_doses(frame, UPPER_BOUNDS)
-    assert out["row_id"].to_list() == [1, 3, 4]
+    assert out["row_id"].to_list() == [1, 3]
 
 
 @pytest.mark.parametrize("label,path", DOSE_NOTEBOOKS.items())
@@ -173,3 +215,29 @@ def test_dose_summaries_still_publish_mean_and_sample_sd(label, path):
     }
     if label != "04_covariates":
         assert {"mean_dose", "sd_dose"} <= keywords
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["fig_B1__paralytic_dose_ecdf.csv", "fig_E3__sedation_dose_ecdf.csv"],
+)
+def test_generated_dose_ecdfs_respect_configured_strict_bounds(filename):
+    config_path = ROOT / "config" / "config.json"
+    if not config_path.exists():
+        pytest.skip("config/config.json absent; pipeline has not been set up")
+    config = json.loads(config_path.read_text())
+    output = Path(config["output_directory"])
+    if not output.is_absolute():
+        output = ROOT / output
+    path = output / "final_no_phi" / filename
+    if not path.exists():
+        pytest.skip(f"{filename} absent; run the pipeline first")
+
+    frame = pl.read_csv(path).with_columns(
+        pl.col("med_category")
+        .replace_strict(
+            config["medication_dose_upper_bounds"], return_dtype=pl.Float64
+        )
+        .alias("upper_bound")
+    )
+    assert frame.filter(pl.col("dose") >= pl.col("upper_bound")).is_empty()

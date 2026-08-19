@@ -33,8 +33,10 @@ OFFSET_BIN_GRID = _load_function("offset_bin_grid")
 
 def test_template_has_explicit_study_windows():
     config = json.loads((ROOT / "config" / "config_template.json").read_text())
-    assert config["imv_window_minutes"] == 60
+    assert config["imv_window_before_minutes"] == 30
+    assert config["imv_window_after_minutes"] == 60
     assert config["sedation_window_minutes"] == 5
+    assert "imv_window_minutes" not in config
     assert "context_window_minutes" not in config
 
 
@@ -51,23 +53,23 @@ def test_template_has_explicit_study_windows():
 def test_sedation_window_is_inclusive_at_five_minutes(offset, inside):
     got = (
         pl.DataFrame({"offset_minutes": [offset]})
-        .select(IN_WINDOW("offset_minutes", 5.0).alias("inside"))
+        .select(IN_WINDOW("offset_minutes", 5.0, 5.0).alias("inside"))
         .item()
     )
     assert got is inside
 
 
 def test_imv_and_sedation_have_independent_bin_grids():
-    assert OFFSET_BIN_GRID(60.0, 5) == (
-        24,
-        [f"[{start},{start + 5})" for start in range(-60, 55, 5)] + ["[55,60]"],
-        12,
+    assert OFFSET_BIN_GRID(30.0, 60.0, 5) == (
+        18,
+        [f"[{start},{start + 5})" for start in range(-30, 55, 5)] + ["[55,60]"],
+        6,
     )
-    assert OFFSET_BIN_GRID(5.0, 5) == (2, ["[-5,0)", "[0,5]"], 1)
+    assert OFFSET_BIN_GRID(5.0, 5.0, 5) == (2, ["[-5,0)", "[0,5]"], 1)
 
 
 def test_extended_imv_view_uses_six_hours_and_thirty_minute_bins():
-    assert OFFSET_BIN_GRID(360.0, 30) == (
+    assert OFFSET_BIN_GRID(360.0, 360.0, 30) == (
         24,
         [f"[{start},{start + 30})" for start in range(-360, 330, 30)]
         + ["[330,360]"],
@@ -77,8 +79,8 @@ def test_extended_imv_view_uses_six_hours_and_thirty_minute_bins():
 
 def test_production_filters_use_their_own_configured_windows():
     source = CONTEXT_NOTEBOOK.read_text()
-    assert 'in_window_expr("imv_offset_minutes", IMV_WINDOW_MINUTES)' in source
-    assert 'in_window_expr("_offset_minutes_raw", SEDATION_WINDOW_MINUTES)' in source
-    assert source.index('in_window_expr("_offset_minutes_raw"') < source.index(
+    assert '"imv_offset_minutes",\n                IMV_WINDOW_BEFORE_MINUTES,\n                IMV_WINDOW_AFTER_MINUTES,' in source
+    assert '"_offset_minutes_raw",\n                SEDATION_WINDOW_MINUTES,\n                SEDATION_WINDOW_MINUTES,' in source
+    assert source.index('"_offset_minutes_raw",') < source.index(
         'offset_minutes=pl.col("_offset_minutes_raw").round(3)'
     )

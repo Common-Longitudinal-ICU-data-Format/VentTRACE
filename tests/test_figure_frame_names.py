@@ -22,7 +22,7 @@ def test_figure_dataframe_names_match_figure_ids():
             "figure_e5_df",
             "figure_g1_df",
         ),
-        "code/05_table_one.py": ("figure_t1_df", "figure_t2_df"),
+        "code/05_table_one.py": ("figure_1_df", "figure_t1_df", "figure_t2_df"),
         "code/06_reference_cpt.py": ("figure_f1_df",),
     }
     for relative_path, names in expected.items():
@@ -52,6 +52,7 @@ def test_figure_data_and_png_stems_match_in_source():
             "G1": "dose_per_weight_consort",
         },
         "code/05_table_one.py": {
+            "1": "main_consort",
             "T1": "organ_support_by_window",
             "T2": "source_coverage",
         },

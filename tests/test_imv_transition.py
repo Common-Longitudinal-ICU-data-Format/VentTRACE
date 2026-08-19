@@ -2,7 +2,7 @@
 
 Sub-analysis D asks whether the DEVICE CHANGED around the index paralytic, not
 whether IMV was charted. The distinction is the whole design: a patient who has
-been ventilated for a week satisfies "IMV was charted in +/-60 min" without
+been ventilated for a week satisfies "IMV was charted nearby" without
 anything having happened, so a state test cannot answer the question a transition
 test answers.
 
@@ -197,7 +197,9 @@ def test_extended_distribution_uses_raw_inclusive_boundaries_and_bins():
         "[330,360]"
     ]
 
-    distribution = nearest_transition_distribution(candidates, 360.0, 30, labels)
+    distribution = nearest_transition_distribution(
+        candidates, 360.0, 360.0, 30, labels
+    )
 
     assert distribution.get_column("n").sum() == 4
     assert distribution.filter(pl.col("offset_bin") == "[-360,-330)").item(0, "n") == 1
@@ -230,13 +232,21 @@ def test_exact_timestamp_offsets_make_symmetric_tie_choose_earlier():
 
 @pytest.mark.parametrize(
     ("offset", "inside"),
-    [(-61, False), (-60, True), (-0.5, True), (0, True), (59.9, True), (60, True), (60.1, False)],
+    [
+        (-30.1, False),
+        (-30, True),
+        (-0.5, True),
+        (0, True),
+        (59.9, True),
+        (60, True),
+        (60.1, False),
+    ],
 )
-def test_window_is_inclusive_at_both_ends(offset, inside):
+def test_asymmetric_window_is_inclusive_at_both_ends(offset, inside):
     """D and E share boundary semantics while supplying independent configured widths."""
     got = (
         pl.DataFrame({"offset_minutes": [float(offset)]})
-        .select(in_window_expr("offset_minutes", 60.0).alias("x"))
+        .select(in_window_expr("offset_minutes", 30.0, 60.0).alias("x"))
         .get_column("x")
         .to_list()
     )
@@ -247,7 +257,7 @@ def test_window_rejects_a_null_offset():
     """A null offset means no candidate row was found at all and must not pass."""
     got = (
         pl.DataFrame({"offset_minutes": [None]}, schema={"offset_minutes": pl.Float64})
-        .select(in_window_expr("offset_minutes", 60.0).alias("x"))
+        .select(in_window_expr("offset_minutes", 30.0, 60.0).alias("x"))
         .get_column("x")
         .to_list()
     )

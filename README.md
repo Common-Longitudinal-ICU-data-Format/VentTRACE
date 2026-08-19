@@ -19,8 +19,8 @@ within 15 minutes of one another), the study asks:
 1. How are paralytic administrations distributed in time relative to one another?
 2. How many distinct index paralytic events does a hospitalization have, and how far apart are
    they?
-3. Does the ventilator record show a transition onto invasive ventilation within the configured
-   ±60-minute IMV window — a device *change*, not merely "was IMV charted"?
+3. Does the ventilator record show a transition onto invasive ventilation from 30 minutes before
+   through 60 minutes after the index — a device *change*, not merely "was IMV charted"?
 4. Was a sedative charted within the configured ±5-minute sedation window, and at what dose?
 
 This is **intubation-adjacent, not intubation-confirming** — the study describes what surrounds a
@@ -99,6 +99,10 @@ Figure data and PNGs use the same auditable stem, for example
 for example `step03__sedation_summary.csv`. `artifact_manifest.csv` records each artifact's
 producer, dataframe, sources, row count, size and SHA-256. The four `table1_by_agent_*` names
 remain stable for cross-site pooling.
+
+`fig_1__main_consort.csv` and its same-stem PNG are the main analysis. They trace qualifying
+paralytic administrations through index formation, IMV transition, sedation, and the index- and
+block-level Table 1 populations. All lettered analyses are downstream subanalyses.
 
 Step 04 also publishes block-first paralytic-index event counts by healthcare system, event-time
 hospital, academic status, and year. These are intubation-adjacent operational counts, not confirmed

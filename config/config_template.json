@@ -5,7 +5,8 @@
     "timezone": "US/Eastern",
     "output_directory": "./output",
     "collapse_gap_minutes": 15,
-    "imv_window_minutes": 60,
+    "imv_window_before_minutes": 30,
+    "imv_window_after_minutes": 60,
     "sedation_window_minutes": 5,
     "medication_dose_units": {
         "rocuronium": "mg",
@@ -16,6 +17,16 @@
         "ketamine": "mg",
         "propofol": "mg",
         "fentanyl": "mcg"
+    },
+    "medication_dose_upper_bounds": {
+        "rocuronium": 400,
+        "succinylcholine": 400,
+        "vecuronium": 30,
+        "midazolam": 50,
+        "etomidate": 200,
+        "ketamine": 100,
+        "propofol": 500,
+        "fentanyl": 500
     },
     "stitch_hours": 6,
     "trach_window_hours": 24,

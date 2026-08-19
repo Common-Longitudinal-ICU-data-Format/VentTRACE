@@ -261,6 +261,7 @@ def _(Path, json):
     ]
 
     MEDICATION_DOSE_UNITS = config["medication_dose_units"]
+    MEDICATION_DOSE_UPPER_BOUNDS = config["medication_dose_upper_bounds"]
     _expected_meds = {
         "rocuronium", "succinylcholine", "vecuronium", "midazolam",
         "etomidate", "ketamine", "propofol", "fentanyl",
@@ -275,15 +276,15 @@ def _(Path, json):
     assert all(
         unit in _valid_units[med] for med, unit in MEDICATION_DOSE_UNITS.items()
     ), "invalid medication_dose_units; use mg[/kg], or mcg[/kg] for fentanyl"
-    DOSE_SUMMARY_UPPER_BOUNDS = {
-        "etomidate": 200.0,
-        "fentanyl": 500.0,
-        "midazolam": 50.0,
-        "propofol": 500.0,
-        "rocuronium": 400.0,
-        "succinylcholine": 400.0,
-        "vecuronium": 30.0,
-    }
+    assert set(MEDICATION_DOSE_UPPER_BOUNDS) == _expected_meds, (
+        "medication_dose_upper_bounds must configure exactly the eight study medications"
+    )
+    assert all(
+        isinstance(bound, (int, float))
+        and not isinstance(bound, bool)
+        and 0 < bound < float("inf")
+        for bound in MEDICATION_DOSE_UPPER_BOUNDS.values()
+    ), "medication_dose_upper_bounds values must be finite positive numbers"
     DOSE_WEIGHT_LOOKBACK_DAYS = 28
     DOSE_WEIGHT_MIN_KG = 20.0
     DOSE_WEIGHT_MAX_KG = 300.0
@@ -297,7 +298,6 @@ def _(Path, json):
     print(f"configured units: {MEDICATION_DOSE_UNITS}")
     return (
         DATA_DIR,
-        DOSE_SUMMARY_UPPER_BOUNDS,
         DOSE_WEIGHT_LOOKBACK_DAYS,
         DOSE_WEIGHT_MAX_KG,
         DOSE_WEIGHT_MIN_KG,
@@ -305,6 +305,7 @@ def _(Path, json):
         FILETYPE,
         ICU_TYPES,
         LOOKBACK_HOURS,
+        MEDICATION_DOSE_UPPER_BOUNDS,
         MEDICATION_DOSE_UNITS,
         PHI_DIR,
         RESPIRATORY_DEVICES,
@@ -430,6 +431,9 @@ def _(PHI_DIR, pl):
         "p_num",
         "t_dttm",
         "agent_label",
+        "n_before_merge_admin",
+        "n_admins",
+        "n_agents",
         "imv_transition",
         "no_transition_reason",
         "any_sedative",
@@ -2031,7 +2035,7 @@ def _(
 
 @app.cell
 def _(
-    DOSE_SUMMARY_UPPER_BOUNDS,
+    MEDICATION_DOSE_UPPER_BOUNDS,
     MEDICATION_DOSE_UNITS,
     SEDATION_WINDOW_MINUTES,
     SHARE_DIR,
@@ -2096,10 +2100,10 @@ def _(
         sedation_usable, MEDICATION_DOSE_UNITS
     )
     paralytic_plausible = filter_doses_for_summary(
-        paralytic_converted, DOSE_SUMMARY_UPPER_BOUNDS
+        paralytic_converted, MEDICATION_DOSE_UPPER_BOUNDS
     )
     sedation_plausible = filter_doses_for_summary(
-        sedation_converted, DOSE_SUMMARY_UPPER_BOUNDS
+        sedation_converted, MEDICATION_DOSE_UPPER_BOUNDS
     )
     paralytic_normalised = _normalised(paralytic_plausible)
     sedation_normalised = _normalised(sedation_plausible)

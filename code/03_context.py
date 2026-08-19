@@ -53,7 +53,7 @@ def _(mo):
         """
         # 03 — what surrounds the index paralytic
 
-        Two questions over independently configured symmetric windows, asked with the
+        Two questions over independently configured windows, asked with the
         **same inclusive window predicate**:
 
         | | |
@@ -66,7 +66,7 @@ def _(mo):
         condition of the airway, not an event. A transition reports an event.
 
         The predicate is shared between D and E, while each analysis supplies its own
-        configured width (P15). One implementation keeps both windows inclusive at their
+        configured bounds (P15). One implementation keeps both windows inclusive at their
         front and back boundaries without coupling their clinical definitions.
 
         Design: `docs/superpowers/specs/2026-08-10-paralytic-index-design.md` §7.4–7.5
@@ -82,8 +82,9 @@ def _(mo):
         ## Configuration
 
         Every site-specific value is read from `config/config.json` and nothing is
-        hard-coded against this site. `imv_window_minutes` and
-        `sedation_window_minutes` independently set D's and E's symmetric windows. The
+        hard-coded against this site. `imv_window_before_minutes` and
+        `imv_window_after_minutes` set D's asymmetric window, while
+        `sedation_window_minutes` sets E's symmetric window. The
         sedative list, MAR actions, and offset bin widths are analysis constants rather than
         site parameters, so they live here in the notebook where a reader can see them.
         """
@@ -107,7 +108,8 @@ def _(Path, json):
     FIG_DIR = SHARE_DIR / "figures"
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    IMV_WINDOW_MINUTES = float(config["imv_window_minutes"])
+    IMV_WINDOW_BEFORE_MINUTES = float(config["imv_window_before_minutes"])
+    IMV_WINDOW_AFTER_MINUTES = float(config["imv_window_after_minutes"])
     SEDATION_WINDOW_MINUTES = float(config["sedation_window_minutes"])
     IMV_EXTENDED_WINDOW_MINUTES = 6 * 60
     IMV_EXTENDED_OFFSET_BIN_WIDTH = 30
@@ -119,6 +121,7 @@ def _(Path, json):
     SEDATIVES = ["midazolam", "etomidate", "ketamine", "propofol", "fentanyl"]
     MAR_ACTIONS = ["given"]
     MEDICATION_DOSE_UNITS = config["medication_dose_units"]
+    MEDICATION_DOSE_UPPER_BOUNDS = config["medication_dose_upper_bounds"]
     _expected_meds = {
         "rocuronium", "succinylcholine", "vecuronium", "midazolam",
         "etomidate", "ketamine", "propofol", "fentanyl",
@@ -133,57 +136,54 @@ def _(Path, json):
     assert all(
         unit in _valid_units[med] for med, unit in MEDICATION_DOSE_UNITS.items()
     ), "invalid medication_dose_units; use mg[/kg], or mcg[/kg] for fentanyl"
+    assert set(MEDICATION_DOSE_UPPER_BOUNDS) == _expected_meds, (
+        "medication_dose_upper_bounds must configure exactly the eight study medications"
+    )
+    assert all(
+        isinstance(bound, (int, float))
+        and not isinstance(bound, bool)
+        and 0 < bound < float("inf")
+        for bound in MEDICATION_DOSE_UPPER_BOUNDS.values()
+    ), "medication_dose_upper_bounds values must be finite positive numbers"
 
-    # Both configured windows must divide into a whole number of this shared analysis bin.
+    # Every configured bound must divide into a whole number of this shared analysis bin.
     # Bins are left-closed and right-open except the final bin, which includes the positive
     # boundary.
     OFFSET_BIN_WIDTH = 5
 
     _windows = {
-        "imv_window_minutes": IMV_WINDOW_MINUTES,
+        "imv_window_before_minutes": IMV_WINDOW_BEFORE_MINUTES,
+        "imv_window_after_minutes": IMV_WINDOW_AFTER_MINUTES,
         "sedation_window_minutes": SEDATION_WINDOW_MINUTES,
     }
     assert all(_window > 0 for _window in _windows.values()), (
-        "imv_window_minutes and sedation_window_minutes must be positive"
+        "configured IMV and sedation window bounds must be positive"
     )
     assert all(
-        (2 * _window / OFFSET_BIN_WIDTH).is_integer()
+        (_window / OFFSET_BIN_WIDTH).is_integer()
         for _window in _windows.values()
     ), f"configured windows must divide into {OFFSET_BIN_WIDTH}-minute bins"
 
-    # P18, amended 2026-08-10: doses are standardised with clifpy to one preferred
-    # unit per med_category before any statistic is taken. mg for every agent
-    # except fentanyl, which this cohort's own raw medians confirm is charted in
-    # mcg. Identical to 02's constant, defined here again rather than imported
-    # (spec §4) -- duplicated analysis logic is the deliberate posture this
-    # project takes so a future divergence is a choice, not a shared bug.
-    # Strict limits for configured absolute-unit summary statistics. Ketamine remains
-    # unfiltered because no clinical threshold was supplied for it.
-    DOSE_SUMMARY_UPPER_BOUNDS = {
-        "etomidate": 200.0,
-        "fentanyl": 500.0,
-        "midazolam": 50.0,
-        "propofol": 500.0,
-        "rocuronium": 400.0,
-        "succinylcholine": 400.0,
-        "vecuronium": 30.0,
-    }
     print(f"site           : {SITE}")
-    print(f"imv window     : +/- {IMV_WINDOW_MINUTES:.0f} min")
+    print(
+        f"imv window     : -{IMV_WINDOW_BEFORE_MINUTES:.0f} / "
+        f"+{IMV_WINDOW_AFTER_MINUTES:.0f} min"
+    )
     print(f"sedation window: +/- {SEDATION_WINDOW_MINUTES:.0f} min")
     print(f"sedatives      : {' | '.join(SEDATIVES)}")
     print(f"mar actions    : {' | '.join(MAR_ACTIONS)}")
     print(f"configured units: {MEDICATION_DOSE_UNITS}")
-    print(f"summary bounds : {DOSE_SUMMARY_UPPER_BOUNDS}")
+    print(f"dose bounds    : {MEDICATION_DOSE_UPPER_BOUNDS}")
     return (
         DATA_DIR,
-        DOSE_SUMMARY_UPPER_BOUNDS,
         FIG_DIR,
         FILETYPE,
         IMV_EXTENDED_OFFSET_BIN_WIDTH,
         IMV_EXTENDED_WINDOW_MINUTES,
-        IMV_WINDOW_MINUTES,
+        IMV_WINDOW_AFTER_MINUTES,
+        IMV_WINDOW_BEFORE_MINUTES,
         MAR_ACTIONS,
+        MEDICATION_DOSE_UPPER_BOUNDS,
         MEDICATION_DOSE_UNITS,
         OFFSET_BIN_WIDTH,
         PHI_DIR,
@@ -195,6 +195,26 @@ def _(Path, json):
 
 
 @app.cell
+def _(pl):
+    def medication_dose_eligible_expr(configured_units, upper_bounds):
+        """Match the configured unit and retain only clinically eligible doses."""
+        _configured_unit = pl.col("med_category").replace_strict(configured_units)
+        _upper_bound = pl.col("med_category").replace_strict(upper_bounds)
+        return (
+            (pl.col("med_dose_unit") == _configured_unit)
+            & pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & (pl.col("med_dose") > 0)
+            & (
+                _configured_unit.str.ends_with("/kg")
+                | (pl.col("med_dose") < _upper_bound)
+            )
+        )
+
+    return (medication_dose_eligible_expr,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -203,7 +223,7 @@ def _(mo):
         `to_site_naive` is the only correct way to turn a clifpy timestamp column into a
         naive site-local one. `epoch_minutes` is the only way this notebook may turn a
         timestamp into a number of minutes. `in_window_expr` defines the inclusive
-        symmetric predicate once; D and E pass their independent configured widths. The
+        predicate once; D and E pass their independent configured bounds. The
         first two are defined **locally and never
         imported** (spec §4) — a bug in a shared datetime helper corrupts every consumer
         identically, and identical corruption is the hardest kind to see.
@@ -253,16 +273,16 @@ def _(pl):
 
 @app.cell
 def _(pl):
-    def in_window_expr(offset_col, window_minutes):
-        """An inclusive symmetric window, defined once and used by D and E (P15).
+    def in_window_expr(offset_col, before_minutes, after_minutes):
+        """An inclusive window, defined once and used by D and E (P15).
 
         Inclusive at both ends. A null offset means no candidate row was found at all and
         must not pass -- absence of a candidate is not presence at the boundary.
         """
         return (
             pl.col(offset_col).is_not_null()
-            & (pl.col(offset_col) >= -window_minutes)
-            & (pl.col(offset_col) <= window_minutes)
+            & (pl.col(offset_col) >= -before_minutes)
+            & (pl.col(offset_col) <= after_minutes)
         )
 
     return (in_window_expr,)
@@ -394,19 +414,21 @@ def _(pl):
 @app.cell
 def _(in_window_expr, nearest_transition_per_index, pl):
     def nearest_transition_distribution(
-        candidates, window_minutes, bin_width, bin_labels
+        candidates, before_minutes, after_minutes, bin_width, bin_labels
     ):
         """Select one nearest in-window transition per index and bin raw offsets."""
         _nearest = nearest_transition_per_index(
             candidates.filter(
-                in_window_expr("imv_offset_minutes", window_minutes)
+                in_window_expr(
+                    "imv_offset_minutes", before_minutes, after_minutes
+                )
             )
         )
         _n_bins = len(bin_labels)
         _binned = (
             _nearest.with_columns(
                 _b=(
-                    ((pl.col("imv_offset_minutes") + window_minutes) // bin_width)
+                    ((pl.col("imv_offset_minutes") + before_minutes) // bin_width)
                     .cast(pl.Int32)
                     .clip(0, _n_bins - 1)
                 )
@@ -514,7 +536,8 @@ def _(mo):
 
 @app.cell
 def _(
-    IMV_WINDOW_MINUTES,
+    IMV_WINDOW_AFTER_MINUTES,
+    IMV_WINDOW_BEFORE_MINUTES,
     epoch_minutes,
     in_window_expr,
     index_paralytic,
@@ -539,7 +562,13 @@ def _(
     _candidates = (
         _idx.join(imv_transitions, on="encounter_block", how="inner")
         .with_columns(imv_offset_minutes=(pl.col("_tr_min") - pl.col("_t_min")).round(3))
-        .filter(in_window_expr("imv_offset_minutes", IMV_WINDOW_MINUTES))
+        .filter(
+            in_window_expr(
+                "imv_offset_minutes",
+                IMV_WINDOW_BEFORE_MINUTES,
+                IMV_WINDOW_AFTER_MINUTES,
+            )
+        )
     )
 
     # The EARLIEST transition in the window, not the nearest to t. "First" is what was
@@ -593,7 +622,11 @@ def _(
     )
 
     _bad = context_d.filter(
-        pl.col("imv_transition") & (pl.col("imv_offset_minutes").abs() > IMV_WINDOW_MINUTES)
+        pl.col("imv_transition")
+        & (
+            (pl.col("imv_offset_minutes") < -IMV_WINDOW_BEFORE_MINUTES)
+            | (pl.col("imv_offset_minutes") > IMV_WINDOW_AFTER_MINUTES)
+        )
     )
     assert _bad.height == 0, f"{_bad.height:,} transitions sit outside the window"
     assert context_d.filter(
@@ -604,7 +637,8 @@ def _(
     ).height == 0, "a non-detection carries no reason"
     assert context_d.height == index_paralytic.height, "the join changed the row count"
 
-    print(f"index paralytics with a transition in +/-{IMV_WINDOW_MINUTES:.0f} min : "
+    print(f"index paralytics with a transition in -{IMV_WINDOW_BEFORE_MINUTES:.0f}/"
+          f"+{IMV_WINDOW_AFTER_MINUTES:.0f} min : "
           f"{context_d.get_column('imv_transition').sum():,} / {context_d.height:,} "
           f"({100 * context_d.get_column('imv_transition').mean():.1f}%)")
     print(context_d.group_by("no_transition_reason").agg(n=pl.len()).sort("n", descending=True))
@@ -739,7 +773,7 @@ def _(mo):
 def _(
     IMV_N_OFFSET_BINS,
     IMV_OFFSET_BIN_LABELS,
-    IMV_WINDOW_MINUTES,
+    IMV_WINDOW_BEFORE_MINUTES,
     OFFSET_BIN_WIDTH,
     SHARE_DIR,
     context_d,
@@ -750,7 +784,7 @@ def _(
         context_d.filter(pl.col("imv_transition"))
         .with_columns(
             _b=(
-                ((pl.col("imv_offset_minutes") + IMV_WINDOW_MINUTES) // OFFSET_BIN_WIDTH)
+                ((pl.col("imv_offset_minutes") + IMV_WINDOW_BEFORE_MINUTES) // OFFSET_BIN_WIDTH)
                 .cast(pl.Int32)
                 .clip(0, IMV_N_OFFSET_BINS - 1)
             )
@@ -886,6 +920,7 @@ def _(
     d2_offset_distribution = nearest_transition_distribution(
         _candidates,
         IMV_EXTENDED_WINDOW_MINUTES,
+        IMV_EXTENDED_WINDOW_MINUTES,
         IMV_EXTENDED_OFFSET_BIN_WIDTH,
         IMV_EXTENDED_OFFSET_BIN_LABELS,
     )
@@ -944,6 +979,7 @@ def _(
     DATA_DIR,
     FILETYPE,
     MAR_ACTIONS,
+    MEDICATION_DOSE_UPPER_BOUNDS,
     MEDICATION_DOSE_UNITS,
     MedicationAdminIntermittent,
     PHI_DIR,
@@ -953,6 +989,7 @@ def _(
     context_d,
     epoch_minutes,
     in_window_expr,
+    medication_dose_eligible_expr,
     normalize_category_columns,
     pl,
     to_site_naive,
@@ -1011,13 +1048,18 @@ def _(
     _configured_sedative_all = _sedative_all.filter(
         pl.col("med_dose_unit") == _configured_unit
     )
+    _eligible_dose = medication_dose_eligible_expr(
+        MEDICATION_DOSE_UNITS, MEDICATION_DOSE_UPPER_BOUNDS
+    )
+    _ineligible_dose_rows = _configured_sedative_all.filter(~_eligible_dose)
+    _eligible_sedative_all = _configured_sedative_all.filter(_eligible_dose)
     _seen = _sedative_all.group_by(["med_category", "mar_action_category"]).agg(n=pl.len())
     _missing = sorted(set(SEDATIVES) - set(_sedative_all.get_column("med_category").unique()))
     _dropped_by_action_filter = (
-        _configured_sedative_all.group_by("med_category")
+        _eligible_sedative_all.group_by("med_category")
         .agg(n_total=pl.len())
         .join(
-            _configured_sedative_all.filter(
+            _eligible_sedative_all.filter(
                 pl.col("mar_action_category").is_in(MAR_ACTIONS)
             )
             .group_by("med_category")
@@ -1031,7 +1073,7 @@ def _(
     )
 
     sed_admin = (
-        _configured_sedative_all.filter(
+        _eligible_sedative_all.filter(
             pl.col("mar_action_category").is_in(MAR_ACTIONS)
         )
         .join(_bridge, on="hospitalization_id", how="inner")
@@ -1046,6 +1088,13 @@ def _(
     if _wrong_unit_rows.height:
         print(
             _wrong_unit_rows.group_by(["med_category", "med_dose_unit"])
+            .agg(n=pl.len())
+            .sort("n", descending=True)
+        )
+    print(f"ineligible-dose rows skipped: {_ineligible_dose_rows.height:,}")
+    if _ineligible_dose_rows.height:
+        print(
+            _ineligible_dose_rows.group_by(["med_category", "med_dose_unit"])
             .agg(n=pl.len())
             .sort("n", descending=True)
         )
@@ -1084,7 +1133,13 @@ def _(
             how="inner",
         )
         .with_columns(_offset_minutes_raw=pl.col("_s_min") - pl.col("_t_min"))
-        .filter(in_window_expr("_offset_minutes_raw", SEDATION_WINDOW_MINUTES))
+        .filter(
+            in_window_expr(
+                "_offset_minutes_raw",
+                SEDATION_WINDOW_MINUTES,
+                SEDATION_WINDOW_MINUTES,
+            )
+        )
         .with_columns(offset_minutes=pl.col("_offset_minutes_raw").round(3))
         .select(
             "index_paralytic_id",
@@ -1237,42 +1292,50 @@ def _(mo):
 def _(
     IMV_EXTENDED_OFFSET_BIN_WIDTH,
     IMV_EXTENDED_WINDOW_MINUTES,
-    IMV_WINDOW_MINUTES,
+    IMV_WINDOW_AFTER_MINUTES,
+    IMV_WINDOW_BEFORE_MINUTES,
     OFFSET_BIN_WIDTH,
     SEDATION_WINDOW_MINUTES,
 ):
-    def offset_bin_grid(window_minutes, bin_width):
-        """Build a symmetric grid whose final bin includes the positive boundary."""
-        _n_bins_float = 2 * window_minutes / bin_width
+    def offset_bin_grid(before_minutes, after_minutes, bin_width):
+        """Build a signed grid whose final bin includes the positive boundary."""
+        _n_bins_float = (before_minutes + after_minutes) / bin_width
         assert _n_bins_float.is_integer(), (
-            f"+/-{window_minutes:g} minutes does not divide into {bin_width:g}-minute bins"
+            f"-{before_minutes:g}/+{after_minutes:g} minutes does not divide into "
+            f"{bin_width:g}-minute bins"
         )
         _n_bins = int(_n_bins_float)
         _edges = [
-            -window_minutes + bin_width * i for i in range(_n_bins + 1)
+            -before_minutes + bin_width * i for i in range(_n_bins + 1)
         ]
         _labels = [
             f"[{_edges[i]:.0f},{_edges[i + 1]:.0f})" for i in range(_n_bins)
         ]
         _labels[-1] = f"[{_edges[-2]:.0f},{_edges[-1]:.0f}]"
-        return _n_bins, _labels, _n_bins // 2
+        return _n_bins, _labels, int(before_minutes / bin_width)
 
     (
         IMV_N_OFFSET_BINS,
         IMV_OFFSET_BIN_LABELS,
         IMV_ZERO_BIN,
-    ) = offset_bin_grid(IMV_WINDOW_MINUTES, OFFSET_BIN_WIDTH)
+    ) = offset_bin_grid(
+        IMV_WINDOW_BEFORE_MINUTES, IMV_WINDOW_AFTER_MINUTES, OFFSET_BIN_WIDTH
+    )
     (
         SEDATION_N_OFFSET_BINS,
         SEDATION_OFFSET_BIN_LABELS,
         SEDATION_ZERO_BIN,
-    ) = offset_bin_grid(SEDATION_WINDOW_MINUTES, OFFSET_BIN_WIDTH)
+    ) = offset_bin_grid(
+        SEDATION_WINDOW_MINUTES, SEDATION_WINDOW_MINUTES, OFFSET_BIN_WIDTH
+    )
     (
         IMV_EXTENDED_N_OFFSET_BINS,
         IMV_EXTENDED_OFFSET_BIN_LABELS,
         IMV_EXTENDED_ZERO_BIN,
     ) = offset_bin_grid(
-        IMV_EXTENDED_WINDOW_MINUTES, IMV_EXTENDED_OFFSET_BIN_WIDTH
+        IMV_EXTENDED_WINDOW_MINUTES,
+        IMV_EXTENDED_WINDOW_MINUTES,
+        IMV_EXTENDED_OFFSET_BIN_WIDTH,
     )
     return (
         IMV_EXTENDED_N_OFFSET_BINS,
@@ -1367,7 +1430,7 @@ def _(pl):
             .sort(["med_category", "med_dose_unit", "_summary_exclusion_reason"])
         )
         if _excluded.height:
-            print("DOSE SUMMARY exclusions (raw QC outputs retain these rows):")
+            print("DOSE exclusions:")
             print(_excluded)
 
         return _checked.filter(
@@ -1480,8 +1543,8 @@ def _(
 
 @app.cell
 def _(
-    DOSE_SUMMARY_UPPER_BOUNDS,
     filter_doses_for_summary,
+    MEDICATION_DOSE_UPPER_BOUNDS,
     MEDICATION_DOSE_UNITS,
     pl,
     prepare_configured_doses,
@@ -1505,7 +1568,7 @@ def _(
 
     sedation_dose_summary_clean = filter_doses_for_summary(
         sedation_dose_converted,
-        DOSE_SUMMARY_UPPER_BOUNDS,
+        MEDICATION_DOSE_UPPER_BOUNDS,
     )
 
     return sedation_dose_converted, sedation_dose_summary_clean

@@ -27,6 +27,11 @@ def _(mo):
         """
         # 05 — Table 1
 
+        **Figure 1 is the main analysis:** qualifying paralytic administrations → formed
+        indexes → IMV transition → sedation → Table 1. It carries source administrations,
+        post-merge medication entries, indexes, and encounter blocks through every gate.
+        Subanalyses remain downstream and do not alter this flow.
+
         Restricted to **valid index events**: an index paralytic with both a configured-window
         IMV transition and configured-window sedation. Published twice from that frame (P34):
         once per **encounter block**, represented by its first valid index, and once per
@@ -82,7 +87,8 @@ def _(Path, json):
     SHARE_DIR = OUTPUT_DIR / "final_no_phi"
     FIG_DIR = SHARE_DIR / "figures"
     FIG_DIR.mkdir(parents=True, exist_ok=True)
-    IMV_WINDOW_MINUTES = float(config["imv_window_minutes"])
+    IMV_WINDOW_BEFORE_MINUTES = float(config["imv_window_before_minutes"])
+    IMV_WINDOW_AFTER_MINUTES = float(config["imv_window_after_minutes"])
     SEDATION_WINDOW_MINUTES = float(config["sedation_window_minutes"])
 
     # P34/§6. Every stratum column is emitted even when structurally empty --
@@ -128,7 +134,8 @@ def _(Path, json):
     return (
         FIG_DIR,
         ICU_TYPES,
-        IMV_WINDOW_MINUTES,
+        IMV_WINDOW_AFTER_MINUTES,
+        IMV_WINDOW_BEFORE_MINUTES,
         LOOKBACK_HOURS,
         PHI_DIR,
         RESPIRATORY_DEVICES,
@@ -139,6 +146,233 @@ def _(Path, json):
         VASOPRESSORS,
         config,
     )
+
+
+@app.cell
+def _(pl):
+    def build_main_consort(index_covariates, administration_summary, strata, site_name):
+        """Build the main analysis flow without reimplementing any eligibility rule."""
+        _required = {
+            "index_paralytic_id",
+            "encounter_block",
+            "p_num",
+            "agent_stratum",
+            "n_before_merge_admin",
+            "n_admins",
+            "n_agents",
+            "imv_transition",
+            "no_transition_reason",
+            "any_sedative",
+        }
+        _missing = _required - set(index_covariates.columns)
+        assert not _missing, f"main CONSORT source is missing columns: {sorted(_missing)}"
+        assert index_covariates.filter(
+            (pl.col("n_before_merge_admin") < pl.col("n_admins"))
+            | (pl.col("n_admins") != pl.col("n_agents"))
+        ).height == 0, "administration lineage is inconsistent with the formed-index merge"
+
+        _source_total = int(index_covariates.get_column("n_before_merge_admin").sum())
+        assert administration_summary.get_column("n_administrations").sum() == _source_total, (
+            "step02 administration summary does not reconcile to source administrations "
+            "carried by the analytic index frame"
+        )
+
+        _imv = index_covariates.filter(pl.col("imv_transition"))
+        _valid = _imv.filter(pl.col("any_sedative"))
+        _block = (
+            _valid.sort(["encounter_block", "p_num", "index_paralytic_id"])
+            .unique("encounter_block", keep="first", maintain_order=True)
+        )
+        assert _block.height == _valid.get_column("encounter_block").n_unique()
+
+        def _counts(frame):
+            return {
+                "n_source_administrations": int(
+                    frame.get_column("n_before_merge_admin").sum() or 0
+                ),
+                "n_postmerge_med_entries": int(frame.get_column("n_admins").sum() or 0),
+                "n_indexes": frame.height,
+                "n_encounter_blocks": frame.get_column("encounter_block").n_unique(),
+            }
+
+        _stages = [
+            (
+                "qualifying_administrations",
+                "All qualifying paralytic administrations",
+                index_covariates,
+            ),
+            (
+                "formed_indexes",
+                "Indexes formed: 15-minute fold, then same-agent merge",
+                index_covariates,
+            ),
+            (
+                "imv_transition",
+                "Indexes with an eligible IMV transition",
+                _imv,
+            ),
+            (
+                "table1_index",
+                "Table 1 index cohort: IMV transition plus sedation",
+                _valid,
+            ),
+            (
+                "table1_block",
+                "Table 1 block cohort: first valid index per block",
+                _block,
+            ),
+        ]
+        _rows = []
+        _agent_order = ["overall", *strata]
+        for _stage_order, (_stage, _label, _frame) in enumerate(_stages, start=1):
+            for _agent_order_i, _agent in enumerate(_agent_order):
+                _sub = (
+                    _frame
+                    if _agent == "overall"
+                    else _frame.filter(pl.col("agent_stratum") == _agent)
+                )
+                _row = {
+                    "row_order": 100 * _stage_order + _agent_order_i,
+                    "row_type": "population",
+                    "stage": _stage,
+                    "agent_view": "table1_stratum",
+                    "agent": _agent,
+                    "label": _label,
+                    "reason": None,
+                    **_counts(_sub),
+                    "n_blocks_removed": None,
+                    "block_count_semantics": "blocks represented by this population",
+                    "site_name": site_name,
+                }
+                if _stage == "qualifying_administrations":
+                    _row["n_postmerge_med_entries"] = None
+                    _row["n_indexes"] = None
+                _rows.append(_row)
+
+        # The source-medication rows make the rocuronium administration total explicit.
+        # They are not Table 1 strata: a multi-agent index contributes to each source drug.
+        for _i, _record in enumerate(
+            administration_summary.sort("med_category").iter_rows(named=True)
+        ):
+            _rows.append(
+                {
+                    "row_order": 150 + _i,
+                    "row_type": "source_medication",
+                    "stage": "qualifying_administrations",
+                    "agent_view": "source_medication",
+                    "agent": _record["med_category"],
+                    "label": "Qualifying administrations by source medication",
+                    "reason": None,
+                    "n_source_administrations": int(_record["n_administrations"]),
+                    "n_postmerge_med_entries": None,
+                    "n_indexes": None,
+                    "n_encounter_blocks": int(_record["n_blocks"]),
+                    "n_blocks_removed": None,
+                    "block_count_semantics": (
+                        "blocks with this medication; medication rows can overlap"
+                    ),
+                    "site_name": site_name,
+                }
+            )
+
+        def _exclusion_row(order, stage, label, reason, frame, blocks_removed, detail=False):
+            return {
+                "row_order": order,
+                "row_type": "exclusion_detail" if detail else "exclusion",
+                "stage": stage,
+                "agent_view": "overall",
+                "agent": "overall",
+                "label": label,
+                "reason": reason,
+                **_counts(frame),
+                "n_blocks_removed": blocks_removed,
+                "block_count_semantics": (
+                    "blocks containing indexes with this reason; detail rows overlap"
+                    if detail
+                    else "blocks removed because no index in the block passed this gate"
+                ),
+                "site_name": site_name,
+            }
+
+        _no_imv = index_covariates.filter(~pl.col("imv_transition"))
+        _rows.append(
+            _exclusion_row(
+                290,
+                "imv_transition",
+                "Excluded at IMV-transition gate",
+                "No eligible IMV transition",
+                _no_imv,
+                index_covariates.get_column("encounter_block").n_unique()
+                - _imv.get_column("encounter_block").n_unique(),
+            )
+        )
+        for _i, _reason in enumerate(
+            ["no_transition_in_window", "no_device_record", "already_on_imv"]
+        ):
+            _rows.append(
+                _exclusion_row(
+                    291 + _i,
+                    "imv_transition",
+                    "IMV-transition exclusion detail",
+                    _reason,
+                    _no_imv.filter(pl.col("no_transition_reason") == _reason),
+                    None,
+                    detail=True,
+                )
+            )
+
+        _no_sedation = _imv.filter(~pl.col("any_sedative"))
+        _rows.append(
+            _exclusion_row(
+                390,
+                "table1_index",
+                "Excluded at sedation gate",
+                "No qualifying sedative within the configured window",
+                _no_sedation,
+                _imv.get_column("encounter_block").n_unique()
+                - _valid.get_column("encounter_block").n_unique(),
+            )
+        )
+
+        _not_selected = _valid.join(
+            _block.select("index_paralytic_id"),
+            on="index_paralytic_id",
+            how="anti",
+        )
+        _rows.append(
+            _exclusion_row(
+                490,
+                "table1_block",
+                "Not selected for block-level Table 1",
+                "Additional valid index; block represented by its first valid index",
+                _not_selected,
+                0,
+            )
+        )
+        _rows[-1]["block_count_semantics"] = (
+            "blocks with additional valid indexes; no block is removed"
+        )
+
+        _out = pl.DataFrame(_rows).sort("row_order")
+
+        # Every gate is a partition of the population immediately before it.
+        for _column in [
+            "n_source_administrations",
+            "n_postmerge_med_entries",
+            "n_indexes",
+        ]:
+            assert _counts(index_covariates)[_column] == (
+                _counts(_imv)[_column] + _counts(_no_imv)[_column]
+            )
+            assert _counts(_imv)[_column] == (
+                _counts(_valid)[_column] + _counts(_no_sedation)[_column]
+            )
+            assert _counts(_valid)[_column] == (
+                _counts(_block)[_column] + _counts(_not_selected)[_column]
+            )
+        return _out
+
+    return (build_main_consort,)
 
 
 @app.cell
@@ -262,7 +496,8 @@ def _(pl):
 @app.cell
 def _(
     ICU_TYPES,
-    IMV_WINDOW_MINUTES,
+    IMV_WINDOW_AFTER_MINUTES,
+    IMV_WINDOW_BEFORE_MINUTES,
     LOOKBACK_HOURS,
     RESPIRATORY_DEVICES,
     SEDATION_WINDOW_MINUTES,
@@ -476,7 +711,8 @@ def _(
             "imv_transition",
             CONTEXT,
             "New transition onto IMV at the index paralytic",
-            f"device change onto imv within +/-{IMV_WINDOW_MINUTES:g} min of t0 "
+            f"device change onto imv from {IMV_WINDOW_BEFORE_MINUTES:g} min before "
+            f"through {IMV_WINDOW_AFTER_MINUTES:g} min after t0 "
             "(sub-analysis D)",
             event_unit,
         )
@@ -843,6 +1079,290 @@ def _(
     print(f"block table n_rows : {table1_block.filter(pl.col('statistic') == 'n_rows')['overall'][0]:,.0f}")
     print(f"index table n_rows : {table1_index.filter(pl.col('statistic') == 'n_rows')['overall'][0]:,.0f}")
     return build_table1, index_covariates, table1_block, table1_index
+
+
+@app.cell
+def _(
+    FIG_DIR,
+    IMV_WINDOW_AFTER_MINUTES,
+    IMV_WINDOW_BEFORE_MINUTES,
+    SEDATION_WINDOW_MINUTES,
+    SHARE_DIR,
+    SITE,
+    STRATA,
+    build_main_consort,
+    index_covariates,
+    pl,
+    plt,
+    publish,
+):
+    _administration_summary = pl.read_csv(
+        SHARE_DIR / "step02__paralytic_administration_summary.csv"
+    )
+    figure_1_df = build_main_consort(
+        index_covariates,
+        _administration_summary,
+        STRATA,
+        SITE,
+    )
+    publish(
+        figure_1_df,
+        SHARE_DIR / "fig_1__main_consort.csv",
+        "fig_1__main_consort",
+    )
+
+    # Plot the published aggregate, not a second in-memory calculation.
+    _data = pl.read_csv(SHARE_DIR / "fig_1__main_consort.csv")
+    _populations = _data.filter(
+        (pl.col("row_type") == "population") & (pl.col("agent") == "overall")
+    )
+
+    def _record(stage, row_type="population"):
+        _row = _data.filter(
+            (pl.col("stage") == stage) & (pl.col("row_type") == row_type)
+        )
+        assert _row.height == 1, f"main CONSORT expected one {row_type} row for {stage}"
+        return _row.row(0, named=True)
+
+    def _fmt(value):
+        return "NA" if value is None else f"{int(value):,}"
+
+    _stage_ids = [
+        "qualifying_administrations",
+        "formed_indexes",
+        "imv_transition",
+        "table1_index",
+        "table1_block",
+    ]
+    _stage_rows = {
+        _stage: _populations.filter(pl.col("stage") == _stage).row(0, named=True)
+        for _stage in _stage_ids
+    }
+    _titles = {
+        "qualifying_administrations": "Qualifying paralytic\nadministrations",
+        "formed_indexes": "Formed indexes\n15-minute rule",
+        "imv_transition": (
+            f"IMV transition\n-{IMV_WINDOW_BEFORE_MINUTES:g}/+"
+            f"{IMV_WINDOW_AFTER_MINUTES:g} min"
+        ),
+        "table1_index": (
+            f"Table 1 index cohort\n+ sedation +/-{SEDATION_WINDOW_MINUTES:g} min"
+        ),
+        "table1_block": "Table 1 block cohort\nfirst valid index",
+    }
+
+    _fig, _ax = plt.subplots(figsize=(17, 11))
+    _ax.set_xlim(0, 1)
+    _ax.set_ylim(0, 1)
+    _ax.axis("off")
+    _fig.suptitle(
+        "Figure 1. Main analysis CONSORT: qualifying paralytic administrations to Table 1",
+        fontsize=17,
+        fontweight="bold",
+        y=0.985,
+    )
+
+    _x_positions = [0.10, 0.30, 0.50, 0.70, 0.90]
+    _box_colors = ["#e8eef5", "#d8e7f2", "#d9eadf", "#f0e5c9", "#ead9c8"]
+    for _i, (_stage, _x, _color) in enumerate(
+        zip(_stage_ids, _x_positions, _box_colors, strict=True)
+    ):
+        _row = _stage_rows[_stage]
+        _lines = [_titles[_stage]]
+        _lines.append(f"Source administrations: {_fmt(_row['n_source_administrations'])}")
+        if _row["n_postmerge_med_entries"] is not None:
+            _lines.append(f"Post-merge entries: {_fmt(_row['n_postmerge_med_entries'])}")
+        if _row["n_indexes"] is not None:
+            _lines.append(f"Indexes: {_fmt(_row['n_indexes'])}")
+        _lines.append(f"Encounter blocks: {_fmt(_row['n_encounter_blocks'])}")
+        _ax.text(
+            _x,
+            0.72,
+            "\n".join(_lines),
+            ha="center",
+            va="center",
+            fontsize=9.5,
+            linespacing=1.35,
+            bbox={
+                "boxstyle": "round,pad=0.75",
+                "facecolor": _color,
+                "edgecolor": "#30475e",
+                "linewidth": 1.4,
+            },
+        )
+        if _i:
+            _ax.annotate(
+                "",
+                xy=(_x - 0.09, 0.72),
+                xytext=(_x_positions[_i - 1] + 0.09, 0.72),
+                arrowprops={"arrowstyle": "->", "color": "#30475e", "lw": 1.8},
+            )
+
+    _formed = _stage_rows["formed_indexes"]
+    _merged_reduction = (
+        _formed["n_source_administrations"] - _formed["n_postmerge_med_entries"]
+    )
+    _ax.text(
+        0.20,
+        0.50,
+        "Index construction (not an exclusion)\n"
+        f"{_fmt(_merged_reduction)} repeated same-agent\nentries merged\n"
+        "Every source administration\nremains represented",
+        ha="center",
+        va="center",
+        fontsize=8.8,
+        bbox={"boxstyle": "round,pad=0.5", "facecolor": "#f5f7f9", "edgecolor": "#8a99a8"},
+    )
+
+    _imv_excluded = _record("imv_transition", "exclusion")
+    _imv_details = _data.filter(
+        (pl.col("stage") == "imv_transition")
+        & (pl.col("row_type") == "exclusion_detail")
+    )
+    _reason_labels = {
+        "no_transition_in_window": "no transition in window",
+        "no_device_record": "no device record",
+        "already_on_imv": "already on IMV",
+    }
+    _detail_lines = [
+        f"{_reason_labels[_row['reason']]}: {_fmt(_row['n_indexes'])} indexes"
+        for _row in _imv_details.iter_rows(named=True)
+    ]
+    _ax.text(
+        0.40,
+        0.47,
+        "Excluded at IMV gate\n"
+        f"Administrations: {_fmt(_imv_excluded['n_source_administrations'])}\n"
+        f"Indexes: {_fmt(_imv_excluded['n_indexes'])}\n"
+        f"{_fmt(_imv_excluded['n_blocks_removed'])} blocks removed\n"
+        + "\n".join(_detail_lines),
+        ha="center",
+        va="center",
+        fontsize=8.5,
+        bbox={"boxstyle": "round,pad=0.5", "facecolor": "#f5dddd", "edgecolor": "#a85d5d"},
+    )
+
+    _sed_excluded = _record("table1_index", "exclusion")
+    _ax.text(
+        0.60,
+        0.49,
+        "Excluded at sedation gate\n"
+        f"Administrations: {_fmt(_sed_excluded['n_source_administrations'])}\n"
+        f"Indexes: {_fmt(_sed_excluded['n_indexes'])}\n"
+        f"{_fmt(_sed_excluded['n_blocks_removed'])} blocks removed\n"
+        f"No qualifying sedative\nwithin +/-{SEDATION_WINDOW_MINUTES:g} min",
+        ha="center",
+        va="center",
+        fontsize=8.8,
+        bbox={"boxstyle": "round,pad=0.5", "facecolor": "#f5dddd", "edgecolor": "#a85d5d"},
+    )
+
+    _block_excluded = _record("table1_block", "exclusion")
+    _ax.text(
+        0.80,
+        0.50,
+        "Block-level representation\n"
+        f"{_fmt(_block_excluded['n_indexes'])} additional valid indexes\nnot selected\n"
+        "0 blocks removed\nIndex-level Table 1 retains them",
+        ha="center",
+        va="center",
+        fontsize=8.8,
+        bbox={"boxstyle": "round,pad=0.5", "facecolor": "#f5f0df", "edgecolor": "#9a8145"},
+    )
+
+    for _x, _end_y, _style in [
+        (0.20, 0.565, "dotted"),
+        (0.40, 0.565, "solid"),
+        (0.60, 0.565, "solid"),
+        (0.80, 0.565, "dotted"),
+    ]:
+        _ax.annotate(
+            "",
+            xy=(_x, _end_y),
+            xytext=(_x, 0.635),
+            arrowprops={
+                "arrowstyle": "->",
+                "color": "#6b747c",
+                "lw": 1.1,
+                "linestyle": _style,
+            },
+        )
+
+    _table_rows = []
+    for _agent in STRATA:
+        _agent_rows = _data.filter(
+            (pl.col("row_type") == "population") & (pl.col("agent") == _agent)
+        )
+        _by_stage = {
+            _row["stage"]: _row for _row in _agent_rows.iter_rows(named=True)
+        }
+        _table_rows.append(
+            [
+                _agent,
+                _fmt(_by_stage["qualifying_administrations"]["n_source_administrations"]),
+                _fmt(_by_stage["formed_indexes"]["n_postmerge_med_entries"]),
+                _fmt(_by_stage["formed_indexes"]["n_indexes"]),
+                _fmt(_by_stage["imv_transition"]["n_indexes"]),
+                _fmt(_by_stage["table1_index"]["n_indexes"]),
+                _fmt(_by_stage["table1_block"]["n_indexes"]),
+            ]
+        )
+    _ax.text(
+        0.5,
+        0.335,
+        "Counts by mutually exclusive Table 1 agent stratum",
+        ha="center",
+        fontsize=10.5,
+        fontweight="bold",
+    )
+    _table = _ax.table(
+        cellText=_table_rows,
+        colLabels=[
+            "Agent stratum",
+            "Source admins",
+            "Post-merge entries",
+            "Formed indexes",
+            "IMV indexes",
+            "Table 1 indexes",
+            "Table 1 blocks",
+        ],
+        cellLoc="center",
+        colLoc="center",
+        bbox=[0.04, 0.075, 0.92, 0.235],
+    )
+    _table.auto_set_font_size(False)
+    _table.set_fontsize(8.5)
+    for (_row_i, _col_i), _cell in _table.get_celld().items():
+        _cell.set_edgecolor("#c7c7c7")
+        if _row_i == 0:
+            _cell.set_facecolor("#d8e7f2")
+            _cell.set_text_props(weight="bold")
+
+    _source_medication = _data.filter(pl.col("row_type") == "source_medication").sort("agent")
+    _source_text = " | ".join(
+        f"{_row['agent']}: {_fmt(_row['n_source_administrations'])}"
+        for _row in _source_medication.iter_rows(named=True)
+    )
+    _ax.text(
+        0.5,
+        0.045,
+        f"Raw qualifying administrations by medication: {_source_text}",
+        ha="center",
+        fontsize=8.5,
+    )
+    _ax.text(
+        0.5,
+        0.015,
+        "The main flow ends at Table 1. Subanalyses do not alter this population. "
+        "Agent-stratum block counts can overlap before first-valid block selection.",
+        ha="center",
+        fontsize=8,
+        color="#4d4d4d",
+    )
+    _fig.savefig(FIG_DIR / "fig_1__main_consort.png", dpi=180, bbox_inches="tight")
+    plt.close(_fig)
+    print(f"fig_1__main_consort.png -> {FIG_DIR}")
+    return (figure_1_df,)
 
 
 @app.cell

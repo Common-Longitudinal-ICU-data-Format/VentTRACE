@@ -218,7 +218,8 @@ def test_generated_outputs_reconcile_to_the_merged_index_inventory():
     if not config_path.exists():
         pytest.skip("config/config.json absent; pipeline has not been set up")
     with open(config_path) as file:
-        output = Path(json.load(file)["output_directory"])
+        config = json.load(file)
+    output = Path(config["output_directory"])
     if not output.is_absolute():
         output = NOTEBOOK.parent.parent / output
 
@@ -253,18 +254,31 @@ def test_generated_outputs_reconcile_to_the_merged_index_inventory():
     assert propagated.equals(expected)
 
     unit_counts = pl.read_csv(required[2])
-    assert unit_counts["n"].sum() == doses.height
+    upper_bounds = config["medication_dose_upper_bounds"]
+    eligible_doses = (
+        doses.with_columns(
+            pl.col("med_category")
+            .replace_strict(upper_bounds, return_dtype=pl.Float64)
+            .alias("upper_bound")
+        )
+        .filter(
+            pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & (pl.col("med_dose") > 0)
+            & pl.col("med_dose_unit").is_not_null()
+            & (
+                pl.col("med_dose_unit").str.ends_with("/kg")
+                | (pl.col("med_dose") < pl.col("upper_bound"))
+            )
+        )
+    )
+    assert unit_counts["n"].sum() == eligible_doses.height
 
-    finite_doses = doses.filter(
-        pl.col("med_dose").is_not_null()
-        & pl.col("med_dose").is_finite()
-        & pl.col("med_dose_unit").is_not_null()
-    ).height
     ecdf = pl.read_csv(required[3])
     ecdf_total = ecdf.group_by(["med_category", "med_dose_unit"]).agg(
         n=pl.col("n_total").first()
     )["n"].sum()
-    assert ecdf_total == finite_doses
+    assert ecdf_total == eligible_doses.height
 
     flow = pl.read_csv(required[4]).filter(pl.col("population") == "paralytic")
     assert flow["count_unit"].unique().to_list() == ["formed-index medication doses"]

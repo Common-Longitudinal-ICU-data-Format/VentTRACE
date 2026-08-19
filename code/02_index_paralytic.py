@@ -99,6 +99,7 @@ def _(Path, json):
     PARALYTICS = ["rocuronium", "succinylcholine", "vecuronium"]
     MAR_ACTIONS = ["given"]
     MEDICATION_DOSE_UNITS = config["medication_dose_units"]
+    MEDICATION_DOSE_UPPER_BOUNDS = config["medication_dose_upper_bounds"]
     _expected_meds = {
         "rocuronium", "succinylcholine", "vecuronium", "midazolam",
         "etomidate", "ketamine", "propofol", "fentanyl",
@@ -113,18 +114,15 @@ def _(Path, json):
     assert all(
         unit in _valid_units[med] for med, unit in MEDICATION_DOSE_UNITS.items()
     ), "invalid medication_dose_units; use mg[/kg], or mcg[/kg] for fentanyl"
-    # Clinical plausibility limits for configured absolute-unit dose summaries.
-    # only 0 < dose < upper bound contributes. Ketamine is intentionally absent because
-    # the study lead supplied no threshold for it.
-    DOSE_SUMMARY_UPPER_BOUNDS = {
-        "etomidate": 200.0,
-        "fentanyl": 500.0,
-        "midazolam": 50.0,
-        "propofol": 500.0,
-        "rocuronium": 400.0,
-        "succinylcholine": 400.0,
-        "vecuronium": 30.0,
-    }
+    assert set(MEDICATION_DOSE_UPPER_BOUNDS) == _expected_meds, (
+        "medication_dose_upper_bounds must configure exactly the eight study medications"
+    )
+    assert all(
+        isinstance(bound, (int, float))
+        and not isinstance(bound, bool)
+        and 0 < bound < float("inf")
+        for bound in MEDICATION_DOSE_UPPER_BOUNDS.values()
+    ), "medication_dose_upper_bounds values must be finite positive numbers"
     COLLAPSE_GAP_MINUTES = config["collapse_gap_minutes"]
 
     # P11. An ANALYSIS grid, not a site parameter -- a site that changed its bins would
@@ -156,11 +154,10 @@ def _(Path, json):
     print(f"gap bins       : {len(GAP_BIN_LABELS)}  {GAP_BIN_LABELS}")
     print(f"max pairs      : {MAX_TOTAL_PAIRS:,}")
     print(f"configured units: {MEDICATION_DOSE_UNITS}")
-    print(f"summary bounds : {DOSE_SUMMARY_UPPER_BOUNDS}")
+    print(f"dose bounds    : {MEDICATION_DOSE_UPPER_BOUNDS}")
     return (
         COLLAPSE_GAP_MINUTES,
         DATA_DIR,
-        DOSE_SUMMARY_UPPER_BOUNDS,
         FIG_DIR,
         FILETYPE,
         GAP_CUT_BREAKS,
@@ -168,12 +165,33 @@ def _(Path, json):
         GAP_BIN_LABELS,
         MAR_ACTIONS,
         MAX_TOTAL_PAIRS,
+        MEDICATION_DOSE_UPPER_BOUNDS,
         MEDICATION_DOSE_UNITS,
         PARALYTICS,
         PHI_DIR,
         SHARE_DIR,
         TIMEZONE,
     )
+
+
+@app.cell
+def _(pl):
+    def medication_dose_eligible_expr(configured_units, upper_bounds):
+        """Match the configured unit and retain only clinically eligible doses."""
+        _configured_unit = pl.col("med_category").replace_strict(configured_units)
+        _upper_bound = pl.col("med_category").replace_strict(upper_bounds)
+        return (
+            (pl.col("med_dose_unit") == _configured_unit)
+            & pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & (pl.col("med_dose") > 0)
+            & (
+                _configured_unit.str.ends_with("/kg")
+                | (pl.col("med_dose") < _upper_bound)
+            )
+        )
+
+    return (medication_dose_eligible_expr,)
 
 
 @app.cell
@@ -302,12 +320,14 @@ def _(
     DATA_DIR,
     FILETYPE,
     MAR_ACTIONS,
+    MEDICATION_DOSE_UPPER_BOUNDS,
     MEDICATION_DOSE_UNITS,
     MedicationAdminIntermittent,
     PARALYTICS,
     TIMEZONE,
     bridge,
     bridge_hosp_ids,
+    medication_dose_eligible_expr,
     normalize_category_columns,
     pl,
     to_site_naive,
@@ -359,15 +379,20 @@ def _(
     _configured_paralytic_all = _paralytic_all.filter(
         pl.col("med_dose_unit") == _configured_unit
     )
+    _eligible_dose = medication_dose_eligible_expr(
+        MEDICATION_DOSE_UNITS, MEDICATION_DOSE_UPPER_BOUNDS
+    )
+    _ineligible_dose_rows = _configured_paralytic_all.filter(~_eligible_dose)
+    _eligible_paralytic_all = _configured_paralytic_all.filter(_eligible_dose)
     _seen = _paralytic_all.group_by(["med_category", "mar_action_category"]).agg(n=pl.len())
     _missing = sorted(
         set(PARALYTICS) - set(_paralytic_all.get_column("med_category").unique())
     )
     _dropped_by_action_filter = (
-        _configured_paralytic_all.group_by("med_category")
+        _eligible_paralytic_all.group_by("med_category")
         .agg(n_total=pl.len())
         .join(
-            _configured_paralytic_all.filter(
+            _eligible_paralytic_all.filter(
                 pl.col("mar_action_category").is_in(MAR_ACTIONS)
             )
             .group_by("med_category")
@@ -381,7 +406,7 @@ def _(
     )
 
     med_admin = (
-        _configured_paralytic_all.filter(
+        _eligible_paralytic_all.filter(
             pl.col("mar_action_category").is_in(MAR_ACTIONS)
         )
         .join(bridge, on="hospitalization_id", how="inner")
@@ -399,6 +424,13 @@ def _(
     if _wrong_unit_rows.height:
         print(
             _wrong_unit_rows.group_by(["med_category", "med_dose_unit"])
+            .agg(n=pl.len())
+            .sort("n", descending=True)
+        )
+    print(f"ineligible-dose rows skipped: {_ineligible_dose_rows.height:,}")
+    if _ineligible_dose_rows.height:
+        print(
+            _ineligible_dose_rows.group_by(["med_category", "med_dose_unit"])
             .agg(n=pl.len())
             .sort("n", descending=True)
         )
@@ -1288,7 +1320,7 @@ def _(pl):
             .sort(["med_category", "med_dose_unit", "_summary_exclusion_reason"])
         )
         if _excluded.height:
-            print("DOSE SUMMARY exclusions (raw QC outputs retain these rows):")
+            print("DOSE exclusions:")
             print(_excluded)
 
         return _checked.filter(
@@ -1327,8 +1359,8 @@ def _(SHARE_DIR, index_paralytic):
 
 @app.cell
 def _(
-    DOSE_SUMMARY_UPPER_BOUNDS,
     filter_doses_for_summary,
+    MEDICATION_DOSE_UPPER_BOUNDS,
     MEDICATION_DOSE_UNITS,
     pl,
     prepare_configured_doses,
@@ -1348,7 +1380,7 @@ def _(
 
     dose_summary_clean = filter_doses_for_summary(
         dose_converted,
-        DOSE_SUMMARY_UPPER_BOUNDS,
+        MEDICATION_DOSE_UPPER_BOUNDS,
     )
 
     return dose_converted, dose_summary_clean
@@ -1393,10 +1425,10 @@ def _(SHARE_DIR, dose_summary_clean, pl, publish):
 
 
 @app.cell
-def _(SHARE_DIR, pl, publish, raw_doses):
-    # Counts only, in the one configured unit retained for each medication.
+def _(SHARE_DIR, dose_summary_clean, pl, publish):
+    # Counts only, after configured unit and strict dose eligibility filtering.
     paralytic_dose_units = (
-        raw_doses.group_by(["med_category", "med_dose_unit"])
+        dose_summary_clean.group_by(["med_category", "med_dose_unit"])
         .agg(n=pl.len())
         .sort(["med_category", "n"], descending=[False, True])
     )
@@ -1428,12 +1460,8 @@ def _(mo):
         pooled distribution is recoverable from that, so nobody has to ask a site to
         re-run for a statistic that was not thought of first.
 
-        Keyed on the configured charted unit. Other units were excluded before event
-        construction and cannot enter this distribution.
-
-        `n_total` equals `step02__paralytic_dose_raw_unit_counts.csv`'s `n` for fully dosed groups. A
-        null-dose group remains in the counts table but has no ECDF position; that
-        difference is printed explicitly.
+        Keyed on the configured charted unit. Other units and ineligible doses were
+        excluded before event construction; merged doses are checked again here.
         """
     )
     return
@@ -1500,10 +1528,9 @@ def _(pl):
 
 
 @app.cell
-def _(SHARE_DIR, ecdf_by_group, pl, publish, raw_doses):
-    # The ECDF and unit-count table consume the same raw frame. The ECDF excludes
-    # missing/non-finite doses while the unit table retains them as charting QC.
-    paralytic_dose_ecdf = ecdf_by_group(raw_doses)
+def _(SHARE_DIR, dose_summary_clean, ecdf_by_group, pl, publish):
+    # The ECDF and unit-count table consume the same eligible-dose frame.
+    paralytic_dose_ecdf = ecdf_by_group(dose_summary_clean)
 
     # Reconciliation, asserted rather than trusted -- but asserted against the SAME
     # population ecdf_by_group actually counts. n_total is net of the nulls that
@@ -1513,7 +1540,7 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, raw_doses):
     # carry a dose: a mismatch there means the grouping keys drifted apart, which is
     # the bug this assert exists to catch.
     _expected = (
-        raw_doses.filter(
+        dose_summary_clean.filter(
             pl.col("med_dose").is_not_null()
             & pl.col("med_dose").is_finite()
             & pl.col("med_dose_unit").is_not_null()
@@ -1529,7 +1556,7 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, raw_doses):
     )
     assert _expected.equals(_got), (
         "paralytic_dose_ecdf n_total does not reconcile with the dosed rows of "
-        f"raw_doses:\nexpected:\n{_expected}\ngot:\n{_got}"
+        f"dose_summary_clean:\nexpected:\n{_expected}\ngot:\n{_got}"
     )
 
     # The gap against step02__paralytic_dose_raw_unit_counts.csv's own count: reported,
@@ -1539,7 +1566,7 @@ def _(SHARE_DIR, ecdf_by_group, pl, publish, raw_doses):
     # group that is entirely null-dosed vanishes from the ECDF and shows n = 0 here
     # rather than disappearing silently.
     _units = (
-        raw_doses.group_by(["med_category", "med_dose_unit"])
+        dose_summary_clean.group_by(["med_category", "med_dose_unit"])
         .agg(n_units=pl.len())
         .sort(["med_category", "med_dose_unit"])
     )

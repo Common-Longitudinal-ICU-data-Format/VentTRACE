@@ -6,8 +6,12 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
+    import hashlib
+    import inspect
     import json
     import sys
+    import uuid
+    from importlib.metadata import version
     from pathlib import Path
 
     import pandas as pd
@@ -33,6 +37,8 @@ def _():
         Path,
         RespiratorySupport,
         fetch_lazy_result,
+        hashlib,
+        inspect,
         json,
         load_data,
         mo,
@@ -41,6 +47,8 @@ def _():
         process_resp_support_waterfall,
         publish,
         stitch_encounters,
+        uuid,
+        version,
     )
 
 
@@ -136,6 +144,7 @@ def _(Path, json):
     PARALYTICS = ["rocuronium", "succinylcholine", "vecuronium"]
     MAR_ACTIONS = ["given"]
     MEDICATION_DOSE_UNITS = config["medication_dose_units"]
+    MEDICATION_DOSE_UPPER_BOUNDS = config["medication_dose_upper_bounds"]
     _expected_meds = {
         "rocuronium", "succinylcholine", "vecuronium", "midazolam",
         "etomidate", "ketamine", "propofol", "fentanyl",
@@ -150,6 +159,15 @@ def _(Path, json):
     assert all(
         unit in _valid_units[med] for med, unit in MEDICATION_DOSE_UNITS.items()
     ), "invalid medication_dose_units; use mg[/kg], or mcg[/kg] for fentanyl"
+    assert set(MEDICATION_DOSE_UPPER_BOUNDS) == _expected_meds, (
+        "medication_dose_upper_bounds must configure exactly the eight study medications"
+    )
+    assert all(
+        isinstance(bound, (int, float))
+        and not isinstance(bound, bool)
+        and 0 < bound < float("inf")
+        for bound in MEDICATION_DOSE_UPPER_BOUNDS.values()
+    ), "medication_dose_upper_bounds values must be finite positive numbers"
 
     OUTPUT_DIR = Path(config["output_directory"])
     PHI_DIR = OUTPUT_DIR / "intermediate_phi"
@@ -177,6 +195,7 @@ def _(Path, json):
         FILETYPE,
         MIN_AGE,
         MAR_ACTIONS,
+        MEDICATION_DOSE_UPPER_BOUNDS,
         MEDICATION_DOSE_UNITS,
         PARALYTICS,
         PHI_DIR,
@@ -185,6 +204,88 @@ def _(Path, json):
         STITCH_HOURS,
         TIMEZONE,
         TRACH_WINDOW_HOURS,
+    )
+
+
+@app.cell
+def _(pl):
+    def medication_dose_eligible_expr(configured_units, upper_bounds):
+        """Match the configured unit and retain only clinically eligible doses."""
+        _configured_unit = pl.col("med_category").replace_strict(configured_units)
+        _upper_bound = pl.col("med_category").replace_strict(upper_bounds)
+        return (
+            (pl.col("med_dose_unit") == _configured_unit)
+            & pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+            & (pl.col("med_dose") > 0)
+            & (
+                _configured_unit.str.ends_with("/kg")
+                | (pl.col("med_dose") < _upper_bound)
+            )
+        )
+
+    return (medication_dose_eligible_expr,)
+
+
+@app.cell
+def _(hashlib, json, pd, uuid):
+    def waterfall_input_digests(frame):
+        """Content digest per hospitalization for precise cache invalidation."""
+        digests = {}
+        for hospitalization_id, group in frame.groupby(
+            "hospitalization_id", sort=False, dropna=False
+        ):
+            group = group.reset_index(drop=True)
+            digest = hashlib.sha256()
+            digest.update(
+                json.dumps(
+                    [(str(column), str(dtype)) for column, dtype in group.dtypes.items()],
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(
+                pd.util.hash_pandas_object(
+                    group, index=False, categorize=True
+                ).values.tobytes()
+            )
+            digests[str(hospitalization_id)] = digest.hexdigest()
+        return digests
+
+    def file_sha256(path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def valid_waterfall_cache_entries(source_digests, entries, valid_shards):
+        """Select current, intact cache entries for the required hospitalizations."""
+        return {
+            hospitalization_id: entry
+            for hospitalization_id, digest in source_digests.items()
+            if (entry := entries.get(hospitalization_id)) is not None
+            and entry.get("digest") == digest
+            and entry.get("shard") in valid_shards
+        }
+
+    def write_parquet_atomic(frame, path):
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        frame.write_parquet(temporary)
+        temporary.replace(path)
+
+    def write_json_atomic(payload, path):
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with open(temporary, "w") as file:
+            json.dump(payload, file, indent=2, sort_keys=True)
+            file.write("\n")
+        temporary.replace(path)
+
+    return (
+        file_sha256,
+        valid_waterfall_cache_entries,
+        waterfall_input_digests,
+        write_json_atomic,
+        write_parquet_atomic,
     )
 
 
@@ -200,7 +301,7 @@ def _(
     TRACH_WINDOW_HOURS,
 ):
     # Every parameter that affects a result is echoed before anything runs (spec §4).
-    # collapse_gap_minutes, imv_window_minutes, and sedation_window_minutes are NOT echoed
+    # Collapse, IMV, and sedation window settings are NOT echoed
     # here: they belong to 02 and 03, and echoing a parameter this notebook cannot act on is the "silent
     # default" confusion §4 exists to prevent.
     import datetime as _dt
@@ -282,12 +383,14 @@ def _(
     FILETYPE,
     Hospitalization,
     MAR_ACTIONS,
+    MEDICATION_DOSE_UPPER_BOUNDS,
     MEDICATION_DOSE_UNITS,
     PARALYTICS,
     TIMEZONE,
     canonical_category_sql,
     fetch_lazy_result,
     load_data,
+    medication_dose_eligible_expr,
     normalize_category_columns,
     pl,
     to_site_naive,
@@ -304,6 +407,7 @@ def _(
             "hospitalization_id",
             "med_category",
             "mar_action_category",
+            "med_dose",
             "med_dose_unit",
         ],
         lazy=True,
@@ -321,9 +425,8 @@ def _(
     _qualifying = _med_pl.filter(
         pl.col("med_category").is_in(PARALYTICS)
         & pl.col("mar_action_category").is_in(MAR_ACTIONS)
-        & (
-            pl.col("med_dose_unit")
-            == pl.col("med_category").replace_strict(MEDICATION_DOSE_UNITS)
+        & medication_dose_eligible_expr(
+            MEDICATION_DOSE_UNITS, MEDICATION_DOSE_UPPER_BOUNDS
         )
     )
     paralytic_hosp_ids = (
@@ -760,12 +863,10 @@ def _(mo):
         """
         ## Waterfall and t0
 
-        `bfill=False` — forward-fill only. Backfilling could propagate a device backwards
-        in time and manufacture an IMV row earlier than the first real charting. Under the
-        superseded design that slid t0 itself; under the paralytic anchor it instead
-        manufactures a *device transition* — `03` would read a non-IMV→IMV change that the
-        chart never recorded, inside the ±`imv_window_minutes` window around the index
-        paralytic. The hazard moved; it did not go away.
+        `bfill=True` follows the study specification. In CLIFpy, device inference and
+        unconditional device-category forward filling finish before this flag reaches only
+        numeric ventilator settings. This pipeline retains no numeric waterfall columns, so
+        the flag cannot alter the persisted `device_category` timeline.
 
         The waterfall runs per `hospitalization_id`, but rows are then mapped to
         `encounter_block` and ordered **within the block**, which is what makes stitching
@@ -789,14 +890,32 @@ def _(mo):
 
 @app.cell
 def _(
+    COHORT_RUN_ID,
+    PHI_DIR,
     TIMEZONE,
     cohort,
     encounter_mapping,
+    file_sha256,
+    inspect,
+    json,
     normalize_category_columns,
     pl,
     process_resp_support_waterfall,
+    resp_raw,
     resp_utc_pd,
+    version,
+    valid_waterfall_cache_entries,
+    waterfall_input_digests,
+    write_json_atomic,
+    write_parquet_atomic,
 ):
+    _cache_dir = PHI_DIR / "resp_waterfall_cache"
+    _cache_dir.mkdir(parents=True, exist_ok=True)
+    _manifest_path = _cache_dir / "manifest.json"
+    _canonical_path = PHI_DIR / "step01__cohort_resp_waterfall.parquet"
+    _cache_format_version = 1
+    _batch_size = 250
+
     _cohort_hosp_set = set(
         cohort.select(pl.col("list_hospitalization_id").explode())
         .get_column("list_hospitalization_id")
@@ -804,50 +923,176 @@ def _(
     )
     _resp_in = resp_utc_pd[resp_utc_pd["hospitalization_id"].isin(_cohort_hosp_set)].copy()
 
-    if _resp_in.empty:
-        resp_waterfall = (
-            encounter_mapping.select("hospitalization_id", "encounter_block")
-            .head(0)
-            .with_columns(
-                pl.lit(None, dtype=pl.Datetime).alias("recorded_dttm"),
-                pl.lit(None, dtype=pl.String).alias("device_category"),
-            )
-            .select(
-                "hospitalization_id",
-                "recorded_dttm",
-                "device_category",
-                "encounter_block",
-            )
-        )
-    else:
-        _waterfalled = process_resp_support_waterfall(
-            _resp_in,
-            id_col="hospitalization_id",
-            # D6. This flag CANNOT change device_category: waterfall.py:274 ffills it
-            # unconditionally, and bfill reaches only num_cols_fill (fio2_set, peep_set,
-            # tidal_volume_set, ...) at :320-336 -- after the device heuristics at :199-226
-            # have already run. We read device_category and nothing else out of this frame,
-            # so the flag is inert here. Set as specified rather than silently dropped.
-            bfill=True,
-            verbose=True,
-        )
+    _waterfall_source = inspect.getsourcefile(process_resp_support_waterfall)
+    assert _waterfall_source is not None
+    _cache_signature = {
+        "format_version": _cache_format_version,
+        "timezone": TIMEZONE,
+        "bfill": True,
+        "clifpy_version": version("clifpy"),
+        "waterfall_sha256": file_sha256(_waterfall_source),
+        "projection": ["hospitalization_id", "recorded_dttm", "device_category"],
+        "time_basis": "site_local_naive",
+    }
+    _source_digests = waterfall_input_digests(_resp_in)
+    _required_resp_ids = set(_source_digests)
 
-        # The waterfall preserves UTC on input rows and creates UTC scaffold rows. Convert its
-        # result back to the configured site timezone before stripping the timezone.
+    _manifest_existed = _manifest_path.exists()
+    if _manifest_existed:
+        try:
+            with open(_manifest_path) as _file:
+                _manifest = json.load(_file)
+        except (OSError, ValueError):
+            _manifest = {}
+    else:
+        _manifest = {}
+    if _manifest.get("signature") != _cache_signature:
+        _manifest = {"signature": _cache_signature, "entries": {}, "shards": {}}
+    _entries = _manifest["entries"]
+    _shards = _manifest["shards"]
+
+    # One-time migration: the prior canonical waterfall is a valid cache seed when its
+    # projected rows still align to the current raw respiratory timestamps. Block and run
+    # identifiers are deliberately discarded and rebuilt from the current cohort.
+    if not _manifest_existed and _canonical_path.exists() and _required_resp_ids:
+        _seed = (
+            pl.read_parquet(_canonical_path)
+            .select("hospitalization_id", "recorded_dttm", "device_category")
+            .filter(pl.col("hospitalization_id").cast(pl.String).is_in(_required_resp_ids))
+            .with_columns(pl.col("hospitalization_id").cast(pl.String))
+        )
+        _seed_real = (
+            _seed.filter(pl.col("recorded_dttm").dt.second() != 59)
+            .select("hospitalization_id", "recorded_dttm")
+            .unique()
+        )
+        _seed_orphans = _seed_real.join(
+            resp_raw.with_columns(pl.col("hospitalization_id").cast(pl.String))
+            .select("hospitalization_id", "recorded_dttm")
+            .unique(),
+            on=["hospitalization_id", "recorded_dttm"],
+            how="anti",
+        )
+        if _seed_orphans.is_empty():
+            _seed_ids = set(_seed.get_column("hospitalization_id").unique().to_list())
+            _seed_path = _cache_dir / "seed.parquet"
+            write_parquet_atomic(_seed, _seed_path)
+            _seed_hash = file_sha256(_seed_path)
+            _shards[_seed_path.name] = {"sha256": _seed_hash}
+            for _hospitalization_id in _seed_ids:
+                _entries[_hospitalization_id] = {
+                    "digest": _source_digests[_hospitalization_id],
+                    "shard": _seed_path.name,
+                }
+            write_json_atomic(_manifest, _manifest_path)
+            print(f"waterfall cache seeded from canonical parquet: {len(_seed_ids):,} hospitalizations")
+        else:
+            print(
+                "existing canonical waterfall was not used as a cache seed: "
+                f"{_seed_orphans.height:,} non-scaffold rows do not align to current raw data"
+            )
+
+    _valid_shards = set()
+    for _shard_name, _shard_meta in _shards.items():
+        _shard_path = _cache_dir / _shard_name
+        if _shard_path.exists() and file_sha256(_shard_path) == _shard_meta.get("sha256"):
+            _valid_shards.add(_shard_name)
+
+    _valid_entries = valid_waterfall_cache_entries(
+        _source_digests, _entries, _valid_shards
+    )
+    _missing_ids = sorted(_required_resp_ids - set(_valid_entries))
+    _n_cache_hits = len(_valid_entries)
+    _n_missing = len(_missing_ids)
+    print(
+        f"waterfall cache: {_n_cache_hits:,} hit(s), {_n_missing:,} "
+        "hospitalization(s) to process"
+    )
+
+    _run_token = COHORT_RUN_ID.replace(":", "").replace("-", "")
+    for _batch_number, _start in enumerate(range(0, len(_missing_ids), _batch_size), start=1):
+        _batch_ids = _missing_ids[_start : _start + _batch_size]
+        _batch_input = _resp_in[
+            _resp_in["hospitalization_id"].astype(str).isin(_batch_ids)
+        ].copy()
+        _waterfalled = process_resp_support_waterfall(
+            _batch_input,
+            id_col="hospitalization_id",
+            # Device inference is complete before bfill reaches numeric settings. The
+            # retained projection therefore remains device-category equivalent.
+            bfill=True,
+            verbose=False,
+        )
         _waterfalled["recorded_dttm"] = (
             _waterfalled["recorded_dttm"].dt.tz_convert(TIMEZONE).dt.tz_localize(None)
         )
-
-        resp_waterfall = (
-            normalize_category_columns(
-                pl.from_pandas(
+        _batch_frame = normalize_category_columns(
+            pl.from_pandas(
                 _waterfalled[["hospitalization_id", "recorded_dttm", "device_category"]]
-                ),
-                "device_category",
-            )
-            .join(encounter_mapping, on="hospitalization_id", how="inner")
-            .sort(["encounter_block", "recorded_dttm"])
+            ).with_columns(pl.col("hospitalization_id").cast(pl.String)),
+            "device_category",
         )
+        _got_batch_ids = set(
+            _batch_frame.get_column("hospitalization_id").unique().to_list()
+        )
+        assert _got_batch_ids == set(_batch_ids), (
+            "waterfall batch did not return every requested hospitalization"
+        )
+        _shard_name = f"batch_{_run_token}_{_batch_number:05d}.parquet"
+        _shard_path = _cache_dir / _shard_name
+        write_parquet_atomic(_batch_frame, _shard_path)
+        _shards[_shard_name] = {"sha256": file_sha256(_shard_path)}
+        for _hospitalization_id in _batch_ids:
+            _entry = {
+                "digest": _source_digests[_hospitalization_id],
+                "shard": _shard_name,
+            }
+            _entries[_hospitalization_id] = _entry
+            _valid_entries[_hospitalization_id] = _entry
+        write_json_atomic(_manifest, _manifest_path)
+        print(
+            f"waterfall cache batch {_batch_number}: {_batch_ids[0]} .. "
+            f"{_batch_ids[-1]} ({len(_batch_ids):,} hospitalizations)"
+        )
+
+    if not _required_resp_ids:
+        _cached_waterfall = (
+            encounter_mapping.select("hospitalization_id").head(0)
+            .with_columns(
+                pl.col("hospitalization_id").cast(pl.String),
+                pl.lit(None, dtype=pl.Datetime).alias("recorded_dttm"),
+                pl.lit(None, dtype=pl.String).alias("device_category"),
+            )
+        )
+    else:
+        _ids_by_shard = {}
+        for _hospitalization_id in _required_resp_ids:
+            _entry = _valid_entries[_hospitalization_id]
+            _ids_by_shard.setdefault(_entry["shard"], []).append(_hospitalization_id)
+        _cached_waterfall = pl.concat(
+            [
+                pl.read_parquet(_cache_dir / _shard_name)
+                .with_columns(pl.col("hospitalization_id").cast(pl.String))
+                .filter(pl.col("hospitalization_id").is_in(_hospitalization_ids))
+                .select("hospitalization_id", "recorded_dttm", "device_category")
+                for _shard_name, _hospitalization_ids in _ids_by_shard.items()
+            ],
+            how="vertical_relaxed",
+        )
+        assert set(
+            _cached_waterfall.get_column("hospitalization_id").unique().to_list()
+        ) == _required_resp_ids, "assembled waterfall cache does not cover current respiratory IDs"
+
+    resp_waterfall = (
+        normalize_category_columns(_cached_waterfall, "device_category")
+        .join(
+            encounter_mapping.with_columns(pl.col("hospitalization_id").cast(pl.String)),
+            on="hospitalization_id",
+            how="inner",
+        )
+        .filter(pl.col("hospitalization_id").is_in([str(value) for value in _cohort_hosp_set]))
+        .sort(["encounter_block", "recorded_dttm"])
+    )
 
     # The waterfall's device heuristics can invent categories the raw table never had, so
     # assert the vocabulary is the one we expect rather than discovering it downstream.
@@ -889,6 +1134,14 @@ def _(
     print(f"\nwaterfalled rows : {resp_waterfall.height:,}")
     print("\ndevice_category after the waterfall (lower case throughout):")
     print(resp_waterfall.get_column("device_category").value_counts(sort=True))
+
+    # Persist immediately after assembly. Batch shards already make computation resumable;
+    # atomic promotion keeps downstream steps from seeing a partially written canonical file.
+    write_parquet_atomic(
+        resp_waterfall.with_columns(cohort_run_id=pl.lit(COHORT_RUN_ID)),
+        _canonical_path,
+    )
+    print(f"waterfall cache assembled and saved: {_canonical_path}")
     return (resp_waterfall,)
 
 
@@ -1068,10 +1321,6 @@ def _(
     )
 
     cohort.write_parquet(PHI_DIR / "step01__cohort.parquet")
-    resp_waterfall_out = resp_waterfall.with_columns(
-        cohort_run_id=pl.lit(COHORT_RUN_ID)
-    )
-    resp_waterfall_out.write_parquet(PHI_DIR / "step01__cohort_resp_waterfall.parquet")
     cohort_index_out.write_parquet(PHI_DIR / "step01__cohort_index.parquet")
 
     consort_df = pl.DataFrame(consort_rows)
@@ -1092,7 +1341,7 @@ def _(
     publish(cohort_qc, SHARE_DIR / "step01__cohort_qc.csv", "step01__cohort_qc")
 
     print(f"step01__cohort.parquet                 {cohort.height:,} rows  -> {PHI_DIR}")
-    print(f"step01__cohort_resp_waterfall.parquet  {resp_waterfall_out.height:,} rows")
+    print(f"step01__cohort_resp_waterfall.parquet  {resp_waterfall.height:,} rows")
     print(f"step01__cohort_index.parquet           {cohort_index_out.height:,} rows")
     print(f"step01__consort_cohort.csv             {consort_df.height} steps -> {SHARE_DIR}")
     print(f"step01__cohort_qc.csv                  {cohort_qc.height} stats")

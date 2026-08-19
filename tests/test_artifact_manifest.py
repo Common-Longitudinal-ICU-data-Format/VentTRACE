@@ -41,7 +41,7 @@ def test_manifest_has_unique_complete_inventory(manifest):
     assert manifest.get_column("filename").is_unique().all()
     assert manifest.get_column("artifact_id").is_unique().all()
     assert manifest.filter(pl.col("status") == "missing").height == 0
-    assert manifest.height == 52
+    assert manifest.height == 54
 
 
 def test_declared_source_artifacts_exist(manifest):

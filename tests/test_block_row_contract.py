@@ -233,12 +233,15 @@ def test_full_block_artifacts_and_valid_table1_denominators(
     )
 
 
-def test_table1_imv_eligibility_remains_in_primary_sixty_minute_window(
+def test_table1_imv_eligibility_remains_in_primary_asymmetric_window(
     frame, index_context
 ):
     with open(CONFIG) as file:
-        imv_window_minutes = float(json.load(file)["imv_window_minutes"])
-    assert imv_window_minutes == 60.0
+        config = json.load(file)
+    imv_window_before_minutes = float(config["imv_window_before_minutes"])
+    imv_window_after_minutes = float(config["imv_window_after_minutes"])
+    assert imv_window_before_minutes == 30.0
+    assert imv_window_after_minutes == 60.0
 
     valid_offsets = (
         frame.filter(pl.col("imv_transition") & pl.col("any_sedative"))
@@ -252,11 +255,12 @@ def test_table1_imv_eligibility_remains_in_primary_sixty_minute_window(
     )
     outside_primary_window = valid_offsets.filter(
         pl.col("imv_offset_minutes").is_null()
-        | (pl.col("imv_offset_minutes").abs() > imv_window_minutes)
+        | (pl.col("imv_offset_minutes") < -imv_window_before_minutes)
+        | (pl.col("imv_offset_minutes") > imv_window_after_minutes)
     )
     assert outside_primary_window.height == 0, (
         "Table 1 eligibility includes an IMV transition from the +/-6-hour D.2 "
-        "sensitivity view rather than the primary +/-60-minute detector"
+        "sensitivity view rather than the primary -30/+60-minute detector"
     )
 
 
