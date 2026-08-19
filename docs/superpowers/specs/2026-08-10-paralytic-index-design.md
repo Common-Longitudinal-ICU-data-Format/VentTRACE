@@ -67,6 +67,7 @@ Each decision below was made explicitly during design. Recorded with rationale s
 | P45 | **Generated artifact names encode ownership and figure lineage.** Every plotted dataframe is `figure_<id>_df`; its published CSV and PNG share `fig_<ID>__<description>`. Supporting outputs use `stepNN__<description>`, including PHI intermediates. The four `table1_by_agent_*` pooling names remain unchanged. `07_artifact_manifest.py` rejects stale, missing or undeclared shareable files and publishes producer, dataframe, sources, row count, size and SHA-256. | Set by the study lead for audit and control. A figure and its data can be paired by basename without reading code, while every non-figure file identifies its producer. Table 1 is the explicit exception because those names are an external consortium contract. |
 | P46 | **Dose/weight is an additive analysis using a separate corrected selector: latest valid 20-300 kg current-hospital weight at or before the event, otherwise latest prior-hospital weight within 28 days.** Existing raw ECDFs and Table 1 weight remain unchanged. Step 04 also publishes block-first event counts by configured healthcare system, event-time hospital, academic status and year; normalized ECDFs; etomidate/ketamine p1-p99; local four-tier integer counts; and a dose-specific eligibility flow. | Set by the study lead. Site tier numerators and denominators are collected now for later pooled logit random-effects analysis; local plots do not imply pooled estimates before all sites report. Full contract: `2026-08-18-dose-weight-and-site-counts-design.md`. |
 | P47 | **AMENDED 2026-08-18: every study medication has one required site-configured unit and only `mar_action_category == "given"` rows in that exact normalized unit enter any analysis.** `config["medication_dose_units"]` must specify all eight agents. Non-fentanyl agents allow `mg` or `mg/kg`; fentanyl allows `mcg` or `mcg/kg`. Values and units are never converted or relabeled. A configured `/kg` value is already normalized, needs no weight, and is not checked against an absolute-unit upper bound. | Set by the study lead after reviewing Rush and UCMC unit distributions. This supersedes P4, P18, P25 and P42, plus the action/unit clauses of P2, P41, P43 and P46. It removes `bolus`, prevents minority-unit rows from changing event denominators, and makes the selected site unit explicit and reproducible. |
+| P48 | **Figure D.2 is a fixed ±6-hour sensitivity view of the same P12 transitions, using one nearest transition per index paralytic and 30-minute bins.** An exact-distance tie selects the earlier transition. D.2 does not modify the configured ±60-minute D.1 detector, persisted `imv_transition`, or downstream cohort definitions. | Set by the study lead to show where a device transition falls beyond the primary window without turning IMV state rows into transitions or changing the primary analysis. One selected event per index preserves the D.1 counting unit; nearest selection answers temporal proximity over the wider window. |
 
 P47 is the active medication action/unit contract. Earlier conversion, override, rate-only,
 and `given`/`bolus` language is retained above as decision history but is no longer operative.
@@ -378,10 +379,15 @@ Recorded per index paralytic:
 |---|---|
 | `step03__imv_transition_summary.csv` | `imv_transition` × `no_transition_reason` → n; and `prior_device_category` → n among transitions |
 | `fig_D1__imv_transition_offset.csv` | 5-minute bins across the configured IMV window (`[−60, +60]`) → n |
+| `fig_D2__imv_transition_offset_6h.csv` | nearest transition per index in 30-minute bins across `[−360, +360]` → n |
 | `step03__imv_prior_device.csv` | `prior_device_category` × `transition_opens_block` → n, among transitions |
 | `step03__imv_transitions_per_window.csv` | `n_transitions_in_window` → n, contiguous from 1 to the observed maximum (the P14 de-bouncing evidence, one row per index paralytic that had a transition) |
 
 **Figure D.1** — histogram of `imv_offset_minutes`, 5-minute bins, zero line marked, drawn from `fig_D1__imv_transition_offset.csv` and written to the same-stem PNG.
+
+**Figure D.2** — sensitivity histogram of the nearest P12 transition within inclusive ±6 hours,
+30-minute bins, earlier transition winning an exact-distance tie. It is drawn from
+`fig_D2__imv_transition_offset_6h.csv` and written to the same-stem PNG.
 
 Offset bins are `[−60,−55)`, … , `[55, 60]` — 24 bins, left-closed and right-open except the last, which is closed so an offset of exactly `+60` has a home.
 

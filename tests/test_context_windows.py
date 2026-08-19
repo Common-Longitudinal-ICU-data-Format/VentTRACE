@@ -66,6 +66,15 @@ def test_imv_and_sedation_have_independent_bin_grids():
     assert OFFSET_BIN_GRID(5.0, 5) == (2, ["[-5,0)", "[0,5]"], 1)
 
 
+def test_extended_imv_view_uses_six_hours_and_thirty_minute_bins():
+    assert OFFSET_BIN_GRID(360.0, 30) == (
+        24,
+        [f"[{start},{start + 30})" for start in range(-360, 330, 30)]
+        + ["[330,360]"],
+        12,
+    )
+
+
 def test_production_filters_use_their_own_configured_windows():
     source = CONTEXT_NOTEBOOK.read_text()
     assert 'in_window_expr("imv_offset_minutes", IMV_WINDOW_MINUTES)' in source

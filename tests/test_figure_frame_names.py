@@ -11,6 +11,7 @@ def test_figure_dataframe_names_match_figure_ids():
         "code/02_index_paralytic.py": ("figure_a1_df", "figure_b1_df", "figure_c1_df"),
         "code/03_context.py": (
             "figure_d1_df",
+            "figure_d2_df",
             "figure_e1_df",
             "figure_e2_df",
             "figure_e3_df",
@@ -39,6 +40,7 @@ def test_figure_data_and_png_stems_match_in_source():
         },
         "code/03_context.py": {
             "D1": "imv_transition_offset",
+            "D2": "imv_transition_offset_6h",
             "E1": "sedation_offset",
             "E2": "sedation_dose_summary",
             "E3": "sedation_dose_ecdf",

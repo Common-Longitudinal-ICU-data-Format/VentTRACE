@@ -84,7 +84,7 @@ def _(mo):
         Every site-specific value is read from `config/config.json` and nothing is
         hard-coded against this site. `imv_window_minutes` and
         `sedation_window_minutes` independently set D's and E's symmetric windows. The
-        sedative list, MAR actions, and offset bin width are analysis constants rather than
+        sedative list, MAR actions, and offset bin widths are analysis constants rather than
         site parameters, so they live here in the notebook where a reader can see them.
         """
     )
@@ -109,6 +109,8 @@ def _(Path, json):
 
     IMV_WINDOW_MINUTES = float(config["imv_window_minutes"])
     SEDATION_WINDOW_MINUTES = float(config["sedation_window_minutes"])
+    IMV_EXTENDED_WINDOW_MINUTES = 6 * 60
+    IMV_EXTENDED_OFFSET_BIN_WIDTH = 30
 
     # P16. Sedation is a COVARIATE of the index paralytic, not a detector -- the question
     # is whether the paralytic was given as part of an induction or to a patient already
@@ -178,6 +180,8 @@ def _(Path, json):
         DOSE_SUMMARY_UPPER_BOUNDS,
         FIG_DIR,
         FILETYPE,
+        IMV_EXTENDED_OFFSET_BIN_WIDTH,
+        IMV_EXTENDED_WINDOW_MINUTES,
         IMV_WINDOW_MINUTES,
         MAR_ACTIONS,
         MEDICATION_DOSE_UNITS,
@@ -232,6 +236,19 @@ def _(pl):
         return pl.col(column).dt.epoch("s") / 60.0
 
     return (epoch_minutes,)
+
+
+@app.cell
+def _(pl):
+    def offset_minutes_expr(later_column, earlier_column):
+        """Exact signed wall-clock minutes between two site-naive timestamps."""
+        return (
+            (pl.col(later_column) - pl.col(earlier_column))
+            .dt.total_microseconds()
+            / 60_000_000.0
+        )
+
+    return (offset_minutes_expr,)
 
 
 @app.cell
@@ -358,6 +375,62 @@ def _(is_transition_expr, normalize_category_columns, pl):
 
 
 @app.cell
+def _(pl):
+    def nearest_transition_per_index(candidates):
+        """Keep one nearest transition per index; an earlier transition wins a tie."""
+        return (
+            candidates.with_columns(_distance=pl.col("imv_offset_minutes").abs())
+            .sort(
+                ["index_paralytic_id", "_distance", "recorded_dttm"],
+                maintain_order=True,
+            )
+            .unique(subset="index_paralytic_id", keep="first", maintain_order=True)
+            .drop("_distance")
+        )
+
+    return (nearest_transition_per_index,)
+
+
+@app.cell
+def _(in_window_expr, nearest_transition_per_index, pl):
+    def nearest_transition_distribution(
+        candidates, window_minutes, bin_width, bin_labels
+    ):
+        """Select one nearest in-window transition per index and bin raw offsets."""
+        _nearest = nearest_transition_per_index(
+            candidates.filter(
+                in_window_expr("imv_offset_minutes", window_minutes)
+            )
+        )
+        _n_bins = len(bin_labels)
+        _binned = (
+            _nearest.with_columns(
+                _b=(
+                    ((pl.col("imv_offset_minutes") + window_minutes) // bin_width)
+                    .cast(pl.Int32)
+                    .clip(0, _n_bins - 1)
+                )
+            )
+            .group_by("_b")
+            .agg(n=pl.len())
+        )
+        _distribution = (
+            pl.DataFrame(
+                {"_b": list(range(_n_bins)), "offset_bin": bin_labels}
+            )
+            .with_columns(pl.col("_b").cast(pl.Int32))
+            .join(_binned, on="_b", how="left")
+            .with_columns(pl.col("n").fill_null(0))
+            .sort("_b")
+            .rename({"_b": "bin_order"})
+        )
+        assert _distribution.get_column("n").sum() == _nearest.height
+        return _distribution
+
+    return (nearest_transition_distribution,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -450,21 +523,21 @@ def _(
     resp_waterfall,
 ):
     _marked = mark_transitions(resp_waterfall)
-    _transitions = _marked.filter(pl.col("is_transition")).select(
+    imv_transitions = _marked.filter(pl.col("is_transition")).select(
         "encounter_block",
         "recorded_dttm",
         "opens_block",
         prior_device_category="_prev_device",
         _tr_min=epoch_minutes("recorded_dttm"),
     )
-    print(f"transitions on the whole timeline : {_transitions.height:,}")
+    print(f"transitions on the whole timeline : {imv_transitions.height:,}")
 
     _idx = index_paralytic.select(
         "index_paralytic_id", "encounter_block", "t_dttm", _t_min=epoch_minutes("t_dttm")
     )
 
     _candidates = (
-        _idx.join(_transitions, on="encounter_block", how="inner")
+        _idx.join(imv_transitions, on="encounter_block", how="inner")
         .with_columns(imv_offset_minutes=(pl.col("_tr_min") - pl.col("_t_min")).round(3))
         .filter(in_window_expr("imv_offset_minutes", IMV_WINDOW_MINUTES))
     )
@@ -535,7 +608,7 @@ def _(
           f"{context_d.get_column('imv_transition').sum():,} / {context_d.height:,} "
           f"({100 * context_d.get_column('imv_transition').mean():.1f}%)")
     print(context_d.group_by("no_transition_reason").agg(n=pl.len()).sort("n", descending=True))
-    return (context_d,)
+    return context_d, imv_transitions
 
 
 @app.cell
@@ -765,6 +838,64 @@ def _(SHARE_DIR, context_d, pl, publish):
         "step03__imv_transitions_per_window",
     )
     return (transitions_in_window,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### `fig_D2__imv_transition_offset_6h.csv` — nearest transition across six hours
+
+        D.2 is a sensitivity view and does not change D.1, `imv_transition`, or any downstream
+        cohort definition. For each index paralytic it selects the nearest transition on the
+        same waterfalled timeline within an inclusive +/-6-hour window. An exact-distance tie
+        goes to the earlier transition. One index paralytic therefore contributes to at most
+        one 30-minute bin.
+        """
+    )
+    return
+
+
+@app.cell
+def _(
+    IMV_EXTENDED_N_OFFSET_BINS,
+    IMV_EXTENDED_OFFSET_BIN_LABELS,
+    IMV_EXTENDED_OFFSET_BIN_WIDTH,
+    IMV_EXTENDED_WINDOW_MINUTES,
+    SHARE_DIR,
+    imv_transitions,
+    index_paralytic,
+    nearest_transition_distribution,
+    offset_minutes_expr,
+    pl,
+    publish,
+):
+    _candidates = (
+        index_paralytic.select(
+            "index_paralytic_id",
+            "encounter_block",
+            "t_dttm",
+        )
+        .join(imv_transitions, on="encounter_block", how="inner")
+        .with_columns(
+            imv_offset_minutes=offset_minutes_expr(
+                "recorded_dttm", "t_dttm"
+            )
+        )
+    )
+    d2_offset_distribution = nearest_transition_distribution(
+        _candidates,
+        IMV_EXTENDED_WINDOW_MINUTES,
+        IMV_EXTENDED_OFFSET_BIN_WIDTH,
+        IMV_EXTENDED_OFFSET_BIN_LABELS,
+    )
+    assert d2_offset_distribution.height == IMV_EXTENDED_N_OFFSET_BINS
+    publish(
+        d2_offset_distribution,
+        SHARE_DIR / "fig_D2__imv_transition_offset_6h.csv",
+        "fig_D2__imv_transition_offset_6h",
+    )
+    return (d2_offset_distribution,)
 
 
 @app.cell
@@ -1093,17 +1224,23 @@ def _(mo):
         """
         ### Independent offset grids for D and E
 
-        Each configured window gets its own five-minute grid. Bins are left-closed and
-        right-open except the last, which includes the positive boundary. Labels are
-        exported rather than rebuilt inside each figure, so a figure cannot drift from its
-        source table.
+        Each configured D.1/E window gets its own five-minute grid; the fixed D.2 sensitivity
+        view gets a 30-minute grid across +/-6 hours. Bins are left-closed and right-open
+        except the last, which includes the positive boundary. Labels are exported rather
+        than rebuilt inside each figure, so a figure cannot drift from its source table.
         """
     )
     return
 
 
 @app.cell
-def _(IMV_WINDOW_MINUTES, OFFSET_BIN_WIDTH, SEDATION_WINDOW_MINUTES):
+def _(
+    IMV_EXTENDED_OFFSET_BIN_WIDTH,
+    IMV_EXTENDED_WINDOW_MINUTES,
+    IMV_WINDOW_MINUTES,
+    OFFSET_BIN_WIDTH,
+    SEDATION_WINDOW_MINUTES,
+):
     def offset_bin_grid(window_minutes, bin_width):
         """Build a symmetric grid whose final bin includes the positive boundary."""
         _n_bins_float = 2 * window_minutes / bin_width
@@ -1130,7 +1267,17 @@ def _(IMV_WINDOW_MINUTES, OFFSET_BIN_WIDTH, SEDATION_WINDOW_MINUTES):
         SEDATION_OFFSET_BIN_LABELS,
         SEDATION_ZERO_BIN,
     ) = offset_bin_grid(SEDATION_WINDOW_MINUTES, OFFSET_BIN_WIDTH)
+    (
+        IMV_EXTENDED_N_OFFSET_BINS,
+        IMV_EXTENDED_OFFSET_BIN_LABELS,
+        IMV_EXTENDED_ZERO_BIN,
+    ) = offset_bin_grid(
+        IMV_EXTENDED_WINDOW_MINUTES, IMV_EXTENDED_OFFSET_BIN_WIDTH
+    )
     return (
+        IMV_EXTENDED_N_OFFSET_BINS,
+        IMV_EXTENDED_OFFSET_BIN_LABELS,
+        IMV_EXTENDED_ZERO_BIN,
         IMV_N_OFFSET_BINS,
         IMV_OFFSET_BIN_LABELS,
         IMV_ZERO_BIN,
@@ -1744,6 +1891,105 @@ def _(
     plt.close(_fig)
     print(f"fig_D1__imv_transition_offset.png -> {FIG_DIR}")
     return (figure_d1_df,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ### Figure D.2 — nearest non-IMV to IMV transition within six hours
+
+        This wider sensitivity view uses the same transition definition as D.1 but selects
+        the nearest transition in +/-6 hours and displays 30-minute bins. The dashed rule
+        marks the index paralytic; negative offsets mean the transition came first.
+        """
+    )
+    return
+
+
+@app.cell
+def _(
+    FIG_DIR,
+    IMV_EXTENDED_N_OFFSET_BINS,
+    IMV_EXTENDED_OFFSET_BIN_LABELS,
+    IMV_EXTENDED_ZERO_BIN,
+    SHARE_DIR,
+    d2_offset_distribution,
+    mark_zero,
+    pl,
+    plt,
+):
+    _BLUE = "#2a78d6"
+    _INK = "#0b0b0b"
+    _MUTED = "#898781"
+    _GRID = "#e1e0d9"
+
+    figure_d2_df = pl.read_csv(
+        SHARE_DIR / "fig_D2__imv_transition_offset_6h.csv"
+    ).sort("bin_order")
+    assert figure_d2_df.to_dicts() == d2_offset_distribution.to_dicts()
+
+    _fig, _ax = plt.subplots(figsize=(11, 5.4))
+    for _row in figure_d2_df.iter_rows(named=True):
+        if _row["n"] > 0:
+            _ax.bar([_row["bin_order"]], [_row["n"]], width=0.72, color=_BLUE)
+        else:
+            mark_zero(_ax, _row["bin_order"], _BLUE)
+
+    _ax.set_xticks(list(range(IMV_EXTENDED_N_OFFSET_BINS)))
+    _ax.set_xticklabels(
+        IMV_EXTENDED_OFFSET_BIN_LABELS, rotation=90, fontsize=7, color=_MUTED
+    )
+    _ax.set_xlim(-0.8, IMV_EXTENDED_N_OFFSET_BINS - 0.2)
+    _ax.set_ylim(bottom=0)
+    _ax.set_axisbelow(True)
+    _ax.grid(axis="y", color=_GRID, linewidth=0.8)
+    for _side in ("top", "right"):
+        _ax.spines[_side].set_visible(False)
+    _ax.set_xlabel(
+        "minutes from the index paralytic  (negative = the vent transition came first)",
+        color=_INK,
+        labelpad=12,
+    )
+    _ax.set_ylabel("index paralytics", color=_INK)
+
+    _ax.axvline(
+        IMV_EXTENDED_ZERO_BIN - 0.5,
+        color=_INK,
+        linestyle="--",
+        linewidth=1,
+    )
+    _ax.text(
+        IMV_EXTENDED_ZERO_BIN - 0.4,
+        _ax.get_ylim()[1] * 0.96,
+        "t\n(the index paralytic)",
+        fontsize=8,
+        va="top",
+        color=_INK,
+    )
+    _handles = [
+        _ax.plot(
+            [],
+            [],
+            marker="D",
+            markersize=7,
+            color="0.3",
+            linestyle="None",
+            label="published zero (measured, exactly 0)",
+        )[0]
+    ]
+    _ax.legend(handles=_handles, loc="upper right", fontsize=8, framealpha=0.9)
+    _ax.set_title(
+        "D.2 — nearest non-IMV to IMV transition within 6 hours of the index paralytic\n"
+        "one nearest transition per index; 30-minute bins",
+        color=_INK,
+    )
+    _fig.tight_layout()
+    _fig.subplots_adjust(bottom=0.28)
+    _fig.savefig(FIG_DIR / "fig_D2__imv_transition_offset_6h.png", dpi=150)
+    plt.close(_fig)
+    print(f"fig_D2__imv_transition_offset_6h.png -> {FIG_DIR}")
+    return (figure_d2_df,)
 
 
 @app.cell

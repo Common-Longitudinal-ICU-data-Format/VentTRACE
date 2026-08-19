@@ -51,6 +51,15 @@ def frame():
 
 
 @pytest.fixture(scope="module")
+def index_context():
+    phi, _ = _dirs()
+    path = phi / "step03__index_context.parquet"
+    if not path.exists():
+        pytest.skip("step03__index_context.parquet absent; run code/03_context.py first")
+    return pl.read_parquet(path)
+
+
+@pytest.fixture(scope="module")
 def index_per_block():
     _, share = _dirs()
     path = share / "step02__index_paralytics_per_block.csv"
@@ -221,6 +230,33 @@ def test_full_block_artifacts_and_valid_table1_denominators(
     assert _t1_block_n_rows == _valid.get_column("encounter_block").n_unique(), (
         f"table1_by_agent_block.json reports n_rows={_t1_block_n_rows} but "
         "the valid-index frame has a different number of encounter blocks"
+    )
+
+
+def test_table1_imv_eligibility_remains_in_primary_sixty_minute_window(
+    frame, index_context
+):
+    with open(CONFIG) as file:
+        imv_window_minutes = float(json.load(file)["imv_window_minutes"])
+    assert imv_window_minutes == 60.0
+
+    valid_offsets = (
+        frame.filter(pl.col("imv_transition") & pl.col("any_sedative"))
+        .select("index_paralytic_id")
+        .join(
+            index_context.select("index_paralytic_id", "imv_offset_minutes"),
+            on="index_paralytic_id",
+            how="left",
+            validate="1:1",
+        )
+    )
+    outside_primary_window = valid_offsets.filter(
+        pl.col("imv_offset_minutes").is_null()
+        | (pl.col("imv_offset_minutes").abs() > imv_window_minutes)
+    )
+    assert outside_primary_window.height == 0, (
+        "Table 1 eligibility includes an IMV transition from the +/-6-hour D.2 "
+        "sensitivity view rather than the primary +/-60-minute detector"
     )
 
 

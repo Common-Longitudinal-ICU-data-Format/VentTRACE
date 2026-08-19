@@ -63,7 +63,7 @@ machinery at all — there is nothing to agree with, because there is exactly on
 ┌───────▼──────────────────────────────────────────────────────────┐
 │ 03_context.py           WHAT SURROUNDS IT                        │
 │                                                                  │
-│  D  first non-IMV → IMV transition in t ± 60 min (configured)    │
+│  D  first transition in ±60 min; nearest in ±6 h sensitivity     │
 │  E  sedatives charted in t ± 5 min (configured), with dose       │
 └───────┬──────────────────────────────────────────────────────────┘
         │  step03__index_context.parquet
@@ -337,6 +337,11 @@ inference reaches the chart before a human fills in the device field in a high-s
 an intubation. This detects an **event**, not a **state**: "was IMV charted in ±60 min" is
 satisfied by a patient who has been ventilated for a week and reports nothing about this
 paralytic. A transition reports that the device actually changed.
+
+Figure D.2 is an additive sensitivity view. It applies the same transition definition across an
+inclusive ±6-hour window, selects one nearest transition per index paralytic (earlier wins an
+exact-distance tie), and plots 30-minute bins. It does not alter D.1, `imv_transition`, or any
+downstream cohort definition.
 
 At this site, of 2,117 index paralytics:
 

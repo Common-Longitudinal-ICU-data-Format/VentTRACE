@@ -27,7 +27,7 @@ output/intermediate_phi/*
 
 output/*
 ouput_mimic/*
-output_bkp/*
+output_rush/*
 
 # site-specific config (create from config_template.json)
 config/config.json

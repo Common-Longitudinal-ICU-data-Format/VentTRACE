@@ -52,6 +52,7 @@ def _load_from_notebook(name, namespace=None):
 
 
 is_transition_expr = _load_from_notebook("is_transition_expr", {"pl": pl})
+offset_minutes_expr = _load_from_notebook("offset_minutes_expr", {"pl": pl})
 normalize_category_columns = _load_from_notebook(
     "normalize_category_columns", {"pl": pl}
 )
@@ -63,7 +64,18 @@ mark_transitions = _load_from_notebook(
         "normalize_category_columns": normalize_category_columns,
     },
 )
+nearest_transition_per_index = _load_from_notebook(
+    "nearest_transition_per_index", {"pl": pl}
+)
 in_window_expr = _load_from_notebook("in_window_expr", {"pl": pl})
+nearest_transition_distribution = _load_from_notebook(
+    "nearest_transition_distribution",
+    {
+        "in_window_expr": in_window_expr,
+        "nearest_transition_per_index": nearest_transition_per_index,
+        "pl": pl,
+    },
+)
 
 BASE = datetime.datetime(2024, 3, 1, 12, 0)
 
@@ -144,6 +156,73 @@ def test_rows_are_ordered_within_the_block_before_shifting():
     shuffled = _waterfall([(1, 2, "imv"), (1, 0, "nasal cannula"), (1, 1, "nasal cannula")])
     marked = mark_transitions(shuffled).sort(["encounter_block", "recorded_dttm"])
     assert marked.get_column("is_transition").to_list() == [False, False, True]
+
+
+def test_nearest_transition_is_one_per_index_and_earlier_wins_a_tie():
+    candidates = pl.DataFrame(
+        {
+            "index_paralytic_id": ["P1", "P1", "P2", "P2"],
+            "recorded_dttm": [
+                BASE - datetime.timedelta(minutes=10),
+                BASE + datetime.timedelta(minutes=10),
+                BASE + datetime.timedelta(minutes=15),
+                BASE + datetime.timedelta(minutes=5),
+            ],
+            "imv_offset_minutes": [-10.0, 10.0, 15.0, 5.0],
+        }
+    )
+
+    selected = nearest_transition_per_index(candidates).sort("index_paralytic_id")
+
+    assert selected.get_column("index_paralytic_id").to_list() == ["P1", "P2"]
+    assert selected.get_column("imv_offset_minutes").to_list() == [-10.0, 5.0]
+
+
+def test_extended_distribution_uses_raw_inclusive_boundaries_and_bins():
+    candidates = pl.DataFrame(
+        {
+            "index_paralytic_id": [
+                "left",
+                "left_out",
+                "pre_zero",
+                "post_zero",
+                "right",
+                "right_out",
+            ],
+            "recorded_dttm": [BASE] * 6,
+            "imv_offset_minutes": [-360.0, -360.001, -0.001, 0.0, 360.0, 360.001],
+        }
+    )
+    labels = [f"[{start},{start + 30})" for start in range(-360, 330, 30)] + [
+        "[330,360]"
+    ]
+
+    distribution = nearest_transition_distribution(candidates, 360.0, 30, labels)
+
+    assert distribution.get_column("n").sum() == 4
+    assert distribution.filter(pl.col("offset_bin") == "[-360,-330)").item(0, "n") == 1
+    assert distribution.filter(pl.col("offset_bin") == "[-30,0)").item(0, "n") == 1
+    assert distribution.filter(pl.col("offset_bin") == "[0,30)").item(0, "n") == 1
+    assert distribution.filter(pl.col("offset_bin") == "[330,360]").item(0, "n") == 1
+
+
+def test_exact_timestamp_offsets_make_symmetric_tie_choose_earlier():
+    delta = datetime.timedelta(minutes=194, seconds=3, microseconds=49_740)
+    candidates = pl.DataFrame(
+        {
+            "index_paralytic_id": ["P1", "P1"],
+            "t_dttm": [BASE, BASE],
+            "recorded_dttm": [BASE - delta, BASE + delta],
+        }
+    ).with_columns(
+        imv_offset_minutes=offset_minutes_expr("recorded_dttm", "t_dttm")
+    )
+
+    offsets = candidates.get_column("imv_offset_minutes").to_list()
+    selected = nearest_transition_per_index(candidates)
+
+    assert abs(offsets[0]) == abs(offsets[1])
+    assert selected.item(0, "imv_offset_minutes") < 0
 
 
 # ------------------------------------------------------- the inclusive window predicate
