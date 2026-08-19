@@ -56,6 +56,7 @@ machinery at all — there is nothing to agree with, because there is exactly on
 │                                                                  │
 │  A  gap distribution across every pair of raw administrations    │
 │  B  anchor-and-close at 15 min   →  2,117 INDEX PARALYTICS       │
+│     exclude anchors in ADT procedural locations                   │
 │  C  gap distribution between index paralytics                    │
 └───────┬──────────────────────────────────────────────────────────┘
         │  step02__index_paralytic.parquet — one row per index paralytic
@@ -101,8 +102,8 @@ machinery at all — there is nothing to agree with, because there is exactly on
 
 Six notebooks and one artifact-audit step run in order. Each analysis notebook is named for the CLIF table it opens rather than for a step
 number that would drift as the design changes. `01` touches `hospitalization`, `adt` and
-`respiratory_support`. `02` touches exactly one table —
-`medication_admin_intermittent`, filtered to the three paralytics. `03` touches the waterfalled
+`respiratory_support`. `02` touches `medication_admin_intermittent`, filtered to the three
+paralytics, and `adt` for formed-index anchor locations. `03` touches the waterfalled
 device timeline from `01` and `medication_admin_intermittent` again, filtered to five sedatives.
 `04` is the sole owner of the study's analytic row — one row per index paralytic — and is the
 only notebook that opens `patient`, `vitals`, `medication_admin_continuous`, `crrt_therapy`
@@ -248,9 +249,9 @@ succinylcholine, vecuronium}`, `mar_action_category == given`, the medication's 
 unit, and its configured strict dose eligibility range. Rows that fail any of those criteria do
 not form index events.
 
-The bridge from `hospitalization_id` to `encounter_block` is the one place this notebook is
-allowed to name a hospitalization; the column is dropped the moment the join lands, so a
-paralytic charted in the ED cannot fail to pair with one charted on the floor after transfer.
+The bridge maps both medication rows and ADT intervals from `hospitalization_id` to
+`encounter_block`. The raw identifier is dropped before folding, so a paralytic charted in the ED
+cannot fail to pair with one charted on the floor after transfer.
 
 ### A — the paralytic administration gap distribution
 
@@ -295,6 +296,15 @@ folding *more than one agent* together — does not occur at this site: `agent_l
 `step02__index_paralytic_summary.csv` carries only single-agent labels, zero of them cross-agent. What
 is not rare is the same-agent **redose**: 42 of 2,117 index paralytics (2.0%) fold more than one
 *administration* of the same agent together (`n_coadmin` in `step02__index_paralytic_summary.csv`).
+
+After formation, each index anchor is attributed to the ADT interval satisfying
+`in_dttm <= t_dttm < out_dttm`; null `out_dttm` is open-ended. Overlaps resolve by earliest
+`in_dttm`, then normalized `location_category`, then `hospital_id`. Indexes resolving to exact
+normalized category `procedural` are excluded; indexes with no covering interval are retained as
+`unknown`. Remaining events are renumbered from 1 within each block. Figure A.1 remains based on
+all qualifying administrations because it is evidence for the fold, while Figure C.1 and every
+downstream artifact use retained indexes. `step02__procedural_index_exclusion_summary.csv`
+reconciles formed, excluded, and retained populations.
 
 Two facts are the design working, made visible in the published output rather than merely
 asserted:
@@ -535,6 +545,11 @@ Things that have already bitten this codebase once.
 **The clifpy timezone boundary.** `from_file(..., timezone=TIMEZONE)` normalizes naive,
 UTC-aware, and other aware inputs to the configured site timezone. Downstream code must not
 repeat that conversion. It removes the timezone while preserving clifpy's site-local wall clock:
+
+Every raw `data_directory/clif_*` source, including the five inputs staged for SOFA in step 04,
+crosses this boundary before application-level normalization, joining, or analysis. Projection
+and category/identifier filters passed to clifpy remain IO pushdown. Pipeline-generated cache,
+intermediate, staged, and published files are not raw CLIF sources and continue to use Polars IO.
 
 ```python
 def to_site_naive(series):

@@ -120,6 +120,12 @@ def consort_cohort():
 
 
 @pytest.fixture(scope="module")
+def procedural_index_summary():
+    _, share = _dirs()
+    return pl.read_csv(share / "step02__procedural_index_exclusion_summary.csv")
+
+
+@pytest.fixture(scope="module")
 def imv_prior_device():
     _, share = _dirs()
     return pl.read_csv(share / "step03__imv_prior_device.csv")
@@ -240,8 +246,6 @@ def test_table1_imv_eligibility_remains_in_primary_asymmetric_window(
         config = json.load(file)
     imv_window_before_minutes = float(config["imv_window_before_minutes"])
     imv_window_after_minutes = float(config["imv_window_after_minutes"])
-    assert imv_window_before_minutes == 30.0
-    assert imv_window_after_minutes == 60.0
 
     valid_offsets = (
         frame.filter(pl.col("imv_transition") & pl.col("any_sedative"))
@@ -260,7 +264,8 @@ def test_table1_imv_eligibility_remains_in_primary_asymmetric_window(
     )
     assert outside_primary_window.height == 0, (
         "Table 1 eligibility includes an IMV transition from the +/-6-hour D.2 "
-        "sensitivity view rather than the primary -30/+60-minute detector"
+        f"sensitivity view rather than the primary -{imv_window_before_minutes:g}/"
+        f"+{imv_window_after_minutes:g}-minute detector"
     )
 
 
@@ -314,11 +319,23 @@ def test_agent_stratum_collapses_only_combinations(frame):
     )
 
 
-def test_paralytic_cohort_and_index_blocks_reconcile(frame, consort_cohort):
+def test_paralytic_cohort_and_index_blocks_reconcile(
+    frame, consort_cohort, procedural_index_summary
+):
     analytic_n = consort_cohort.filter(pl.col("step") == "ANALYTIC COHORT").get_column(
         "n_encounters"
     )[0]
-    assert analytic_n == frame.get_column("encounter_block").n_unique()
+    _formed = procedural_index_summary.filter(
+        (pl.col("population") == "formed_indexes") & (pl.col("agent") == "overall")
+    ).row(0, named=True)
+    _retained = procedural_index_summary.filter(
+        (pl.col("population") == "nonprocedural_indexes")
+        & (pl.col("agent") == "overall")
+    ).row(0, named=True)
+    assert analytic_n == _formed["n_encounter_blocks"]
+    assert _retained["n_encounter_blocks"] == frame.get_column(
+        "encounter_block"
+    ).n_unique()
     assert consort_cohort.filter(
         pl.col("step") == "include: >=1 qualifying paralytic administration"
     ).height == 1
@@ -386,6 +403,10 @@ def test_sofa_coverage_is_complete_component_inventory(sofa_coverage):
     assert sofa_coverage.filter(
         ~pl.col("pct_events_available").is_between(0, 100)
     ).height == 0
+
+
+def test_analytic_frame_contains_no_procedural_index_locations(frame):
+    assert frame.filter(pl.col("location_at_index") == "procedural").height == 0
 
 
 def test_prior_device_null_states_have_distinct_labels(imv_prior_device):

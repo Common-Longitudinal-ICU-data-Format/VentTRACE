@@ -150,7 +150,9 @@ def _(Path, json):
 
 @app.cell
 def _(pl):
-    def build_main_consort(index_covariates, administration_summary, strata, site_name):
+    def build_main_consort(
+        index_covariates, administration_summary, procedural_summary, strata, site_name
+    ):
         """Build the main analysis flow without reimplementing any eligibility rule."""
         _required = {
             "index_paralytic_id",
@@ -171,12 +173,41 @@ def _(pl):
             | (pl.col("n_admins") != pl.col("n_agents"))
         ).height == 0, "administration lineage is inconsistent with the formed-index merge"
 
-        _source_total = int(index_covariates.get_column("n_before_merge_admin").sum())
-        assert administration_summary.get_column("n_administrations").sum() == _source_total, (
-            "step02 administration summary does not reconcile to source administrations "
-            "carried by the analytic index frame"
-        )
+        _expected_populations = {
+            "formed_indexes",
+            "procedural_exclusions",
+            "nonprocedural_indexes",
+        }
+        assert set(procedural_summary.get_column("population")) == _expected_populations
 
+        def _summary_counts(population, agent="overall"):
+            _row = procedural_summary.filter(
+                (pl.col("population") == population) & (pl.col("agent") == agent)
+            )
+            if _row.height == 0:
+                return {
+                    "n_source_administrations": 0,
+                    "n_postmerge_med_entries": 0,
+                    "n_indexes": 0,
+                    "n_encounter_blocks": 0,
+                }
+            assert _row.height == 1, (population, agent)
+            return {
+                _column: int(_row.item(0, _column))
+                for _column in [
+                    "n_source_administrations",
+                    "n_postmerge_med_entries",
+                    "n_indexes",
+                    "n_encounter_blocks",
+                ]
+            }
+
+        _formed_counts = _summary_counts("formed_indexes")
+        _retained_counts = _summary_counts("nonprocedural_indexes")
+        _excluded_procedural_counts = _summary_counts("procedural_exclusions")
+        assert administration_summary.get_column("n_administrations").sum() == (
+            _formed_counts["n_source_administrations"]
+        ), "step02 administration summary does not reconcile to all formed indexes"
         _imv = index_covariates.filter(pl.col("imv_transition"))
         _valid = _imv.filter(pl.col("any_sedative"))
         _block = (
@@ -195,42 +226,63 @@ def _(pl):
                 "n_encounter_blocks": frame.get_column("encounter_block").n_unique(),
             }
 
+        assert _retained_counts == _counts(index_covariates), (
+            "step02 nonprocedural summary does not reconcile to the analytic index frame"
+        )
+
         _stages = [
             (
                 "qualifying_administrations",
                 "All qualifying paralytic administrations",
-                index_covariates,
+                None,
+                "formed_indexes",
             ),
             (
                 "formed_indexes",
                 "Indexes formed: 15-minute fold, then same-agent merge",
+                None,
+                "formed_indexes",
+            ),
+            (
+                "nonprocedural_indexes",
+                "Indexes retained after procedural-location exclusion",
                 index_covariates,
+                None,
             ),
             (
                 "imv_transition",
                 "Indexes with an eligible IMV transition",
                 _imv,
+                None,
             ),
             (
                 "table1_index",
                 "Table 1 index cohort: IMV transition plus sedation",
                 _valid,
+                None,
             ),
             (
                 "table1_block",
                 "Table 1 block cohort: first valid index per block",
                 _block,
+                None,
             ),
         ]
         _rows = []
         _agent_order = ["overall", *strata]
-        for _stage_order, (_stage, _label, _frame) in enumerate(_stages, start=1):
+        for _stage_order, (_stage, _label, _frame, _summary_population) in enumerate(
+            _stages, start=1
+        ):
             for _agent_order_i, _agent in enumerate(_agent_order):
-                _sub = (
-                    _frame
-                    if _agent == "overall"
-                    else _frame.filter(pl.col("agent_stratum") == _agent)
-                )
+                if _summary_population is not None:
+                    _stage_counts = _summary_counts(_summary_population, _agent)
+                else:
+                    _sub = (
+                        _frame
+                        if _agent == "overall"
+                        else _frame.filter(pl.col("agent_stratum") == _agent)
+                    )
+                    _stage_counts = _counts(_sub)
                 _row = {
                     "row_order": 100 * _stage_order + _agent_order_i,
                     "row_type": "population",
@@ -239,7 +291,7 @@ def _(pl):
                     "agent": _agent,
                     "label": _label,
                     "reason": None,
-                    **_counts(_sub),
+                    **_stage_counts,
                     "n_blocks_removed": None,
                     "block_count_semantics": "blocks represented by this population",
                     "site_name": site_name,
@@ -294,10 +346,31 @@ def _(pl):
                 "site_name": site_name,
             }
 
+        _rows.append(
+            {
+                "row_order": 290,
+                "row_type": "exclusion",
+                "stage": "nonprocedural_indexes",
+                "agent_view": "overall",
+                "agent": "overall",
+                "label": "Excluded at procedural-location gate",
+                "reason": "ADT location_category at index anchor is procedural",
+                **_excluded_procedural_counts,
+                "n_blocks_removed": (
+                    _formed_counts["n_encounter_blocks"]
+                    - _retained_counts["n_encounter_blocks"]
+                ),
+                "block_count_semantics": (
+                    "blocks removed because no nonprocedural index remains"
+                ),
+                "site_name": site_name,
+            }
+        )
+
         _no_imv = index_covariates.filter(~pl.col("imv_transition"))
         _rows.append(
             _exclusion_row(
-                290,
+                390,
                 "imv_transition",
                 "Excluded at IMV-transition gate",
                 "No eligible IMV transition",
@@ -311,7 +384,7 @@ def _(pl):
         ):
             _rows.append(
                 _exclusion_row(
-                    291 + _i,
+                    391 + _i,
                     "imv_transition",
                     "IMV-transition exclusion detail",
                     _reason,
@@ -324,7 +397,7 @@ def _(pl):
         _no_sedation = _imv.filter(~pl.col("any_sedative"))
         _rows.append(
             _exclusion_row(
-                390,
+                490,
                 "table1_index",
                 "Excluded at sedation gate",
                 "No qualifying sedative within the configured window",
@@ -341,7 +414,7 @@ def _(pl):
         )
         _rows.append(
             _exclusion_row(
-                490,
+                590,
                 "table1_block",
                 "Not selected for block-level Table 1",
                 "Additional valid index; block represented by its first valid index",
@@ -361,6 +434,9 @@ def _(pl):
             "n_postmerge_med_entries",
             "n_indexes",
         ]:
+            assert _formed_counts[_column] == (
+                _retained_counts[_column] + _excluded_procedural_counts[_column]
+            )
             assert _counts(index_covariates)[_column] == (
                 _counts(_imv)[_column] + _counts(_no_imv)[_column]
             )
@@ -1099,9 +1175,13 @@ def _(
     _administration_summary = pl.read_csv(
         SHARE_DIR / "step02__paralytic_administration_summary.csv"
     )
+    _procedural_summary = pl.read_csv(
+        SHARE_DIR / "step02__procedural_index_exclusion_summary.csv"
+    )
     figure_1_df = build_main_consort(
         index_covariates,
         _administration_summary,
+        _procedural_summary,
         STRATA,
         SITE,
     )
@@ -1130,6 +1210,7 @@ def _(
     _stage_ids = [
         "qualifying_administrations",
         "formed_indexes",
+        "nonprocedural_indexes",
         "imv_transition",
         "table1_index",
         "table1_block",
@@ -1141,6 +1222,7 @@ def _(
     _titles = {
         "qualifying_administrations": "Qualifying paralytic\nadministrations",
         "formed_indexes": "Formed indexes\n15-minute rule",
+        "nonprocedural_indexes": "Nonprocedural indexes\nADT at anchor",
         "imv_transition": (
             f"IMV transition\n-{IMV_WINDOW_BEFORE_MINUTES:g}/+"
             f"{IMV_WINDOW_AFTER_MINUTES:g} min"
@@ -1162,8 +1244,15 @@ def _(
         y=0.985,
     )
 
-    _x_positions = [0.10, 0.30, 0.50, 0.70, 0.90]
-    _box_colors = ["#e8eef5", "#d8e7f2", "#d9eadf", "#f0e5c9", "#ead9c8"]
+    _x_positions = [0.06, 0.235, 0.41, 0.585, 0.76, 0.935]
+    _box_colors = [
+        "#e8eef5",
+        "#d8e7f2",
+        "#dce8e0",
+        "#d9eadf",
+        "#f0e5c9",
+        "#ead9c8",
+    ]
     for _i, (_stage, _x, _color) in enumerate(
         zip(_stage_ids, _x_positions, _box_colors, strict=True)
     ):
@@ -1193,8 +1282,8 @@ def _(
         if _i:
             _ax.annotate(
                 "",
-                xy=(_x - 0.09, 0.72),
-                xytext=(_x_positions[_i - 1] + 0.09, 0.72),
+                xy=(_x - 0.075, 0.72),
+                xytext=(_x_positions[_i - 1] + 0.075, 0.72),
                 arrowprops={"arrowstyle": "->", "color": "#30475e", "lw": 1.8},
             )
 
@@ -1203,7 +1292,7 @@ def _(
         _formed["n_source_administrations"] - _formed["n_postmerge_med_entries"]
     )
     _ax.text(
-        0.20,
+        0.1475,
         0.50,
         "Index construction (not an exclusion)\n"
         f"{_fmt(_merged_reduction)} repeated same-agent\nentries merged\n"
@@ -1212,6 +1301,21 @@ def _(
         va="center",
         fontsize=8.8,
         bbox={"boxstyle": "round,pad=0.5", "facecolor": "#f5f7f9", "edgecolor": "#8a99a8"},
+    )
+
+    _procedural_excluded = _record("nonprocedural_indexes", "exclusion")
+    _ax.text(
+        0.3225,
+        0.49,
+        "Excluded at location gate\n"
+        f"Administrations: {_fmt(_procedural_excluded['n_source_administrations'])}\n"
+        f"Indexes: {_fmt(_procedural_excluded['n_indexes'])}\n"
+        f"{_fmt(_procedural_excluded['n_blocks_removed'])} blocks removed\n"
+        "ADT category procedural at anchor",
+        ha="center",
+        va="center",
+        fontsize=8.3,
+        bbox={"boxstyle": "round,pad=0.5", "facecolor": "#f5dddd", "edgecolor": "#a85d5d"},
     )
 
     _imv_excluded = _record("imv_transition", "exclusion")
@@ -1229,7 +1333,7 @@ def _(
         for _row in _imv_details.iter_rows(named=True)
     ]
     _ax.text(
-        0.40,
+        0.4975,
         0.47,
         "Excluded at IMV gate\n"
         f"Administrations: {_fmt(_imv_excluded['n_source_administrations'])}\n"
@@ -1244,7 +1348,7 @@ def _(
 
     _sed_excluded = _record("table1_index", "exclusion")
     _ax.text(
-        0.60,
+        0.6725,
         0.49,
         "Excluded at sedation gate\n"
         f"Administrations: {_fmt(_sed_excluded['n_source_administrations'])}\n"
@@ -1259,7 +1363,7 @@ def _(
 
     _block_excluded = _record("table1_block", "exclusion")
     _ax.text(
-        0.80,
+        0.8475,
         0.50,
         "Block-level representation\n"
         f"{_fmt(_block_excluded['n_indexes'])} additional valid indexes\nnot selected\n"
@@ -1271,10 +1375,11 @@ def _(
     )
 
     for _x, _end_y, _style in [
-        (0.20, 0.565, "dotted"),
-        (0.40, 0.565, "solid"),
-        (0.60, 0.565, "solid"),
-        (0.80, 0.565, "dotted"),
+        (0.1475, 0.565, "dotted"),
+        (0.3225, 0.565, "solid"),
+        (0.4975, 0.565, "solid"),
+        (0.6725, 0.565, "solid"),
+        (0.8475, 0.565, "dotted"),
     ]:
         _ax.annotate(
             "",
@@ -1302,6 +1407,7 @@ def _(
                 _fmt(_by_stage["qualifying_administrations"]["n_source_administrations"]),
                 _fmt(_by_stage["formed_indexes"]["n_postmerge_med_entries"]),
                 _fmt(_by_stage["formed_indexes"]["n_indexes"]),
+                _fmt(_by_stage["nonprocedural_indexes"]["n_indexes"]),
                 _fmt(_by_stage["imv_transition"]["n_indexes"]),
                 _fmt(_by_stage["table1_index"]["n_indexes"]),
                 _fmt(_by_stage["table1_block"]["n_indexes"]),
@@ -1322,16 +1428,17 @@ def _(
             "Source admins",
             "Post-merge entries",
             "Formed indexes",
+            "Nonprocedural",
             "IMV indexes",
             "Table 1 indexes",
             "Table 1 blocks",
         ],
         cellLoc="center",
         colLoc="center",
-        bbox=[0.04, 0.075, 0.92, 0.235],
+        bbox=[0.02, 0.075, 0.96, 0.235],
     )
     _table.auto_set_font_size(False)
-    _table.set_fontsize(8.5)
+    _table.set_fontsize(7.8)
     for (_row_i, _col_i), _cell in _table.get_celld().items():
         _cell.set_edgecolor("#c7c7c7")
         if _row_i == 0:

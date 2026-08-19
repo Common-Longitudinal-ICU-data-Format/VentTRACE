@@ -20,8 +20,11 @@ def _():
         CrrtTherapy,
         HospitalDiagnosis,
         Hospitalization,
+        Labs,
         MedicationAdminContinuous,
         Patient,
+        PatientAssessments,
+        RespiratorySupport,
         Vitals,
     )
 
@@ -35,9 +38,12 @@ def _():
         CrrtTherapy,
         HospitalDiagnosis,
         Hospitalization,
+        Labs,
         MedicationAdminContinuous,
         Patient,
+        PatientAssessments,
         Path,
+        RespiratorySupport,
         TemporaryDirectory,
         Vitals,
         calculate_cci,
@@ -50,7 +56,15 @@ def _():
 
 
 @app.cell
-def _(Path, pl):
+def _(
+    Labs,
+    MedicationAdminContinuous,
+    PatientAssessments,
+    Path,
+    RespiratorySupport,
+    Vitals,
+    pl,
+):
     def normalize_category_columns(df, *columns):
         """Canonicalize source categories once before matching or grouping."""
         return df.with_columns(
@@ -76,13 +90,29 @@ def _(Path, pl):
             )
         )
 
-    def prepare_sofa_inputs(data_directory, filetype, destination, hospitalization_ids):
+    def source_category_variants(categories):
+        """Enumerate supported raw spellings for exact clifpy filter pushdown."""
+        aliases = {
+            "heart_rate": ["heartrate", "HeartRate", "heartRate"],
+            "spo2": ["spo₂", "SpO2", "spO2", "SpO₂"],
+            "weight_kg": ["weightkg", "WeightKg", "weightKg"],
+        }
+        variants = set()
+        for category in categories:
+            for value in [category, *aliases.get(category, [])]:
+                variants.update([value, value.upper(), value.title(), value.capitalize()])
+        return sorted(variants)
+
+    def prepare_sofa_inputs(
+        data_directory, filetype, timezone, destination, hospitalization_ids
+    ):
         """Stage cohort-scoped CLIF inputs with categories clifpy can match safely."""
         destination = Path(destination)
         destination.mkdir(parents=True, exist_ok=True)
         hospitalization_ids = [str(value) for value in hospitalization_ids]
         table_specs = {
             "labs": (
+                Labs,
                 [
                     "hospitalization_id",
                     "lab_result_dttm",
@@ -94,11 +124,13 @@ def _(Path, pl):
                 ["creatinine", "platelet_count", "po2_arterial", "bilirubin_total"],
             ),
             "vitals": (
+                Vitals,
                 ["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"],
                 "vital_category",
                 ["map", "spo2", "weight_kg"],
             ),
             "patient_assessments": (
+                PatientAssessments,
                 [
                     "hospitalization_id",
                     "recorded_dttm",
@@ -110,6 +142,7 @@ def _(Path, pl):
                 ["gcs_total"],
             ),
             "respiratory_support": (
+                RespiratorySupport,
                 [
                     "hospitalization_id",
                     "recorded_dttm",
@@ -124,6 +157,7 @@ def _(Path, pl):
                 None,
             ),
             "medication_admin_continuous": (
+                MedicationAdminContinuous,
                 [
                     "hospitalization_id",
                     "admin_dttm",
@@ -147,20 +181,22 @@ def _(Path, pl):
             "room air": "Room Air",
         }
 
-        for table_name, (columns, category_col, categories) in table_specs.items():
-            source = Path(data_directory) / f"clif_{table_name}.{filetype}"
-            if not source.exists():
+        for table_name, (loader, columns, category_col, categories) in table_specs.items():
+            filters = {"hospitalization_id": hospitalization_ids}
+            if category_col is not None:
+                filters[category_col] = source_category_variants(categories)
+            try:
+                table = loader.from_file(
+                    data_directory=data_directory,
+                    filetype=filetype,
+                    timezone=timezone,
+                    columns=columns,
+                    filters=filters,
+                )
+            except FileNotFoundError:
                 continue
-            if filetype == "parquet":
-                frame = pl.scan_parquet(source)
-            elif filetype == "csv":
-                frame = pl.scan_csv(source)
-            else:
-                raise ValueError(f"unsupported CLIF filetype: {filetype}")
-            frame = (
-                frame.select(columns)
-                .with_columns(pl.col("hospitalization_id").cast(pl.String))
-                .filter(pl.col("hospitalization_id").is_in(hospitalization_ids))
+            frame = pl.from_pandas(table.df).with_columns(
+                pl.col("hospitalization_id").cast(pl.String)
             )
 
             if table_name == "vitals":
@@ -174,9 +210,14 @@ def _(Path, pl):
 
             if categories is not None:
                 frame = frame.filter(pl.col(category_col).is_in(categories))
-            frame.sink_parquet(destination / f"clif_{table_name}.parquet")
+            frame.write_parquet(destination / f"clif_{table_name}.parquet")
 
-    return normalize_category_columns, normalize_vital_category, prepare_sofa_inputs
+    return (
+        normalize_category_columns,
+        normalize_vital_category,
+        prepare_sofa_inputs,
+        source_category_variants,
+    )
 
 
 @app.cell
@@ -971,6 +1012,13 @@ def _(ICU_TYPES, adt, block_outcomes, hospitalization, patient, pl, spine):
     )
 
     assert spine_resolved.height == spine.height, "attribute resolution changed the row count"
+    _procedural_at_index = spine_resolved.filter(
+        pl.col("location_at_index") == "procedural"
+    )
+    assert _procedural_at_index.height == 0, (
+        f"{_procedural_at_index.height:,} retained indexes resolve to a procedural ADT "
+        "location; step02's anchor-location exclusion and step04 attribution disagree"
+    )
 
     _unresolved = spine_resolved.get_column("hospitalization_id").null_count()
     print(f"events resolved            : {spine_resolved.height:,}")
@@ -1272,6 +1320,7 @@ def _(
     normalize_vital_category,
     pl,
     select_dose_weights,
+    source_category_variants,
     spine_resolved,
     to_site_naive,
 ):
@@ -1283,7 +1332,10 @@ def _(
         filetype=FILETYPE,
         timezone=TIMEZONE,
         columns=["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"],
-        filters={"hospitalization_id": _all_hosp_ids},
+        filters={
+            "hospitalization_id": _all_hosp_ids,
+            "vital_category": source_category_variants(["weight_kg"]),
+        },
     )
     if _weight_pd is None:
         dose_weight_rows = None
@@ -1824,6 +1876,7 @@ def _(
         prepare_sofa_inputs(
             DATA_DIR,
             FILETYPE,
+            TIMEZONE,
             _sofa_dir,
             _sofa_cohort.get_column("hospitalization_id").unique().to_list(),
         )

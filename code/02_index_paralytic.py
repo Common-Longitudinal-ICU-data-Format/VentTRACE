@@ -12,7 +12,7 @@ def _():
 
     import polars as pl
 
-    from clifpy.tables import MedicationAdminIntermittent
+    from clifpy.tables import Adt, MedicationAdminIntermittent
 
     import marimo as mo
 
@@ -20,6 +20,7 @@ def _():
     from utils.suppress import publish
 
     return (
+        Adt,
         MedicationAdminIntermittent,
         Path,
         json,
@@ -57,13 +58,14 @@ def _(mo):
         rocuronium | succinylcholine | vecuronium
         ```
 
-        The paralytic is the study's index event. This notebook does three things and
-        touches exactly one CLIF table while doing them:
+        The paralytic is the study's index event. This notebook uses intermittent medication
+        administrations plus ADT to do four things:
 
         | | |
         |---|---|
         | **A** | the distribution of gaps between paralytic administrations |
         | **B** | the 15-minute fold that turns administrations into **index paralytics** |
+        | **B.1** | exclusion of formed indexes whose anchor is in a procedural location |
         | **C** | the distribution of gaps between index paralytics |
 
         A is published **before** B and depends on nothing B computes, so it reads as
@@ -195,6 +197,65 @@ def _(pl):
 
 
 @app.cell
+def _(pl):
+    def resolve_index_locations(indexes, adt):
+        """Resolve the ADT location covering each index anchor time."""
+        _matches = (
+            indexes.select("index_paralytic_id", "encounter_block", "t_dttm")
+            .join(adt, on="encounter_block", how="left")
+            .filter(
+                (pl.col("t_dttm") >= pl.col("in_dttm"))
+                & (
+                    pl.col("out_dttm").is_null()
+                    | (pl.col("t_dttm") < pl.col("out_dttm"))
+                )
+            )
+            .sort(
+                [
+                    "index_paralytic_id",
+                    "in_dttm",
+                    "location_category",
+                    "hospital_id",
+                ]
+            )
+            .group_by("index_paralytic_id", maintain_order=True)
+            .first()
+            .select(
+                "index_paralytic_id",
+                pl.col("location_category").alias("_location_category_at_index"),
+            )
+        )
+        return indexes.join(
+            _matches, on="index_paralytic_id", how="left", validate="1:1"
+        ).with_columns(
+            pl.col("_location_category_at_index").fill_null("unknown")
+        )
+
+    def retain_nonprocedural_indexes(indexes):
+        """Drop procedural anchors and restore the contiguous downstream index key."""
+        return (
+            indexes.filter(pl.col("_location_category_at_index") != "procedural")
+            .sort(["encounter_block", "p_num"])
+            .drop("index_paralytic_id", "p_num", "_location_category_at_index")
+            .with_columns(
+                p_num=pl.col("t_dttm")
+                .cum_count()
+                .over("encounter_block")
+                .cast(pl.Int32)
+            )
+            .with_columns(
+                index_paralytic_id=pl.concat_str(
+                    pl.col("encounter_block").cast(pl.String),
+                    pl.lit("_P"),
+                    pl.col("p_num").cast(pl.String),
+                )
+            )
+        )
+
+    return resolve_index_locations, retain_nonprocedural_indexes
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -313,6 +374,55 @@ def _(PHI_DIR, pl):
     print(f"encounter blocks   : {cohort_index.height:,}")
     print(f"hospitalization ids: {len(bridge_hosp_ids):,}")
     return COHORT_RUN_ID, bridge, bridge_hosp_ids, cohort_index
+
+
+@app.cell
+def _(
+    Adt,
+    DATA_DIR,
+    FILETYPE,
+    TIMEZONE,
+    bridge,
+    bridge_hosp_ids,
+    normalize_category_columns,
+    pl,
+    to_site_naive,
+):
+    _adt = Adt.from_file(
+        data_directory=DATA_DIR,
+        filetype=FILETYPE,
+        timezone=TIMEZONE,
+        columns=[
+            "hospitalization_id",
+            "hospital_id",
+            "location_category",
+            "in_dttm",
+            "out_dttm",
+        ],
+        filters={"hospitalization_id": bridge_hosp_ids},
+    )
+    _adt_pd = _adt.df.copy()
+    for _column in ("in_dttm", "out_dttm"):
+        _adt_pd[_column] = to_site_naive(_adt_pd[_column])
+
+    adt = (
+        normalize_category_columns(pl.from_pandas(_adt_pd), "location_category")
+        .join(
+            bridge.select("hospitalization_id", "encounter_block"),
+            on="hospitalization_id",
+            how="inner",
+            validate="m:1",
+        )
+        .select(
+            "encounter_block",
+            "hospital_id",
+            "location_category",
+            "in_dttm",
+            "out_dttm",
+        )
+    )
+    print(f"ADT intervals loaded: {adt.height:,}")
+    return (adt,)
 
 
 @app.cell
@@ -887,12 +997,15 @@ def _(pl):
 def _(
     COHORT_RUN_ID,
     COLLAPSE_GAP_MINUTES,
+    adt,
     positioned,
     cohort_index,
     fold,
     med_admin,
     merge_formed_index_doses,
     pl,
+    resolve_index_locations,
+    retain_nonprocedural_indexes,
 ):
     # Attach every administration to its index event, then aggregate.
     _members = (
@@ -934,10 +1047,82 @@ def _(
         .join(cohort_index.select("encounter_block", "patient_id"), on="encounter_block", how="left")
     )
 
-    # This is deliberately downstream of event formation: administrations in different
-    # index events are never eligible to merge, even when they are the same medication.
+    # Location is resolved after event formation because the study exclusion applies to the
+    # anchor of the formed index, not independently to each source administration.
+    _located_index = resolve_index_locations(
+        merge_formed_index_doses(_formed_index), adt
+    )
+    _procedural_index = _located_index.filter(
+        pl.col("_location_category_at_index") == "procedural"
+    )
+    _retained_index = _located_index.filter(
+        pl.col("_location_category_at_index") != "procedural"
+    )
+
+    def _summarize_population(frame, population):
+        _stratified = frame.with_columns(
+            agent=pl.when(pl.col("n_agents") > 1)
+            .then(pl.lit("combination"))
+            .otherwise(pl.col("agent_label"))
+        )
+        _overall = pl.DataFrame(
+            {
+                "population": [population],
+                "agent": ["overall"],
+                "n_source_administrations": [
+                    int(_stratified.get_column("n_before_merge_admin").sum() or 0)
+                ],
+                "n_postmerge_med_entries": [
+                    int(_stratified.get_column("n_admins").sum() or 0)
+                ],
+                "n_indexes": [_stratified.height],
+                "n_encounter_blocks": [
+                    _stratified.get_column("encounter_block").n_unique()
+                ],
+            }
+        )
+        _by_agent = _stratified.group_by("agent").agg(
+            pl.lit(population).alias("population"),
+            n_source_administrations=pl.col("n_before_merge_admin").sum(),
+            n_postmerge_med_entries=pl.col("n_admins").sum(),
+            n_indexes=pl.len(),
+            n_encounter_blocks=pl.col("encounter_block").n_unique(),
+        ).select(_overall.columns)
+        return pl.concat([_overall, _by_agent], how="vertical_relaxed")
+
+    procedural_index_summary = pl.concat(
+        [
+            _summarize_population(_located_index, "formed_indexes"),
+            _summarize_population(_procedural_index, "procedural_exclusions"),
+            _summarize_population(_retained_index, "nonprocedural_indexes"),
+        ],
+        how="vertical_relaxed",
+    ).sort("population", "agent")
+
+    _formed_counts = procedural_index_summary.filter(
+        (pl.col("population") == "formed_indexes") & (pl.col("agent") == "overall")
+    ).row(0, named=True)
+    _excluded_counts = procedural_index_summary.filter(
+        (pl.col("population") == "procedural_exclusions")
+        & (pl.col("agent") == "overall")
+    ).row(0, named=True)
+    _retained_counts = procedural_index_summary.filter(
+        (pl.col("population") == "nonprocedural_indexes")
+        & (pl.col("agent") == "overall")
+    ).row(0, named=True)
+    for _column in (
+        "n_source_administrations",
+        "n_postmerge_med_entries",
+        "n_indexes",
+    ):
+        assert _formed_counts[_column] == (
+            _excluded_counts[_column] + _retained_counts[_column]
+        ), f"procedural exclusion does not partition {_column}"
+
+    # Exclusion can remove an earlier event in a block. Compact p_num and regenerate IDs so
+    # every downstream first-index selection continues to mean first retained index.
     index_paralytic = (
-        merge_formed_index_doses(_formed_index)
+        retain_nonprocedural_indexes(_located_index)
         .select(
             "index_paralytic_id",
             "encounter_block",
@@ -957,7 +1142,7 @@ def _(
         .sort(["encounter_block", "p_num"])
     )
 
-    # The partition property again, and this time on the frame that is actually written.
+    # The partition property again, before the explicit procedural-location exclusion.
     # The identical assertion in the cell above checks the fold's own arithmetic, which is
     # pure Python and already covered by tests/test_collapse_agent_events.py. This one
     # checks the polars RECONSTRUCTION above it -- the join on encounter_block followed by
@@ -965,7 +1150,7 @@ def _(
     # counted twice. Nothing else in this cell would notice: the span check only bounds
     # spans, is_unique only checks ids, and the p_num check below catches an event that
     # vanished whole, not one that quietly lost half its rows.
-    _rebuilt = index_paralytic.get_column("n_before_merge_admin").sum()
+    _rebuilt = _located_index.get_column("n_before_merge_admin").sum()
     assert _rebuilt == med_admin.height, (
         f"the reconstruction accounts for {_rebuilt:,} administrations but {med_admin.height:,} "
         "were loaded. The fold itself balanced, so the loss or duplication is in the "
@@ -974,7 +1159,7 @@ def _(
     )
 
     # P6's invariant, asserted rather than hoped for. A violation means the fold chained.
-    _over = index_paralytic.filter(pl.col("span_minutes") > COLLAPSE_GAP_MINUTES)
+    _over = _located_index.filter(pl.col("span_minutes") > COLLAPSE_GAP_MINUTES)
     assert _over.height == 0, (
         f"{_over.height:,} index paralytics span more than {COLLAPSE_GAP_MINUTES} min. "
         "collapse_agent_events anchors on the event's first row; a violation here means it "
@@ -997,12 +1182,14 @@ def _(
     )
     assert _gap.height == 0, "p_num is not contiguous from 1 within a block"
 
-    print(f"index paralytics : {index_paralytic.height:,}")
+    print(f"formed index paralytics       : {_located_index.height:,}")
+    print(f"procedural indexes excluded   : {_procedural_index.height:,}")
+    print(f"retained index paralytics     : {index_paralytic.height:,}")
     print(f"  co-administrations : {index_paralytic.get_column('is_coadmin').sum():,} "
           f"({100 * index_paralytic.get_column('is_coadmin').mean():.1f}%)")
     print(f"  max span (min)     : {index_paralytic.get_column('span_minutes').max()}")
     print(index_paralytic.group_by("agent_label").agg(n=pl.len()).sort("n", descending=True))
-    return (index_paralytic,)
+    return index_paralytic, procedural_index_summary
 
 
 @app.cell
@@ -1024,6 +1211,16 @@ def _(PHI_DIR, index_paralytic):
     _path = PHI_DIR / "step02__index_paralytic.parquet"
     index_paralytic.write_parquet(_path)
     print(f"step02__index_paralytic.parquet   {index_paralytic.height:,} rows -> {_path}")
+    return
+
+
+@app.cell
+def _(SHARE_DIR, procedural_index_summary, publish):
+    publish(
+        procedural_index_summary,
+        SHARE_DIR / "step02__procedural_index_exclusion_summary.csv",
+        "step02__procedural_index_exclusion_summary",
+    )
     return
 
 

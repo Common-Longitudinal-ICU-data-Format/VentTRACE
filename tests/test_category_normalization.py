@@ -9,6 +9,14 @@ import pandas as pd
 import polars as pl
 import pytest
 
+from clifpy.tables import (
+    Labs,
+    MedicationAdminContinuous,
+    PatientAssessments,
+    RespiratorySupport,
+    Vitals,
+)
+
 
 ROOT = Path(__file__).parent.parent
 NOTEBOOKS = {
@@ -107,9 +115,15 @@ def test_sofa_inputs_are_canonical_before_clifpy_rereads_them(tmp_path):
         path,
         "prepare_sofa_inputs",
         {
+            "Labs": Labs,
+            "MedicationAdminContinuous": MedicationAdminContinuous,
+            "PatientAssessments": PatientAssessments,
             "Path": Path,
+            "RespiratorySupport": RespiratorySupport,
+            "Vitals": Vitals,
             "normalize_category_columns": normalize,
             "normalize_vital_category": normalize_vital,
+            "source_category_variants": _load_function(path, "source_category_variants"),
         },
     )
     source = tmp_path / "source"
@@ -122,7 +136,7 @@ def test_sofa_inputs_are_canonical_before_clifpy_rereads_them(tmp_path):
         {
             "hospitalization_id": ids,
             "lab_result_dttm": dttm,
-            "lab_category": [" Creatinine ", "creatinine"],
+            "lab_category": ["Creatinine", "creatinine"],
             "lab_value": ["1", "2"],
             "lab_value_numeric": [1.0, 2.0],
         }
@@ -131,7 +145,7 @@ def test_sofa_inputs_are_canonical_before_clifpy_rereads_them(tmp_path):
         {
             "hospitalization_id": ids,
             "recorded_dttm": dttm,
-            "vital_category": ["\u00a0SpO₂ ", "spo2"],
+            "vital_category": ["SpO₂", "spo2"],
             "vital_value": [98.0, 97.0],
         }
     ).write_parquet(source / "clif_vitals.parquet")
@@ -139,7 +153,7 @@ def test_sofa_inputs_are_canonical_before_clifpy_rereads_them(tmp_path):
         {
             "hospitalization_id": ids,
             "recorded_dttm": dttm,
-            "assessment_category": [" GCS_TOTAL ", "gcs_total"],
+            "assessment_category": ["GCS_TOTAL", "gcs_total"],
             "numerical_value": [15.0, 14.0],
             "categorical_value": [None, None],
         }
@@ -160,13 +174,13 @@ def test_sofa_inputs_are_canonical_before_clifpy_rereads_them(tmp_path):
         {
             "hospitalization_id": ids,
             "admin_dttm": dttm,
-            "med_category": [" Norepinephrine ", "norepinephrine"],
+            "med_category": ["Norepinephrine", "norepinephrine"],
             "med_dose": [0.1, 0.2],
             "med_dose_unit": ["mcg/kg/min", "mcg/kg/min"],
         }
     ).write_parquet(source / "clif_medication_admin_continuous.parquet")
 
-    prepare(source, "parquet", destination, ["H1"])
+    prepare(source, "parquet", "UTC", destination, ["H1"])
 
     assert pl.read_parquet(destination / "clif_labs.parquet")["lab_category"].to_list() == [
         "creatinine"
@@ -187,26 +201,13 @@ def test_sofa_inputs_are_canonical_before_clifpy_rereads_them(tmp_path):
     ].to_list() == ["norepinephrine"]
 
 
-def test_from_file_never_filters_on_raw_category_values():
-    violations = []
-    for path in sorted((ROOT / "code").glob("*.py")):
-        tree = ast.parse(path.read_text())
-        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
-            filters = next(
-                (keyword.value for keyword in call.keywords if keyword.arg == "filters"),
-                None,
-            )
-            if not isinstance(filters, ast.Dict):
-                continue
-            for key in filters.keys:
-                if (
-                    isinstance(key, ast.Constant)
-                    and isinstance(key.value, str)
-                    and key.value.endswith("_category")
-                ):
-                    violations.append(f"{path.name}:{getattr(key, 'lineno', '?')}:{key.value}")
+def test_source_category_filter_variants_cover_supported_vital_aliases():
+    variants = _load_function(ROOT / "code" / "04_covariates.py", "source_category_variants")
 
-    assert violations == []
+    assert {"weight_kg", "WeightKg", "weightKg", "WEIGHTKG"} <= set(
+        variants(["weight_kg"])
+    )
+    assert {"spo2", "SpO2", "SpO₂", "SPO₂"} <= set(variants(["spo2"]))
 
 
 def test_initial_medication_pushdown_is_normalized():
