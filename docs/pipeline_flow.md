@@ -160,7 +160,9 @@ gap and count outputs remain unchanged, and medications never merge across forme
 
 `04` adds P46's site-ready outputs. `step04__intubations_by_hospital_year.csv` counts one
 block-first paralytic-index event by configured healthcare system, event-time ADT hospital,
-academic status and calendar year; it remains intubation-adjacent rather than adjudicated.
+academic status and calendar year; `fig_H1__intubations_by_hospital_year.csv/.png` presents the
+same yearly trend with one line per hospital, colored by academic status. The measure remains
+intubation-adjacent rather than adjudicated.
 `fig_B2__paralytic_dose_per_weight_ecdf.csv` and
 `fig_E4__sedation_dose_per_weight_ecdf.csv` publish normalized distributions with integer counts.
 `step04__combined_induction_dose_distribution_percentiles.csv` publishes site-specific p1-p99 for

@@ -104,9 +104,9 @@ remain stable for cross-site pooling.
 paralytic administrations through index formation, IMV transition, sedation, and the index- and
 block-level Table 1 populations. All lettered analyses are downstream subanalyses.
 
-Step 04 also publishes block-first paralytic-index event counts by healthcare system, event-time
-hospital, academic status, and year. These are intubation-adjacent operational counts, not confirmed
-intubations. Weight-normalized dose ECDFs, etomidate/ketamine percentiles, local four-tier counts,
+Step 04 also publishes block-first paralytic-index event counts and Figure H.1 yearly trends by
+healthcare system, event-time hospital, academic status, and year. These are intubation-adjacent
+operational counts, not confirmed intubations. Weight-normalized dose ECDFs, etomidate/ketamine percentiles, local four-tier counts,
 and a dose-specific eligibility flow are additive outputs. Tier files carry site-level integer
 numerators and denominators for later consortium meta-analysis; site percentiles are never averaged.
 

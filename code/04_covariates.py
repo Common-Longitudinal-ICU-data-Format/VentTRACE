@@ -31,6 +31,7 @@ def _():
     import marimo as mo
 
     sys.path.insert(0, str(Path(__file__).parent.parent))
+    from utils.hospital_year_trend import render_hospital_year_trend
     from utils.suppress import publish
 
     return (
@@ -52,6 +53,7 @@ def _():
         mo,
         pl,
         publish,
+        render_hospital_year_trend,
     )
 
 
@@ -361,6 +363,30 @@ def _(Path, json):
 
 @app.cell
 def _(pl):
+    def build_intubations_by_hospital_year(spine_resolved, site):
+        """Count one block-first index event by event-time hospital and year."""
+        return (
+            spine_resolved.filter(pl.col("p_num") == 1)
+            .with_columns(pl.col("t_dttm").dt.year().cast(pl.Int16).alias("calendar_year"))
+            .group_by(["hospital", "academic_status", "calendar_year"])
+            .agg(n_intubations=pl.len())
+            .with_columns(
+                pl.lit(site).alias("healthcare_system"),
+                pl.lit("block-first VentTRACE paralytic-index event").alias(
+                    "event_definition"
+                ),
+            )
+            .select(
+                "healthcare_system",
+                "hospital",
+                "academic_status",
+                "calendar_year",
+                "n_intubations",
+                "event_definition",
+            )
+            .sort(["healthcare_system", "hospital", "academic_status", "calendar_year"])
+        )
+
     def to_site_naive(series):
         """Strip clifpy's configured site timezone while preserving local wall time.
 
@@ -405,7 +431,7 @@ def _(pl):
             (_dttm <= _t0) & (_dttm >= _t0 - int(hours * 3600))
         ).fill_null(False)
 
-    return epoch_minutes, in_lookback, to_site_naive
+    return build_intubations_by_hospital_year, epoch_minutes, in_lookback, to_site_naive
 
 
 @app.cell
@@ -1142,32 +1168,27 @@ def _(pl):
 
 
 @app.cell
-def _(SHARE_DIR, SITE, pl, publish, spine_resolved):
+def _(
+    SHARE_DIR,
+    SITE,
+    build_intubations_by_hospital_year,
+    publish,
+    spine_resolved,
+):
     # One block-first event is the requested intubation-counting unit. This remains an
     # operational VentTRACE definition, not confirmation of an endotracheal procedure.
-    intubations_by_hospital_year = (
-        spine_resolved.filter(pl.col("p_num") == 1)
-        .with_columns(pl.col("t_dttm").dt.year().cast(pl.Int16).alias("calendar_year"))
-        .group_by(["hospital", "academic_status", "calendar_year"])
-        .agg(n_intubations=pl.len())
-        .with_columns(
-            pl.lit(SITE).alias("healthcare_system"),
-            pl.lit("block-first VentTRACE paralytic-index event").alias("event_definition"),
-        )
-        .select(
-            "healthcare_system",
-            "hospital",
-            "academic_status",
-            "calendar_year",
-            "n_intubations",
-            "event_definition",
-        )
-        .sort(["healthcare_system", "hospital", "academic_status", "calendar_year"])
+    intubations_by_hospital_year = build_intubations_by_hospital_year(
+        spine_resolved, SITE
     )
     publish(
         intubations_by_hospital_year,
         SHARE_DIR / "step04__intubations_by_hospital_year.csv",
         "step04__intubations_by_hospital_year",
+    )
+    publish(
+        intubations_by_hospital_year,
+        SHARE_DIR / "fig_H1__intubations_by_hospital_year.csv",
+        "fig_H1__intubations_by_hospital_year",
     )
     assert intubations_by_hospital_year.get_column("n_intubations").sum() == spine_resolved.filter(
         pl.col("p_num") == 1
@@ -2417,6 +2438,17 @@ def _():
     import matplotlib.pyplot as plt
 
     return (plt,)
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, render_hospital_year_trend):
+    figure_h1_df = pl.read_csv(SHARE_DIR / "fig_H1__intubations_by_hospital_year.csv")
+    _png = FIG_DIR / "fig_H1__intubations_by_hospital_year.png"
+    if not render_hospital_year_trend(figure_h1_df, _png):
+        print(f"{_png.name} skipped -- source CSV has zero rows")
+    else:
+        print(f"{_png.name} -> {FIG_DIR}")
+    return (figure_h1_df,)
 
 
 @app.cell

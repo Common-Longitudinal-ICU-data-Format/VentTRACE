@@ -18,7 +18,9 @@ healthcare system, event-time hospital, academic status, and calendar year.
 - `healthcare_system` is `config["site_name"]`.
 - Hospital and `hospital_type` come from the ADT interval covering event time. `academic` maps to
   academic; every other non-null type maps to non-academic; unresolved values remain unknown.
-- The shareable aggregate is `step04__intubations_by_hospital_year.csv`.
+- The shareable aggregate is `step04__intubations_by_hospital_year.csv`; Figure H.1 publishes the
+  same rows as `fig_H1__intubations_by_hospital_year.csv` and plots one yearly line per hospital,
+  colored by academic status.
 
 ### Dose Weight
 

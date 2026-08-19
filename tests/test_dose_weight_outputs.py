@@ -8,6 +8,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from utils.hospital_year_trend import render_hospital_year_trend
+
 
 ROOT = Path(__file__).parent.parent
 NOTEBOOK = ROOT / "code" / "04_covariates.py"
@@ -31,6 +33,7 @@ def _load_function(name):
 SELECT_WEIGHTS = _load_function("select_dose_weights")
 ECDF = _load_function("ecdf_by_dose_per_weight")
 NORMALISE = _load_function("_normalised")
+BUILD_HOSPITAL_YEAR_COUNTS = _load_function("build_intubations_by_hospital_year")
 
 
 def _share_dir():
@@ -39,6 +42,57 @@ def _share_dir():
     if not output.is_absolute():
         output = ROOT / output
     return output / "final_no_phi"
+
+
+def test_hospital_year_counts_use_one_block_first_event_and_event_time_site():
+    events = pl.DataFrame(
+        {
+            "p_num": [1, 2, 1, 1],
+            "t_dttm": [
+                datetime(2023, 1, 1),
+                datetime(2023, 1, 2),
+                datetime(2023, 6, 1),
+                datetime(2024, 1, 1),
+            ],
+            "hospital": ["A", "A", "B", "A"],
+            "academic_status": [
+                "academic",
+                "academic",
+                "non-academic",
+                "academic",
+            ],
+        }
+    )
+
+    result = BUILD_HOSPITAL_YEAR_COUNTS(events, "system").select(
+        "healthcare_system",
+        "hospital",
+        "academic_status",
+        "calendar_year",
+        "n_intubations",
+    )
+
+    assert result.rows() == [
+        ("system", "A", "academic", 2023, 1),
+        ("system", "A", "academic", 2024, 1),
+        ("system", "B", "non-academic", 2023, 1),
+    ]
+
+
+def test_hospital_year_trend_renders_shareable_figure(tmp_path):
+    frame = pl.DataFrame(
+        {
+            "healthcare_system": ["system", "system"],
+            "hospital": ["A", "A"],
+            "academic_status": ["academic", "academic"],
+            "calendar_year": [2023, 2024],
+            "n_intubations": [2, 3],
+        }
+    )
+    destination = tmp_path / "trend.png"
+
+    assert render_hospital_year_trend(frame, destination)
+    assert destination.stat().st_size > 0
 
 
 def test_weight_selector_prefers_current_hospital_and_latest_valid_value():
@@ -182,6 +236,7 @@ def test_generated_site_outputs_are_reconcilable_and_poolable():
     share = _share_dir()
     required = [
         "step04__intubations_by_hospital_year.csv",
+        "fig_H1__intubations_by_hospital_year.csv",
         "fig_B2__paralytic_dose_per_weight_ecdf.csv",
         "fig_E4__sedation_dose_per_weight_ecdf.csv",
         "step04__combined_induction_dose_distribution_percentiles.csv",
@@ -192,14 +247,16 @@ def test_generated_site_outputs_are_reconcilable_and_poolable():
         pytest.skip("dose/weight outputs absent; run step 04 first")
 
     counts = pl.read_csv(share / required[0])
-    tiers = pl.read_csv(share / required[4])
-    flow = pl.read_csv(share / required[5])
-    percentiles = pl.read_csv(share / required[3])
+    trend = pl.read_csv(share / required[1])
+    tiers = pl.read_csv(share / required[5])
+    flow = pl.read_csv(share / required[6])
+    percentiles = pl.read_csv(share / required[4])
 
     expected_blocks = pl.read_csv(
         share / "step02__index_paralytics_per_block.csv"
     )["n_blocks"].sum()
     assert counts["n_intubations"].sum() == expected_blocks
+    assert trend.equals(counts)
     assert tiers.height == 8
     assert tiers.group_by(["site_name", "drug"]).agg(
         pl.col("n_admin_windows").sum().alias("sum_n"),
