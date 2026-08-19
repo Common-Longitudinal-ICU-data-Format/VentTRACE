@@ -443,9 +443,9 @@ output/final_no_phi/              shareable aggregates — no row-level records 
 
 **Rules** (P21, P23):
 
-- No `patient_id`, no `hospitalization_id`, no `encounter_block`, no `p_num`, no row-level records, no raw data files in `final_no_phi/`. This is the disclosure boundary and the only one.
+- No `patient_id`, no `hospitalization_id`, no `encounter_block`, no `p_num`, no row-level records, and no raw data files are permitted in published analysis artifacts under `final_no_phi/`. The launcher-written `final_no_phi/logs/` subdirectory is the explicit exception and can contain console-printed `encounter_block` values.
 - **Aggregate counts are published at their true value, including counts below 10.** Nothing is withheld, so nothing is recoverable by differencing two published files — the failure mode that produced three separate leaks under the withdrawn rule (P24) cannot arise.
-- The boundary is enforced by `utils/suppress.py`, imported by both `02` and `03` (P23). It is the only shared code in the project, and it is the only route into `final_no_phi/`.
+- The analysis-artifact boundary is enforced by `utils/suppress.py`, imported by both `02` and `03` (P23). It is the only shared code in the project and the only route for published CSV/JSON artifacts into `final_no_phi/`; launcher logs bypass it and are excluded from the artifact manifest.
 - Every figure is drawn from a published table, so a figure cannot disagree with the CSV beside it.
 - A histogram bin with a count of zero is drawn and published as zero. Every bin on the grid appears in the table.
 - Every artifact carries `cohort_run_id`. `03` asserts its input's run id is single-valued and matches its own. Without that check, joining an index artifact from one extract to a waterfall from another produces a table that is silently wrong — the ids match, the rows are real, and they describe different patients. `encounter_block` is seeded from a row index and is **not stable across re-extracts**.

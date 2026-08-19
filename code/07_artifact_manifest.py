@@ -55,6 +55,9 @@ CATALOG = [
     ("fig_E4__sedation_dose_per_weight_ecdf.csv", "figure_data", "04_covariates", "E4", "figure_e4_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
     ("step04__combined_induction_dose_distribution_percentiles.csv", "data", "04_covariates", None, "induction_dose_percentiles", "final_no_phi/fig_E4__sedation_dose_per_weight_ecdf.csv"),
     ("fig_E5__induction_dose_tiers.csv", "figure_data", "04_covariates", "E5", "figure_e5_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
+    ("fig_E5_2__induction_dose_bins.csv", "figure_data", "04_covariates", "E5_2", "figure_e5_2_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
+    ("step04__valid_index_induction_dose_by_stratum.csv", "data", "04_covariates", None, "valid_index_induction_dose_summary", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__index_covariates.parquet|intermediate_phi/step04__dose_weights.parquet"),
+    ("fig_E6__valid_index_induction_dose_bins.csv", "figure_data", "04_covariates", "E6", "figure_e6_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__index_covariates.parquet|intermediate_phi/step04__dose_weights.parquet"),
     ("fig_G1__dose_per_weight_consort.csv", "figure_data", "04_covariates", "G1", "figure_g1_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
     ("fig_1__main_consort.csv", "figure_data", "05_table_one", "1", "figure_1_df", "intermediate_phi/step04__index_covariates.parquet|final_no_phi/step02__paralytic_administration_summary.csv|final_no_phi/step02__procedural_index_exclusion_summary.csv"),
     ("table1_by_agent_block_readable.csv", "table", "05_table_one", None, "table1_block_readable", "intermediate_phi/step04__index_covariates.parquet"),
@@ -78,6 +81,8 @@ FIGURES = [
     ("B2", "paralytic_dose_per_weight_ecdf", "04_covariates", "figure_b2_df"),
     ("E4", "sedation_dose_per_weight_ecdf", "04_covariates", "figure_e4_df"),
     ("E5", "induction_dose_tiers", "04_covariates", "figure_e5_df"),
+    ("E5_2", "induction_dose_bins", "04_covariates", "figure_e5_2_df"),
+    ("E6", "valid_index_induction_dose_bins", "04_covariates", "figure_e6_df"),
     ("G1", "dose_per_weight_consort", "04_covariates", "figure_g1_df"),
     ("H1", "intubations_by_hospital_year", "04_covariates", "figure_h1_df"),
     ("1", "main_consort", "05_table_one", "figure_1_df"),
@@ -117,16 +122,37 @@ def row_count(path):
     return None
 
 
+def validate_artifact_site(path, site):
+    """Reject aggregate files copied from a different configured site."""
+    if path.suffix == ".csv":
+        frame = pl.read_csv(path)
+        for column in ("site_name", "healthcare_system"):
+            if column in frame.columns and frame.height:
+                values = frame.get_column(column).drop_nulls().unique().to_list()
+                assert values == [site], f"{path.name} has {column}={values}, expected {site}"
+    elif path.suffix == ".json":
+        with open(path) as file:
+            payload = json.load(file)
+        artifact_site = payload.get("meta", {}).get("site_name")
+        if artifact_site is not None:
+            assert artifact_site == site, (
+                f"{path.name} has site_name={artifact_site}, expected {site}"
+            )
+
+
 def main():
     table1_path = SHARE_DIR / "table1_by_agent_block.json"
     with open(table1_path) as file:
         cohort_run_id = json.load(file)["meta"]["cohort_run_id"]
 
     declared = {entry[0] for entry in CATALOG}
+    # Launcher logs are timestamped runtime files, not declared analysis artifacts.
     actual = {
         str(path.relative_to(SHARE_DIR))
         for path in SHARE_DIR.rglob("*")
-        if path.is_file() and path.name != "artifact_manifest.csv"
+        if path.is_file()
+        and path.name != "artifact_manifest.csv"
+        and path.relative_to(SHARE_DIR).parts[0] != "logs"
     }
     unexpected = sorted(actual - declared)
     assert not unexpected, f"undeclared or stale shareable artifacts: {unexpected}"
@@ -156,6 +182,9 @@ def main():
             status = "missing"
         else:
             status = "generated"
+
+        if exists:
+            validate_artifact_site(path, SITE)
 
         rows.append(
             {

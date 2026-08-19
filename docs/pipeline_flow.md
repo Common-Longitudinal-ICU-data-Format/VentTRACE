@@ -168,8 +168,18 @@ intubation-adjacent rather than adjudicated.
 `step04__combined_induction_dose_distribution_percentiles.csv` publishes site-specific p1-p99 for
 etomidate and ketamine. `fig_E5__induction_dose_tiers.csv` carries every local tier numerator and
 denominator needed for later pooled logit random-effects analysis, while its PNG is explicitly
-local and has no pooled confidence intervals. `fig_G1__dose_per_weight_consort.csv` reports every
-dose and weight exclusion without changing the block/patient analytic cohort.
+local and has no pooled confidence intervals. `fig_E5_2__induction_dose_bins.csv/.png` adds a local
+five-bin view of the same normalized administration-window population, with 0.35 mg/kg etomidate
+and 2.5 mg/kg ketamine included in the fourth bins. `step04__valid_index_induction_dose_by_stratum.csv`
+restricts to the index-level Table 1 population (`imv_transition and any_sedative`), sums repeated
+etomidate or ketamine administrations per index and drug, and reports mg/kg median, quartiles,
+mean, sample SD, available N, and missing-weight N across location, 1-hour vasopressor exposure,
+sex, ethnicity, white/non-white race, and SOFA scores 0-24. Location retains ED and ICU only.
+Null/unknown values fold into not-on vasopressor, other sex, non-Hispanic ethnicity, and non-white
+race. An index receiving both etomidate and ketamine contributes once to each drug summary.
+`fig_E6__valid_index_induction_dose_bins.csv/.png` presents the requested five-bin
+event-level distributions. `fig_G1__dose_per_weight_consort.csv` reports every dose and weight
+exclusion without changing the block/patient analytic cohort.
 
 **Figure 1 is the main analysis.** It ends at Table 1 and reports four counts at every applicable
 stage: source paralytic administrations, medication entries after same-agent merging, formed
@@ -441,9 +451,11 @@ weight selection; absolute-unit values use P43's absolute-dose checks before div
 before division. Missing weight reduces only normalized-dose denominators.
 
 Sedation normalization retains E's existing unit: an `(index paralytic, administration)` pair.
-The induction percentile and tier population is every etomidate or ketamine pair inside +/-60
-minutes, not a nearest-dose or five-minute RSI subset, with no additional normalized-dose range
-filter. Site percentiles are descriptive and cannot
+The induction percentile and tier population is every etomidate or ketamine pair inside the
+configured +/-5-minute window, with no additional normalized-dose range filter. The separate
+valid-index summary and E.6 population requires the Table 1 index gate, sums repeated
+administrations per drug/index, and includes crossover indexes in both received-drug summaries.
+Site percentiles are descriptive and cannot
 be averaged across sites. B.2/E.4 integer `n_at_dose` values can be concatenated to reconstruct a
 pooled distribution; E.5 integer tier numerators and denominators support the later coordinating
 center meta-analysis.
@@ -464,17 +476,14 @@ Copying a file out of it, by any means, is a data breach. `step04__index_covaria
 it by construction, and `tests/test_publish_guard.py`'s
 `test_index_covariates_column_set_is_refused` pins exactly that refusal.
 
-**`output/logs/` also holds PHI-adjacent content and is not a deliverable either.**
-`run_all.sh` tees every run's stdout into `output/logs/run_<UTC timestamp>/`, and `02` prints the
-ten densest blocks' `encounter_block` ids to stdout as part of its memory-guard diagnostics
-(§4). `encounter_block` is not itself a patient identifier and is not stable across runs (§8),
-but it is an id nonetheless, and a log directory is not covered by `publish()`'s check the way
-`output/final_no_phi/` is. Treat it with the same handling as `output/intermediate_phi/` — it
-stays on site.
+**Run logs are written to `output/final_no_phi/logs/`.** The launchers capture each step's stdout
+under `logs/run_<UTC timestamp>/`, and `02` can print `encounter_block` ids as part of its
+memory-guard diagnostics (§4). `encounter_block` is not stable across runs (§8), but it is an id;
+the logs are not covered by `publish()` and are excluded from the artifact manifest inventory.
 
-**`output/final_no_phi/` is the only directory a site ever shares.** Everything in it is an
-aggregate: a count, a rate, a quantile, keyed on a bin or a category — never a row that describes
-one person.
+**`output/final_no_phi/` is the only directory a site shares.** Its published CSV, JSON, and PNG
+analysis artifacts are aggregates: counts, rates, and quantiles keyed on bins or categories, never
+rows that describe one person. The `logs/` subdirectory is raw console output as described above.
 
 **`utils/suppress.py` is the only door between them**, imported by every notebook and nowhere
 else. It exposes two writers over one shared check: `publish()` for CSV, and `publish_json()`
@@ -595,7 +604,8 @@ join, and would supply the wrong denominator without raising. `02` asserts on st
 them are present in `output/intermediate_phi/` before it writes anything of its own.
 
 **A `write_csv` or a `json.dump` to `final_no_phi/` anywhere in `code/` is a bug.** Every
-published output is an aggregate and `utils/suppress.py` — `publish()` for CSV, `publish_json()`
-for JSON — is the only route into `output/final_no_phi/`; it is what enforces §6's boundary. A
-notebook that writes the directory directly bypasses that check entirely, whatever it thinks it
+published analysis output is an aggregate and `utils/suppress.py` — `publish()` for CSV,
+`publish_json()` for JSON — is the only route for those artifacts; it is what enforces §6's
+boundary. The launchers' raw `logs/` subdirectory is the explicit exception. A notebook that
+writes the directory directly bypasses the aggregate-output check entirely, whatever it thinks it
 is writing.

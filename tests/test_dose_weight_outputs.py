@@ -242,6 +242,9 @@ def test_generated_site_outputs_are_reconcilable_and_poolable():
         "step04__combined_induction_dose_distribution_percentiles.csv",
         "fig_E5__induction_dose_tiers.csv",
         "fig_G1__dose_per_weight_consort.csv",
+        "step04__valid_index_induction_dose_by_stratum.csv",
+        "fig_E6__valid_index_induction_dose_bins.csv",
+        "fig_E5_2__induction_dose_bins.csv",
     ]
     if not all((share / name).exists() for name in required):
         pytest.skip("dose/weight outputs absent; run step 04 first")
@@ -251,6 +254,9 @@ def test_generated_site_outputs_are_reconcilable_and_poolable():
     tiers = pl.read_csv(share / required[5])
     flow = pl.read_csv(share / required[6])
     percentiles = pl.read_csv(share / required[4])
+    summary = pl.read_csv(share / required[7])
+    valid_bins = pl.read_csv(share / required[8])
+    administration_bins = pl.read_csv(share / required[9])
 
     expected_blocks = pl.read_csv(
         share / "step02__index_paralytics_per_block.csv"
@@ -272,3 +278,30 @@ def test_generated_site_outputs_are_reconcilable_and_poolable():
     assert flow.sort(["population", "stage_order"]).group_by("population").agg(
         pl.col("n_remaining").diff().drop_nulls().max().alias("largest_increase")
     ).filter(pl.col("largest_increase") > 0).is_empty()
+    assert valid_bins.height == 10
+    assert valid_bins.group_by(["site_name", "medication_group", "drug"]).agg(
+        pl.col("n_indexes").sum().alias("sum_n"),
+        pl.col("n_total").first().alias("n_total"),
+    ).filter(pl.col("sum_n") != pl.col("n_total")).is_empty()
+    assert valid_bins["count_unit"].unique().to_list() == [
+        "valid index events with available summed drug dose"
+    ]
+    assert administration_bins.height == 10
+    assert administration_bins.group_by(["site_name", "drug"]).agg(
+        pl.col("n_admin_windows").sum().alias("sum_n"),
+        pl.col("n_total").first().alias("n_total"),
+    ).filter(pl.col("sum_n") != pl.col("n_total")).is_empty()
+    assert administration_bins["count_unit"].unique().to_list() == [
+        "(index paralytic, administration) pairs with available normalized dose"
+    ]
+    assert valid_bins.filter(
+        pl.col("n_total") + pl.col("n_dose_missing")
+        != pl.col("n_indexes_in_medication_group")
+    ).is_empty()
+    overall = summary.filter(pl.col("stratum") == "overall")
+    assert overall.height == 2
+    assert overall["n_valid_indexes_in_stratum"].n_unique() == 1
+    assert overall.filter(
+        pl.col("n_dose_available") + pl.col("n_dose_missing")
+        != pl.col("n_indexes_in_medication_group")
+    ).is_empty()

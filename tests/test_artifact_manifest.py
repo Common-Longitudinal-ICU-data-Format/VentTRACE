@@ -1,5 +1,6 @@
 """Audit controls for the generated shareable artifact inventory."""
 
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,25 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 CONFIG = ROOT / "config" / "config.json"
+
+
+def _load_manifest_function(name):
+    source = ROOT / "code" / "07_artifact_manifest.py"
+    tree = ast.parse(source.read_text())
+    found = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    ]
+    assert len(found) == 1
+    module = ast.Module(body=[found[0]], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"json": json, "pl": pl}
+    exec(compile(module, str(source), "exec"), namespace)
+    return namespace[name]
+
+
+VALIDATE_ARTIFACT_SITE = _load_manifest_function("validate_artifact_site")
 
 
 def _share_dir():
@@ -41,7 +61,7 @@ def test_manifest_has_unique_complete_inventory(manifest):
     assert manifest.get_column("filename").is_unique().all()
     assert manifest.get_column("artifact_id").is_unique().all()
     assert manifest.filter(pl.col("status") == "missing").height == 0
-    assert manifest.height == 57
+    assert manifest.height == 62
 
 
 def test_declared_source_artifacts_exist(manifest):
@@ -82,3 +102,11 @@ def test_output_names_follow_contract(manifest):
     for filename in manifest.get_column("filename"):
         name = Path(filename).name
         assert name in stable_table1 or name.startswith(("fig_", "step")), filename
+
+
+def test_site_validation_rejects_mixed_site_csv(tmp_path):
+    path = tmp_path / "artifact.csv"
+    pl.DataFrame({"site_name": ["rush"], "n": [1]}).write_csv(path)
+
+    with pytest.raises(AssertionError, match="expected ucmc"):
+        VALIDATE_ARTIFACT_SITE(path, "ucmc")

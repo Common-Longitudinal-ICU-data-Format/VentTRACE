@@ -1,4 +1,4 @@
-"""The row-level disclosure boundary, applied to everything written to final_no_phi.
+"""The row-level disclosure boundary for published analysis artifacts in final_no_phi.
 
 The ONLY shared module in this project. Spec P23 records why this one is shared
 when nothing else is: a disclosure bug is a different kind of failure than an
@@ -8,9 +8,10 @@ The rule (spec P21, P23, amended 0992a5c):
   * the disclosure boundary is row-level versus aggregate, not cell size -- an
     aggregate count is published at its true value, including counts of 1 to 9.
     A binned count is a property of a bin, not of a person.
-  * what may never leave the site is a row that describes one person: an
-    identifier column, or a table carrying a timestamp -- an aggregate has no
-    timestamp, and every row-level artifact in this study does.
+  * published analysis artifacts may not contain a row that describes one
+    person: an identifier column, or a table carrying a timestamp -- an
+    aggregate has no timestamp, and every row-level artifact in this study does.
+    Launcher console logs are a separate, explicit exception outside this module.
   * nothing is filtered, nothing is silent: every write is printed.
 
 The n>=10 minimum-cell rule this module used to enforce is retired (P21, P24
@@ -80,8 +81,8 @@ def _assert_shareable(df, label):
 def publish(df, path, label):
     """Write `df` to `path` as CSV, report what was written, and return it unchanged.
 
-    Every write to final_no_phi goes through this function. Writing a CSV to that
-    directory by any other route is a bug.
+    Every analysis CSV written to final_no_phi goes through this function.
+    Writing an analysis CSV to that directory by any other route is a bug.
 
     Refuses (raises AssertionError) rather than writes when:
       * the frame carries an identifier column -- any of `patient_id`,

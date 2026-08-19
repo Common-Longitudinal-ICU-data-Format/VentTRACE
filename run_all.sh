@@ -29,7 +29,7 @@ if [ $# -gt 0 ]; then
   STEPS=("${picked[@]}")
 fi
 
-LOG_DIR="output/logs/run_$(date -u +%Y%m%dT%H%M%SZ)"   # UTC, never the OS zone
+LOG_DIR="output/final_no_phi/logs/run_$(date -u +%Y%m%dT%H%M%SZ)"   # UTC, never the OS zone
 mkdir -p "$LOG_DIR"
 
 uv sync --quiet
@@ -45,5 +45,5 @@ for step in "${STEPS[@]}"; do
   echo "--- $step ok in $((SECONDS - start))s"
 done
 
-artifact_count=$(uv run python -c 'from pathlib import Path; print(sum(p.is_file() for p in Path("output/final_no_phi").rglob("*")))')
-echo; echo "done: ${#STEPS[@]} steps, $artifact_count artifacts in output/final_no_phi"
+file_count=$(uv run python -c 'from pathlib import Path; print(sum(p.is_file() for p in Path("output/final_no_phi").rglob("*")))')
+echo; echo "done: ${#STEPS[@]} steps, $file_count files in output/final_no_phi"

@@ -363,6 +363,269 @@ def _(Path, json):
 
 @app.cell
 def _(pl):
+    def build_valid_index_induction_doses(
+        index_covariates, induction_source, induction_normalised
+    ):
+        """Build one summed etomidate/ketamine dose row per valid index and drug."""
+        _drugs = ["etomidate", "ketamine"]
+        _valid = index_covariates.filter(
+            pl.col("imv_transition") & pl.col("any_sedative")
+        )
+        _received = (
+            induction_source.filter(pl.col("med_category").is_in(_drugs))
+            .group_by("index_paralytic_id", "med_category")
+            .agg(n_source_administrations=pl.len())
+        )
+        _summed = (
+            induction_normalised.filter(pl.col("med_category").is_in(_drugs))
+            .group_by("index_paralytic_id", "med_category")
+            .agg(
+                dose_mg_per_kg=pl.col("dose_per_weight").sum(),
+                n_weighted_administrations=pl.len(),
+            )
+        )
+        _covariate_columns = [
+            "index_paralytic_id",
+            "location_at_index",
+            "vasopressor_1h",
+            "sex_category",
+            "ethnicity_category",
+            "race_category",
+            "sofa_total",
+        ]
+        return (
+            _received.join(
+                _summed,
+                on=["index_paralytic_id", "med_category"],
+                how="left",
+            )
+            .join(_valid.select(_covariate_columns), on="index_paralytic_id", how="inner")
+            .rename({"med_category": "drug"})
+            .with_columns(pl.col("drug").alias("medication_group"))
+            .sort(["index_paralytic_id", "drug"])
+        )
+
+    def build_induction_dose_summary(index_covariates, induction_event_doses, site):
+        """Summarize valid-index mg/kg doses across prespecified clinical strata."""
+        _valid = index_covariates.filter(
+            pl.col("imv_transition") & pl.col("any_sedative")
+        )
+        _strata = [("overall", "overall", pl.lit(True))]
+        _strata.extend(
+            [
+                ("location_at_index", "ed", pl.col("location_at_index") == "ed"),
+                ("location_at_index", "icu", pl.col("location_at_index") == "icu"),
+                ("vasopressor_1h", "on", pl.col("vasopressor_1h") == True),
+                (
+                    "vasopressor_1h",
+                    "not_on",
+                    pl.col("vasopressor_1h").fill_null(False) == False,
+                ),
+                ("sex", "female", pl.col("sex_category") == "female"),
+                ("sex", "male", pl.col("sex_category") == "male"),
+                (
+                    "sex",
+                    "other",
+                    ~pl.col("sex_category").is_in(["female", "male"]).fill_null(False),
+                ),
+                ("race", "white", pl.col("race_category") == "white"),
+                (
+                    "race",
+                    "non_white",
+                    (pl.col("race_category") != "white").fill_null(True),
+                ),
+                (
+                    "ethnicity",
+                    "hispanic",
+                    pl.col("ethnicity_category") == "hispanic",
+                ),
+                (
+                    "ethnicity",
+                    "non-hispanic",
+                    (pl.col("ethnicity_category") != "hispanic").fill_null(True),
+                ),
+            ]
+        )
+        _strata.extend(
+            ("sofa_total", str(_score), pl.col("sofa_total") == _score)
+            for _score in range(25)
+        )
+
+        _groups = [
+            ("etomidate", "etomidate"),
+            ("ketamine", "ketamine"),
+        ]
+        _rows = []
+        for _stratum_order, (_variable, _level, _predicate) in enumerate(_strata, start=1):
+            _ids = _valid.filter(_predicate).get_column("index_paralytic_id")
+            _level_doses = induction_event_doses.filter(
+                pl.col("index_paralytic_id").is_in(_ids.implode())
+            )
+            for _group_order, (_group, _drug) in enumerate(_groups, start=1):
+                _part = _level_doses.filter(
+                    (pl.col("medication_group") == _group)
+                    & (pl.col("drug") == _drug)
+                )
+                _dose = _part.get_column("dose_mg_per_kg").drop_nulls()
+                _n_group = _level_doses.filter(
+                    pl.col("medication_group") == _group
+                ).get_column("index_paralytic_id").n_unique()
+                _rows.append(
+                    {
+                        "site_name": site,
+                        "stratum": _variable,
+                        "stratum_level": _level,
+                        "stratum_order": _stratum_order,
+                        "medication_group": _group,
+                        "group_order": _group_order,
+                        "drug": _drug,
+                        "n_valid_indexes_in_stratum": _ids.len(),
+                        "n_indexes_in_medication_group": _n_group,
+                        "n_dose_available": _dose.len(),
+                        "n_dose_missing": _part.height - _dose.len(),
+                        "median_mg_per_kg": _dose.median(),
+                        "q1_mg_per_kg": _dose.quantile(0.25, interpolation="linear"),
+                        "q3_mg_per_kg": _dose.quantile(0.75, interpolation="linear"),
+                        "mean_mg_per_kg": _dose.mean(),
+                        "sd_mg_per_kg": _dose.std(),
+                        "population_definition": (
+                            "all valid indexes: retained paralytic index with IMV "
+                            "transition and sedative within configured windows"
+                        ),
+                        "dose_definition": (
+                            "sum per drug and valid index within the configured sedation window"
+                        ),
+                    }
+                )
+        return pl.DataFrame(_rows).with_columns(
+            pl.col(
+                "median_mg_per_kg",
+                "q1_mg_per_kg",
+                "q3_mg_per_kg",
+                "mean_mg_per_kg",
+                "sd_mg_per_kg",
+            ).cast(pl.Float64).round(4)
+        )
+
+    def build_induction_dose_bins(induction_event_doses, site):
+        """Count event-level doses in the five publication-requested bins."""
+        _definitions = {
+            "etomidate": [
+                ("<0.2", None, 0.20, False),
+                ("0.2-<0.25", 0.20, 0.25, False),
+                ("0.25-<0.3", 0.25, 0.30, False),
+                ("0.3-0.35", 0.30, 0.35, True),
+                (">0.35", 0.35, None, False),
+            ],
+            "ketamine": [
+                ("<1", None, 1.00, False),
+                ("1-<1.5", 1.00, 1.50, False),
+                ("1.5-<2", 1.50, 2.00, False),
+                ("2-2.5", 2.00, 2.50, True),
+                (">2.5", 2.50, None, False),
+            ],
+        }
+        _groups = [
+            ("etomidate", "etomidate"),
+            ("ketamine", "ketamine"),
+        ]
+        _rows = []
+        for _group_order, (_group, _drug) in enumerate(_groups, start=1):
+            _group_rows = induction_event_doses.filter(
+                (pl.col("medication_group") == _group)
+                & (pl.col("drug") == _drug)
+            )
+            _dose = _group_rows.get_column("dose_mg_per_kg").drop_nulls()
+            _n_group = _group_rows.height
+            for _bin_order, (_label, _lower, _upper, _upper_inclusive) in enumerate(
+                _definitions[_drug], start=1
+            ):
+                if _lower is None:
+                    _in_bin = _dose < _upper
+                elif _upper is None:
+                    _in_bin = _dose > _lower
+                elif _upper_inclusive:
+                    _in_bin = (_dose >= _lower) & (_dose <= _upper)
+                else:
+                    _in_bin = (_dose >= _lower) & (_dose < _upper)
+                _n = int(_in_bin.sum())
+                _rows.append(
+                    {
+                        "site_name": site,
+                        "medication_group": _group,
+                        "group_order": _group_order,
+                        "drug": _drug,
+                        "dose_bin": _label,
+                        "bin_order": _bin_order,
+                        "lower_bound_mg_per_kg": _lower,
+                        "upper_bound_mg_per_kg": _upper,
+                        "upper_bound_inclusive": _upper_inclusive,
+                        "n_indexes": _n,
+                        "n_total": _dose.len(),
+                        "n_indexes_in_medication_group": _n_group,
+                        "n_dose_missing": _n_group - _dose.len(),
+                        "pct": round(100.0 * _n / _dose.len(), 2) if _dose.len() else None,
+                        "count_unit": "valid index events with available summed drug dose",
+                    }
+                )
+        return pl.DataFrame(_rows).sort(["group_order", "bin_order"])
+
+    def build_induction_administration_dose_bins(induction_normalised, site):
+        """Count normalized administration-window pairs in five dose bins."""
+        _definitions = {
+            "etomidate": [
+                ("<0.2", None, 0.20, False),
+                ("0.2-0.249", 0.20, 0.25, False),
+                ("0.25-0.299", 0.25, 0.30, False),
+                ("0.3-0.35", 0.30, 0.35, True),
+                (">0.35", 0.35, None, False),
+            ],
+            "ketamine": [
+                ("<1", None, 1.00, False),
+                ("1-1.49", 1.00, 1.50, False),
+                ("1.5-1.99", 1.50, 2.00, False),
+                ("2-2.5", 2.00, 2.50, True),
+                (">2.5", 2.50, None, False),
+            ],
+        }
+        _rows = []
+        for _drug_order, _drug in enumerate(("etomidate", "ketamine"), start=1):
+            _dose = induction_normalised.filter(
+                pl.col("med_category") == _drug
+            ).get_column("dose_per_weight")
+            for _bin_order, (_label, _lower, _upper, _upper_inclusive) in enumerate(
+                _definitions[_drug], start=1
+            ):
+                if _lower is None:
+                    _in_bin = _dose < _upper
+                elif _upper is None:
+                    _in_bin = _dose > _lower
+                elif _upper_inclusive:
+                    _in_bin = (_dose >= _lower) & (_dose <= _upper)
+                else:
+                    _in_bin = (_dose >= _lower) & (_dose < _upper)
+                _n = int(_in_bin.sum())
+                _rows.append(
+                    {
+                        "site_name": site,
+                        "drug": _drug,
+                        "drug_order": _drug_order,
+                        "dose_bin": _label,
+                        "bin_order": _bin_order,
+                        "lower_bound_mg_per_kg": _lower,
+                        "upper_bound_mg_per_kg": _upper,
+                        "upper_bound_inclusive": _upper_inclusive,
+                        "n_admin_windows": _n,
+                        "n_total": _dose.len(),
+                        "pct": round(100.0 * _n / _dose.len(), 2) if _dose.len() else None,
+                        "count_unit": (
+                            "(index paralytic, administration) pairs with available "
+                            "normalized dose"
+                        ),
+                    }
+                )
+        return pl.DataFrame(_rows).sort(["drug_order", "bin_order"])
+
     def build_intubations_by_hospital_year(spine_resolved, site):
         """Count one block-first index event by event-time hospital and year."""
         return (
@@ -431,7 +694,16 @@ def _(pl):
             (_dttm <= _t0) & (_dttm >= _t0 - int(hours * 3600))
         ).fill_null(False)
 
-    return build_intubations_by_hospital_year, epoch_minutes, in_lookback, to_site_naive
+    return (
+        build_induction_administration_dose_bins,
+        build_induction_dose_bins,
+        build_induction_dose_summary,
+        build_intubations_by_hospital_year,
+        build_valid_index_induction_doses,
+        epoch_minutes,
+        in_lookback,
+        to_site_naive,
+    )
 
 
 @app.cell
@@ -2114,9 +2386,14 @@ def _(
     SEDATION_WINDOW_MINUTES,
     SHARE_DIR,
     SITE,
+    build_induction_administration_dose_bins,
+    build_induction_dose_bins,
+    build_induction_dose_summary,
+    build_valid_index_induction_doses,
     dose_weights,
     ecdf_by_dose_per_weight,
     filter_doses_for_summary,
+    index_covariates,
     index_context,
     pl,
     prepare_configured_doses,
@@ -2233,6 +2510,31 @@ def _(
         pl.col("med_category").is_in(["etomidate", "ketamine"])
     )
     induction_normalised = _induction_weighted
+
+    valid_index_induction_doses = build_valid_index_induction_doses(
+        index_covariates,
+        _induction_source,
+        induction_normalised,
+    )
+    valid_index_induction_dose_summary = build_induction_dose_summary(
+        index_covariates,
+        valid_index_induction_doses,
+        SITE,
+    )
+    valid_index_induction_dose_bins = build_induction_dose_bins(
+        valid_index_induction_doses,
+        SITE,
+    )
+    publish(
+        valid_index_induction_dose_summary,
+        SHARE_DIR / "step04__valid_index_induction_dose_by_stratum.csv",
+        "step04__valid_index_induction_dose_by_stratum",
+    )
+    publish(
+        valid_index_induction_dose_bins,
+        SHARE_DIR / "fig_E6__valid_index_induction_dose_bins.csv",
+        "fig_E6__valid_index_induction_dose_bins",
+    )
 
     _percentile_rows = []
     for _drug in ("etomidate", "ketamine"):
@@ -2353,6 +2655,15 @@ def _(
         SHARE_DIR / "fig_E5__induction_dose_tiers.csv",
         "fig_E5__induction_dose_tiers",
     )
+    induction_administration_dose_bins = build_induction_administration_dose_bins(
+        induction_normalised,
+        SITE,
+    )
+    publish(
+        induction_administration_dose_bins,
+        SHARE_DIR / "fig_E5_2__induction_dose_bins.csv",
+        "fig_E5_2__induction_dose_bins",
+    )
 
     def _flow(population, count_unit, stages):
         _rows = []
@@ -2427,6 +2738,9 @@ def _(
         paralytic_normalised,
         sedation_dose_per_weight_ecdf,
         sedation_normalised,
+        valid_index_induction_dose_bins,
+        valid_index_induction_dose_summary,
+        valid_index_induction_doses,
     )
 
 
@@ -2585,6 +2899,106 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
     plt.close(_fig)
     print(f"fig_E5__induction_dose_tiers.png -> {FIG_DIR}")
     return (figure_e5_df,)
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    figure_e5_2_df = pl.read_csv(SHARE_DIR / "fig_E5_2__induction_dose_bins.csv")
+    _fig, _axes = plt.subplots(1, 2, figsize=(13.5, 6.2), squeeze=False)
+    _colors = {"etomidate": "#2f6f8f", "ketamine": "#d07a3a"}
+    for _ax, _drug in zip(_axes[0], ["etomidate", "ketamine"]):
+        _part = figure_e5_2_df.filter(pl.col("drug") == _drug).sort("bin_order")
+        _labels = _part.get_column("dose_bin").to_list()
+        _values = [float(value or 0.0) for value in _part["pct"]]
+        _counts = _part.get_column("n_admin_windows").to_list()
+        _n = int(_part.get_column("n_total").first() or 0)
+        _bars = _ax.bar(
+            range(len(_labels)),
+            _values,
+            width=0.58,
+            color=_colors[_drug],
+        )
+        for _bar, _count, _value in zip(_bars, _counts, _values):
+            if _count:
+                _ax.text(
+                    _bar.get_x() + _bar.get_width() / 2,
+                    _value + 0.8,
+                    f"{_count:,}\n({_value:.1f}%)",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+        _ax.set_xticks(range(len(_labels)))
+        _ax.set_xticklabels(_labels, rotation=25, ha="right")
+        _ax.set_ylim(0, max(_values + [1.0]) * 1.22 + 2)
+        _ax.set_ylabel("Administration-window pairs (%)")
+        _ax.set_xlabel("Dose (mg/kg)")
+        _ax.set_title(f"{_drug.title()} (n={_n:,})", loc="left", fontweight="bold")
+        _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+        _ax.set_axisbelow(True)
+        for _side in ("top", "right"):
+            _ax.spines[_side].set_visible(False)
+    _fig.suptitle(
+        "E.5 Plot 2 - Local induction dose distribution by drug\n"
+        "All administration-window pairs with available normalized dose; bars show n (%)",
+        fontsize=12,
+    )
+    _fig.tight_layout()
+    _fig.savefig(FIG_DIR / "fig_E5_2__induction_dose_bins.png", dpi=150)
+    plt.close(_fig)
+    print(f"fig_E5_2__induction_dose_bins.png -> {FIG_DIR}")
+    return (figure_e5_2_df,)
+
+
+@app.cell
+def _(FIG_DIR, SHARE_DIR, pl, plt):
+    figure_e6_df = pl.read_csv(
+        SHARE_DIR / "fig_E6__valid_index_induction_dose_bins.csv"
+    )
+    _fig, _axes = plt.subplots(1, 2, figsize=(13.5, 6.2), squeeze=False)
+    _colors = {"etomidate": "#2f6f8f", "ketamine": "#d07a3a"}
+    for _ax, _drug in zip(_axes[0], ["etomidate", "ketamine"]):
+        _part = figure_e6_df.filter(pl.col("drug") == _drug).sort("bin_order")
+        _labels = _part.get_column("dose_bin").to_list()
+        _values = [float(value or 0.0) for value in _part["pct"]]
+        _n = int(_part.get_column("n_total").first() or 0)
+        _bars = _ax.bar(
+            range(len(_labels)),
+            _values,
+            width=0.58,
+            color=_colors[_drug],
+        )
+        for _bar, _value in zip(_bars, _values):
+            if _value >= 4:
+                _ax.text(
+                    _bar.get_x() + _bar.get_width() / 2,
+                    _value + 0.8,
+                    f"{_value:.1f}%",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+        _ax.set_xticks(range(len(_labels)))
+        _ax.set_xticklabels(_labels, rotation=25, ha="right")
+        _ax.set_ylim(bottom=0)
+        _ax.set_ylabel("Valid indexes with available dose (%)")
+        _ax.set_xlabel("Summed dose (mg/kg)")
+        _ax.set_title(f"{_drug.title()} (n={_n:,})", loc="left", fontweight="bold")
+        _ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+        _ax.set_axisbelow(True)
+        for _side in ("top", "right"):
+            _ax.spines[_side].set_visible(False)
+    _fig.suptitle(
+        "E.6 - Valid-index induction dose distribution\n"
+        "Retained paralytic + IMV transition + sedative; repeated doses summed per index and drug; "
+        "missing weight excluded",
+        fontsize=12,
+    )
+    _fig.tight_layout()
+    _fig.savefig(FIG_DIR / "fig_E6__valid_index_induction_dose_bins.png", dpi=150)
+    plt.close(_fig)
+    print(f"fig_E6__valid_index_induction_dose_bins.png -> {FIG_DIR}")
+    return (figure_e6_df,)
 
 
 @app.cell
