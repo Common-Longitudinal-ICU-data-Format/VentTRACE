@@ -219,6 +219,9 @@ forward-fills `device_category`, and relabels a row with a null device to `imv` 
 ventilator settings on it look like a ventilator. Sub-analysis D reads this output, not the raw
 table — see §5. A block without a raw IMV row remains eligible; missing respiratory context is
 reported as `no_device_record` rather than excluding a patient who died before IMV was charted.
+CLIF 3.0 lowercase snake-case device and mode values are translated to the equivalent CLIF 2.1
+labels at this boundary because `clifpy 0.5.0`'s waterfall still compares against those labels.
+The existing lower-case analytic labels and published result columns therefore remain unchanged.
 
 The expensive CLIFpy operation is resumable. `01` caches its projected result by stable
 `hospitalization_id` under `output/intermediate_phi/resp_waterfall_cache/`, with per-hospital

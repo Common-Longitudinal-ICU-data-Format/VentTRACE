@@ -1,6 +1,6 @@
 # VentTRACE
 
-**CLIF Version:** 2.1
+**CLIF Input Versions:** 2.1 and 3.0
 
 **clifpy Version:** `>=0.5.0`
 
@@ -216,7 +216,7 @@ tracheostomy exclusions and characterize whether an IMV transition occurred near
 |---|---|
 | `hospitalization_id` | Unique hospitalization identifier |
 | `recorded_dttm` | Respiratory support record date/time |
-| `device_category` | Respiratory device category, including `imv` and `trach collar` |
+| `device_category` | Respiratory device category, including CLIF 2.1 `trach collar` and CLIF 3.0 `trach_collar` spellings |
 | `device_name` | Source respiratory device name |
 | `mode_category` | Standardized ventilation mode category |
 | `mode_name` | Source ventilation mode name |

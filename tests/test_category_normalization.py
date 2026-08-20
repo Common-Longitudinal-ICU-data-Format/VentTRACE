@@ -45,6 +45,12 @@ NORMALIZERS = {
     for label, path in NOTEBOOKS.items()
 }
 
+RESPIRATORY_NORMALIZER = _load_function(
+    ROOT / "code" / "01_cohort.py",
+    "normalize_respiratory_categories",
+    {"normalize_category_columns": NORMALIZERS["01_cohort"]},
+)
+
 
 @pytest.mark.parametrize("label,normalize", NORMALIZERS.items())
 def test_source_categories_are_trimmed_lowercased_and_null_preserving(label, normalize):
@@ -67,6 +73,41 @@ def test_source_categories_are_trimmed_lowercased_and_null_preserving(label, nor
     expected = ["imv", "imv", "given", "rocuronium", "expired", None]
     for column in columns:
         assert result.get_column(column).to_list() == expected, label
+
+
+def test_clif_2_1_and_3_0_respiratory_categories_normalize_identically():
+    frame = pl.DataFrame(
+        {
+            "device_category": [
+                "High Flow NC", "hfnc", "Face Mask", "face_mask",
+                "Trach Collar", "trach_collar", "Nasal Cannula", "nasal_cannula",
+                "Room Air", "room_air", "T Piece", "t_piece", None,
+            ],
+            "mode_category": [
+                "Assist Control-Volume Control", "acvc",
+                "Pressure Control", "pressure_control",
+                "Pressure-Regulated Volume Control", "prvc",
+                "Pressure Support/CPAP", "ps_or_cpap",
+                "Volume Support", "volume_support", "Blow by", "blow_by", None,
+            ],
+        },
+        schema_overrides={"device_category": pl.String, "mode_category": pl.String},
+    )
+
+    result = RESPIRATORY_NORMALIZER(frame)
+
+    assert result.get_column("device_category").to_list() == [
+        "high flow nc", "high flow nc", "face mask", "face mask",
+        "trach collar", "trach collar", "nasal cannula", "nasal cannula",
+        "room air", "room air", "t piece", "t piece", None,
+    ]
+    assert result.get_column("mode_category").to_list() == [
+        "assist control-volume control", "assist control-volume control",
+        "pressure control", "pressure control",
+        "pressure-regulated volume control", "pressure-regulated volume control",
+        "pressure support/cpap", "pressure support/cpap",
+        "volume support", "volume support", "blow by", "blow by", None,
+    ]
 
 
 def test_vital_category_aliases_are_canonical():
@@ -199,6 +240,52 @@ def test_sofa_inputs_are_canonical_before_clifpy_rereads_them(tmp_path):
     assert pl.read_parquet(destination / "clif_medication_admin_continuous.parquet")[
         "med_category"
     ].to_list() == ["norepinephrine"]
+
+
+def test_sofa_adapter_accepts_clif_3_device_tokens(tmp_path):
+    path = ROOT / "code" / "04_covariates.py"
+    normalize = NORMALIZERS["04_covariates"]
+    prepare = _load_function(
+        path,
+        "prepare_sofa_inputs",
+        {
+            "Labs": Labs,
+            "MedicationAdminContinuous": MedicationAdminContinuous,
+            "PatientAssessments": PatientAssessments,
+            "Path": Path,
+            "RespiratorySupport": RespiratorySupport,
+            "Vitals": Vitals,
+            "normalize_category_columns": normalize,
+            "normalize_vital_category": _load_function(
+                path,
+                "normalize_vital_category",
+                {"normalize_category_columns": normalize},
+            ),
+            "source_category_variants": _load_function(path, "source_category_variants"),
+        },
+    )
+    source = tmp_path / "source"
+    destination = tmp_path / "prepared"
+    source.mkdir()
+    pl.DataFrame(
+        {
+            "hospitalization_id": ["H1", "H2"],
+            "recorded_dttm": [datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 2)],
+            "device_category": ["room_air", "hfnc"],
+            "mode_category": [None, None],
+            "fio2_set": [0.21, 0.4],
+            "lpm_set": [None, 30.0],
+            "tidal_volume_set": [None, None],
+            "resp_rate_set": [None, None],
+        },
+        schema_overrides={"mode_category": pl.String},
+    ).write_parquet(source / "clif_respiratory_support.parquet")
+
+    prepare(source, "parquet", "UTC", destination, ["H1", "H2"])
+
+    assert pl.read_parquet(destination / "clif_respiratory_support.parquet")[
+        "device_category"
+    ].to_list() == ["Room Air", "High Flow NC"]
 
 
 def test_source_category_filter_variants_cover_supported_vital_aliases():

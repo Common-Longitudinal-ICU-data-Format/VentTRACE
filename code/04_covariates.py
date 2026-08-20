@@ -176,11 +176,17 @@ def _(
             "nippv": "NIPPV",
             "cpap": "CPAP",
             "high flow nc": "High Flow NC",
+            "hfnc": "High Flow NC",
+            "high_flow_nc": "High Flow NC",
             "face mask": "Face Mask",
+            "face_mask": "Face Mask",
             "trach collar": "Trach Collar",
+            "trach_collar": "Trach Collar",
             "nasal cannula": "Nasal Cannula",
+            "nasal_cannula": "Nasal Cannula",
             "other": "Other",
             "room air": "Room Air",
+            "room_air": "Room Air",
         }
 
         for table_name, (loader, columns, category_col, categories) in table_specs.items():
