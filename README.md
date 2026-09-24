@@ -388,18 +388,22 @@ under `output/`.
 |---|---|
 | `final_no_phi/fig_1__main_consort.csv` and `final_no_phi/figures/fig_1__main_consort.png` | Main flow from qualifying administrations through the valid-index Table 1 populations |
 | `final_no_phi/table1_by_agent_block_readable.csv` | Human-readable Table 1 using one first-valid index per encounter block |
+| `final_no_phi/step05__block_race_ethnicity_sex.csv` | Block-level six-race cross-tab of complete Hispanic/non-Hispanic Female/Male records; totals cover displayed records only |
 | `final_no_phi/table1_by_agent_index_readable.csv` | Human-readable Table 1 using all valid index events |
 | `final_no_phi/table1_by_agent_block.json` | Numeric block-level Table 1 payload for cross-site aggregation |
 | `final_no_phi/table1_by_agent_index.json` | Numeric index-level Table 1 payload for cross-site aggregation |
+| `final_no_phi/step08__adult_imv_hospitalization_demographics.csv` | Independent hospitalization-level six-race cross-tab of complete Hispanic/non-Hispanic Female/Male records for patients age 18+ with at least one charted IMV row |
 | `final_no_phi/step01__*.csv` through `step04__*.csv` | Cohort, medication, context, coverage, dose, and hospital/year summaries |
 | `final_no_phi/fig_A1__*.csv` through `fig_T2__*.csv` | Auditable aggregate data used to draw each figure |
 | `final_no_phi/figures/` | PNG figures with stems matching their source CSV files |
+| `final_no_phi/sedation_combination_ecdf/` | Separate charted-dose, dose/weight, and selected-weight QC ECDF CSV/PNG pairs for every observed exact sedative combination |
 | `final_no_phi/logs/` | Timestamped console logs for each pipeline step; not inventoried by the artifact manifest |
 | `final_no_phi/artifact_manifest.csv` | Producer, dataframe, sources, row count, size, and SHA-256 for each shareable artifact |
 
 Step 04 includes hospital/year trends, weight-normalized dose ECDFs, etomidate/ketamine
 percentiles, local dose tiers and five-bin plots, valid-index dose summaries by clinical strata,
-valid-index dose bins, and a dose-specific eligibility flow. Site percentiles must not be averaged;
+valid-index dose bins, a dose-specific eligibility flow, and selected-weight QC overall and by exact
+sedative combination. Site percentiles must not be averaged;
 the published integer numerators and denominators support later consortium aggregation.
 
 Protected row-level intermediates are written to `output/intermediate_phi/` and are not a study
@@ -416,6 +420,7 @@ deliverable. Run logs are written inside `output/final_no_phi/logs/`.
 | 5 | `code/05_table_one.py` | Produces the main CONSORT, block- and index-level Table 1 outputs, and organ-support/source-coverage figures |
 | 6 | `code/06_reference_cpt.py` | Compares first-index context categories with block-level CPT `31500` presence |
 | 7 | `code/07_artifact_manifest.py` | Validates declared shareable outputs and writes their provenance and checksums |
+| 8 | `code/08_adult_imv_demographics.py` | Independently selects hospitalizations age 18+ with any charted IMV and publishes their demographic cross-tab; launchers run this before the final step 07 audit |
 
 See [`code/README.md`](code/README.md) for the per-step input/output map and
 [`docs/pipeline_flow.md`](docs/pipeline_flow.md) for the full analytic walkthrough and disclosure

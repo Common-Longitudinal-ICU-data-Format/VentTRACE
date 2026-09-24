@@ -264,6 +264,9 @@ def _(Path, json):
     SHARE_DIR = OUTPUT_DIR / "final_no_phi"
     FIG_DIR = SHARE_DIR / "figures"
     FIG_DIR.mkdir(parents=True, exist_ok=True)
+    SEDATION_COMBINATION_DIR = SHARE_DIR / "sedation_combination_ecdf"
+    SEDATION_COMBINATION_FIG_DIR = SEDATION_COMBINATION_DIR / "figures"
+    SEDATION_COMBINATION_FIG_DIR.mkdir(parents=True, exist_ok=True)
     SEDATION_WINDOW_MINUTES = float(config["sedation_window_minutes"])
 
     # P33. An ANALYSIS grid, not a site parameter -- a site that changed these windows
@@ -358,6 +361,8 @@ def _(Path, json):
         MEDICATION_DOSE_UNITS,
         PHI_DIR,
         RESPIRATORY_DEVICES,
+        SEDATION_COMBINATION_DIR,
+        SEDATION_COMBINATION_FIG_DIR,
         SEDATION_WINDOW_MINUTES,
         SHARE_DIR,
         SITE,
@@ -1748,10 +1753,148 @@ def _(pl):
             )
         )
 
+    def ecdf_by_columns(df, group_columns, value_column, output_column):
+        """Integer-count ECDF for a named numeric value and explicit grouping keys."""
+        _valid = pl.col(value_column).is_not_null() & pl.col(value_column).is_finite()
+        for _column in group_columns:
+            _valid = _valid & pl.col(_column).is_not_null()
+        return (
+            df.filter(_valid)
+            .group_by([*group_columns, value_column])
+            .agg(n_at_value=pl.len())
+            .sort([*group_columns, value_column])
+            .with_columns(
+                n_cum=pl.col("n_at_value").cum_sum().over(group_columns),
+                n_total=pl.col("n_at_value").sum().over(group_columns),
+            )
+            .with_columns(ecdf=(pl.col("n_cum") / pl.col("n_total")).round(6))
+            .rename({value_column: output_column})
+            .select(
+                [
+                    *group_columns,
+                    output_column,
+                    "n_at_value",
+                    "n_cum",
+                    "n_total",
+                    "ecdf",
+                ]
+            )
+        )
+
+    def build_sedation_combination_weight_source(
+        index_context, dose_weights, agent_sets
+    ):
+        """Return one selected-weight row per index overall and per observed agent set."""
+        _index_weights = (
+            index_context.select(
+                "index_paralytic_id",
+                pl.col("sedative_agents").list.join("+").alias("agent_set"),
+            )
+            .join(
+                dose_weights.select("index_paralytic_id", "dose_weight_kg"),
+                on="index_paralytic_id",
+                how="left",
+                validate="1:1",
+            )
+        )
+        assert _index_weights.height == index_context.height
+        return pl.concat(
+            [
+                _index_weights.select(
+                    pl.lit("all_indexes").alias("population"), "dose_weight_kg"
+                ),
+                _index_weights.filter(pl.col("agent_set").is_in(agent_sets)).select(
+                    pl.col("agent_set").alias("population"), "dose_weight_kg"
+                ),
+            ]
+        )
+
+    def summarize_weight_adjusted_doses_by_sedative_combination(
+        df, agent_sets, medications, configured_units
+    ):
+        """Build one wide normalized-dose summary row per exact agent set."""
+        _medications = sorted(medications)
+        _grouped = df.group_by(["agent_set", "med_category"]).agg(
+            n_admin_windows=pl.len(),
+            mean_dose_per_weight=pl.col("dose_per_weight").mean(),
+            sd_dose_per_weight=pl.col("dose_per_weight").std(),
+            median_dose_per_weight=pl.col("dose_per_weight").median(),
+            p25_dose_per_weight=pl.col("dose_per_weight").quantile(
+                0.25, interpolation="linear"
+            ),
+            p75_dose_per_weight=pl.col("dose_per_weight").quantile(
+                0.75, interpolation="linear"
+            ),
+        )
+
+        _schema = {"agent_set": pl.String}
+        for _medication in _medications:
+            _schema[f"{_medication}_n_admin_windows"] = pl.Int64
+            for _statistic in (
+                "mean_dose_per_weight",
+                "sd_dose_per_weight",
+                "median_dose_per_weight",
+                "p25_dose_per_weight",
+                "p75_dose_per_weight",
+                "iqr_dose_per_weight",
+            ):
+                _schema[f"{_medication}_{_statistic}"] = pl.Float64
+            _schema[f"{_medication}_dose_per_weight_unit"] = pl.String
+
+        _rows = []
+        for _agent_set in sorted(agent_sets):
+            _row = {"agent_set": _agent_set}
+            for _medication in _medications:
+                _part = _grouped.filter(
+                    (pl.col("agent_set") == _agent_set)
+                    & (pl.col("med_category") == _medication)
+                )
+                _prefix = f"{_medication}_"
+                if _part.is_empty():
+                    _row[f"{_prefix}n_admin_windows"] = 0
+                    for _statistic in (
+                        "mean_dose_per_weight",
+                        "sd_dose_per_weight",
+                        "median_dose_per_weight",
+                        "p25_dose_per_weight",
+                        "p75_dose_per_weight",
+                        "iqr_dose_per_weight",
+                    ):
+                        _row[f"{_prefix}{_statistic}"] = None
+                else:
+                    _statistics = _part.row(0, named=True)
+                    _row[f"{_prefix}n_admin_windows"] = _statistics[
+                        "n_admin_windows"
+                    ]
+                    for _statistic in (
+                        "mean_dose_per_weight",
+                        "sd_dose_per_weight",
+                        "median_dose_per_weight",
+                        "p25_dose_per_weight",
+                        "p75_dose_per_weight",
+                    ):
+                        _row[f"{_prefix}{_statistic}"] = _statistics[_statistic]
+                    _row[f"{_prefix}iqr_dose_per_weight"] = (
+                        _statistics["p75_dose_per_weight"]
+                        - _statistics["p25_dose_per_weight"]
+                    )
+                _configured_unit = configured_units[_medication]
+                _row[f"{_prefix}dose_per_weight_unit"] = (
+                    _configured_unit
+                    if _configured_unit.endswith("/kg")
+                    else f"{_configured_unit}/kg"
+                )
+            _rows.append(_row)
+
+        return pl.DataFrame(_rows, schema=_schema).sort("agent_set")
+
     return (
+        build_sedation_combination_weight_source,
+        ecdf_by_columns,
         ecdf_by_dose_per_weight,
         filter_doses_for_summary,
         prepare_configured_doses,
+        summarize_weight_adjusted_doses_by_sedative_combination,
     )
 
 
@@ -2414,7 +2557,9 @@ def _(
         .filter(pl.col("med_category").is_not_null())
     )
     sedation_source = (
-        index_context.select("index_paralytic_id", "sedatives")
+        index_context.select("index_paralytic_id", "sedative_agents", "sedatives")
+        .with_columns(agent_set=pl.col("sedative_agents").list.join("+"))
+        .drop("sedative_agents")
         .join(_dose_weight, on="index_paralytic_id", how="left")
         .explode("sedatives")
         .unnest("sedatives")
@@ -2751,6 +2896,219 @@ def _(
 
 
 @app.cell
+def _(
+    MEDICATION_DOSE_UNITS,
+    SEDATION_COMBINATION_DIR,
+    SITE,
+    build_sedation_combination_weight_source,
+    dose_weights,
+    ecdf_by_columns,
+    index_context,
+    pl,
+    publish,
+    sedation_normalised,
+    summarize_weight_adjusted_doses_by_sedative_combination,
+):
+    _absolute_inventory = pl.read_csv(
+        SEDATION_COMBINATION_DIR / "step03__absolute_dose_inventory.csv"
+    )
+    _current_combinations = (
+        index_context.select(
+            pl.col("sedative_agents").list.join("+").alias("agent_set"),
+            pl.col("sedatives").list.len().alias("n_admin_windows"),
+        )
+        .filter(pl.col("agent_set") != "")
+        .group_by("agent_set")
+        .agg(
+            n_indexes=pl.len(),
+            n_admin_windows=pl.col("n_admin_windows").sum(),
+        )
+        .with_columns(pl.col("n_indexes", "n_admin_windows").cast(pl.Int64))
+        .sort("agent_set")
+    )
+    _agent_sets = _current_combinations.get_column("agent_set").to_list()
+    _inventory_combinations = _absolute_inventory.select(
+        "agent_set", "n_indexes", "n_admin_windows"
+    ).sort("agent_set")
+    assert _absolute_inventory.get_column("site_name").unique().to_list() == [SITE]
+    assert _current_combinations.equals(_inventory_combinations), (
+        "step03__absolute_dose_inventory.csv does not match the current index_context; "
+        "rerun step 03 before step 04"
+    )
+
+    _normalised_ecdf = (
+        ecdf_by_columns(
+            sedation_normalised,
+            ["agent_set", "med_category", "dose_per_weight_unit"],
+            "dose_per_weight",
+            "dose_per_weight",
+        )
+        .rename({"n_at_value": "n_at_dose"})
+        .with_columns(pl.lit(SITE).alias("site_name"))
+        .select(
+            "site_name",
+            "agent_set",
+            "med_category",
+            "dose_per_weight_unit",
+            "dose_per_weight",
+            "n_at_dose",
+            "n_cum",
+            "n_total",
+            "ecdf",
+        )
+    )
+
+    for _path in SEDATION_COMBINATION_DIR.glob("dose_per_weight_ecdf__*.csv"):
+        _path.unlink()
+    for _path in SEDATION_COMBINATION_DIR.glob("selected_weight_ecdf__*.csv"):
+        _path.unlink()
+
+    _sedatives = sorted(
+        set(MEDICATION_DOSE_UNITS)
+        - {"rocuronium", "succinylcholine", "vecuronium"}
+    )
+    _dose_per_weight_statistics = (
+        summarize_weight_adjusted_doses_by_sedative_combination(
+            sedation_normalised,
+            _agent_sets,
+            _sedatives,
+            MEDICATION_DOSE_UNITS,
+        ).with_columns(pl.lit("dose_per_weight").alias("artifact_type"))
+    )
+
+    _inventory_rows = []
+    for _agent_set in _agent_sets:
+        _slug = _agent_set.replace("+", "_plus_")
+        _filename = f"dose_per_weight_ecdf__{_slug}.csv"
+        _part = _normalised_ecdf.filter(pl.col("agent_set") == _agent_set)
+        publish(
+            _part,
+            SEDATION_COMBINATION_DIR / _filename,
+            f"sedation_combination_dose_per_weight_ecdf__{_slug}",
+        )
+        _source_row = _absolute_inventory.filter(
+            pl.col("agent_set") == _agent_set
+        ).row(0, named=True)
+        _inventory_rows.append(
+            {
+                "site_name": SITE,
+                "artifact_type": "dose_per_weight",
+                "agent_set": _agent_set,
+                "file_slug": _slug,
+                "csv_file": f"sedation_combination_ecdf/{_filename}",
+                "figure_file": (
+                    "sedation_combination_ecdf/figures/"
+                    f"dose_per_weight_ecdf__{_slug}.png"
+                ),
+                "n_indexes": _source_row["n_indexes"],
+                "n_observations": _part.group_by(
+                    ["agent_set", "med_category", "dose_per_weight_unit"]
+                ).agg(pl.col("n_total").first()).get_column("n_total").sum(),
+            }
+        )
+
+    _weight_source = build_sedation_combination_weight_source(
+        index_context,
+        dose_weights,
+        _agent_sets,
+    )
+    selected_weight_eligibility = (
+        _weight_source.group_by("population")
+        .agg(
+            n_indexes=pl.len(),
+            n_weight_available=pl.col("dose_weight_kg").is_not_null().sum(),
+        )
+        .with_columns(
+            n_weight_missing=pl.col("n_indexes") - pl.col("n_weight_available"),
+            site_name=pl.lit(SITE),
+        )
+        .select(
+            "site_name",
+            "population",
+            "n_indexes",
+            "n_weight_available",
+            "n_weight_missing",
+        )
+        .sort("population")
+    )
+    publish(
+        selected_weight_eligibility,
+        SEDATION_COMBINATION_DIR / "step04__selected_weight_eligibility_qc.csv",
+        "step04__selected_weight_eligibility_qc",
+    )
+
+    _weight_ecdf = (
+        ecdf_by_columns(
+            _weight_source,
+            ["population"],
+            "dose_weight_kg",
+            "weight_kg",
+        )
+        .rename({"n_at_value": "n_at_weight"})
+        .with_columns(pl.lit(SITE).alias("site_name"))
+        .select(
+            "site_name",
+            "population",
+            "weight_kg",
+            "n_at_weight",
+            "n_cum",
+            "n_total",
+            "ecdf",
+        )
+    )
+    for _population in ["all_indexes", *_agent_sets]:
+        _slug = (
+            "all_indexes"
+            if _population == "all_indexes"
+            else _population.replace("+", "_plus_")
+        )
+        _filename = f"selected_weight_ecdf__{_slug}.csv"
+        _part = _weight_ecdf.filter(pl.col("population") == _population)
+        publish(
+            _part,
+            SEDATION_COMBINATION_DIR / _filename,
+            f"selected_weight_ecdf__{_slug}",
+        )
+        _eligibility = selected_weight_eligibility.filter(
+            pl.col("population") == _population
+        ).row(0, named=True)
+        _inventory_rows.append(
+            {
+                "site_name": SITE,
+                "artifact_type": "selected_weight",
+                "agent_set": (
+                    "(all indexes)" if _population == "all_indexes" else _population
+                ),
+                "file_slug": _slug,
+                "csv_file": f"sedation_combination_ecdf/{_filename}",
+                "figure_file": (
+                    "sedation_combination_ecdf/figures/"
+                    f"selected_weight_ecdf__{_slug}.png"
+                ),
+                "n_indexes": _eligibility["n_indexes"],
+                "n_observations": _eligibility["n_weight_available"],
+            }
+        )
+
+    sedation_combination_step04_inventory = (
+        pl.DataFrame(_inventory_rows)
+        .join(
+            _dose_per_weight_statistics,
+            on=["artifact_type", "agent_set"],
+            how="left",
+            validate="m:1",
+        )
+        .sort(["artifact_type", "agent_set"])
+    )
+    publish(
+        sedation_combination_step04_inventory,
+        SEDATION_COMBINATION_DIR / "step04__dose_weight_inventory.csv",
+        "step04__dose_weight_inventory",
+    )
+    return sedation_combination_step04_inventory, selected_weight_eligibility
+
+
+@app.cell
 def _():
     import matplotlib
 
@@ -2758,6 +3116,96 @@ def _():
     import matplotlib.pyplot as plt
 
     return (plt,)
+
+
+@app.cell
+def _(
+    SEDATION_COMBINATION_FIG_DIR,
+    SHARE_DIR,
+    pl,
+    plt,
+    sedation_combination_step04_inventory,
+):
+    for _pattern in (
+        "dose_per_weight_ecdf__*.png",
+        "selected_weight_ecdf__*.png",
+    ):
+        for _path in SEDATION_COMBINATION_FIG_DIR.glob(_pattern):
+            _path.unlink()
+
+    for _row in sedation_combination_step04_inventory.iter_rows(named=True):
+        _df = pl.read_csv(SHARE_DIR / _row["csv_file"])
+        _destination = SHARE_DIR / _row["figure_file"]
+        if _df.is_empty():
+            print(f"{_destination.name} skipped -- source ECDF has zero rows")
+            continue
+
+        if _row["artifact_type"] == "dose_per_weight":
+            _groups = _df.select(
+                "med_category", "dose_per_weight_unit"
+            ).unique().sort(["med_category", "dose_per_weight_unit"]).rows()
+            _height = 1.5 + 2.2 * len(_groups)
+            _fig, _axes = plt.subplots(
+                len(_groups), 1, figsize=(9, _height), squeeze=False
+            )
+            _axes = [_axis[0] for _axis in _axes]
+            for _axis, (_medication, _unit) in zip(_axes, _groups):
+                _part = _df.filter(
+                    (pl.col("med_category") == _medication)
+                    & (pl.col("dose_per_weight_unit") == _unit)
+                ).sort("dose_per_weight")
+                _x = _part.get_column("dose_per_weight").to_list()
+                _y = _part.get_column("ecdf").to_list()
+                _axis.step(_x, _y, where="post", color="#2a78d6", linewidth=1.7)
+                _axis.plot(_x, _y, "o", color="#2a78d6", markersize=3.2)
+                _axis.set_title(
+                    f"{_medication} | {_unit} | n = {_part['n_total'][0]:,}",
+                    loc="left",
+                    fontsize=9,
+                )
+                _axis.set_ylabel("cumulative\nproportion", fontsize=8)
+                _axis.set_xlim(left=0)
+                _axis.set_ylim(0, 1.02)
+                _axis.grid(axis="x", color="#e1e0d9", linewidth=0.8)
+                for _side in ("top", "right"):
+                    _axis.spines[_side].set_visible(False)
+            _axes[-1].set_xlabel(
+                "dose divided by selected weight; each agent has its own ECDF"
+            )
+            _fig.suptitle(
+                "Weight-adjusted sedative dose ECDF | exact combination: "
+                f"{_row['agent_set']}\n"
+                f"{_row['n_indexes']:,} index event(s); doses are not combined",
+                fontsize=11,
+            )
+            _fig.tight_layout()
+            _fig.subplots_adjust(top=1 - 1.0 / _height, hspace=0.55)
+        else:
+            _fig, _axis = plt.subplots(figsize=(9, 5.5))
+            _part = _df.sort("weight_kg")
+            _x = _part.get_column("weight_kg").to_list()
+            _y = _part.get_column("ecdf").to_list()
+            _axis.step(_x, _y, where="post", color="#7a4eab", linewidth=1.8)
+            _axis.plot(_x, _y, "o", color="#7a4eab", markersize=3.0)
+            _axis.set_xlim(left=0)
+            _axis.set_ylim(0, 1.02)
+            _axis.set_xlabel("pipeline-selected weight (kg)")
+            _axis.set_ylabel("cumulative proportion")
+            _axis.grid(axis="x", color="#e1e0d9", linewidth=0.8)
+            for _side in ("top", "right"):
+                _axis.spines[_side].set_visible(False)
+            _axis.set_title(
+                f"Selected-weight QC | {_row['agent_set']}\n"
+                f"{_row['n_observations']:,} weights from {_row['n_indexes']:,} index event(s)",
+                loc="left",
+                fontsize=11,
+            )
+            _fig.tight_layout()
+
+        _fig.savefig(_destination, dpi=150)
+        plt.close(_fig)
+        print(f"{_destination.name} -> {SEDATION_COMBINATION_FIG_DIR}")
+    return
 
 
 @app.cell

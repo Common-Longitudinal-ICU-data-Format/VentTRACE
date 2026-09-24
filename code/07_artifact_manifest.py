@@ -18,6 +18,9 @@ with open(ROOT / "config" / "config.json") as config_file:
 OUTPUT_DIR = Path(CONFIG["output_directory"])
 if not OUTPUT_DIR.is_absolute():
     OUTPUT_DIR = ROOT / OUTPUT_DIR
+DATA_DIR = Path(CONFIG["data_directory"])
+if not DATA_DIR.is_absolute():
+    DATA_DIR = ROOT / DATA_DIR
 SHARE_DIR = OUTPUT_DIR / "final_no_phi"
 SITE = CONFIG["site_name"]
 
@@ -47,6 +50,7 @@ CATALOG = [
     ("fig_E2__sedation_dose_summary.csv", "figure_data", "03_context", "E2", "figure_e2_df", "intermediate_phi/step03__index_context.parquet"),
     ("step03__sedation_dose_raw_unit_counts.csv", "qc", "03_context", None, "sedation_dose_units", "intermediate_phi/step03__index_context.parquet"),
     ("fig_E3__sedation_dose_ecdf.csv", "figure_data", "03_context", "E3", "figure_e3_df", "intermediate_phi/step03__index_context.parquet"),
+    ("sedation_combination_ecdf/step03__absolute_dose_inventory.csv", "qc", "03_context", None, "sedation_combination_dose_inventory", "intermediate_phi/step03__index_context.parquet"),
     ("step04__sofa_coverage.csv", "qc", "04_covariates", None, "sofa_coverage", "intermediate_phi/step04__index_covariates.parquet"),
     ("fig_T2__source_coverage.csv", "figure_data", "04_covariates", "T2", "figure_t2_df", "intermediate_phi/step04__index_covariates.parquet"),
     ("step04__intubations_by_hospital_year.csv", "data", "04_covariates", None, "intubations_by_hospital_year", "intermediate_phi/step04__index_covariates.parquet"),
@@ -59,14 +63,27 @@ CATALOG = [
     ("step04__valid_index_induction_dose_by_stratum.csv", "data", "04_covariates", None, "valid_index_induction_dose_summary", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__index_covariates.parquet|intermediate_phi/step04__dose_weights.parquet"),
     ("fig_E6__valid_index_induction_dose_bins.csv", "figure_data", "04_covariates", "E6", "figure_e6_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__index_covariates.parquet|intermediate_phi/step04__dose_weights.parquet"),
     ("fig_G1__dose_per_weight_consort.csv", "figure_data", "04_covariates", "G1", "figure_g1_df", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet"),
+    ("sedation_combination_ecdf/step04__dose_weight_inventory.csv", "qc", "04_covariates", None, "sedation_combination_step04_inventory", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet|final_no_phi/sedation_combination_ecdf/step03__absolute_dose_inventory.csv"),
+    ("sedation_combination_ecdf/step04__selected_weight_eligibility_qc.csv", "qc", "04_covariates", None, "selected_weight_eligibility", "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet|final_no_phi/sedation_combination_ecdf/step03__absolute_dose_inventory.csv"),
     ("fig_1__main_consort.csv", "figure_data", "05_table_one", "1", "figure_1_df", "intermediate_phi/step04__index_covariates.parquet|final_no_phi/step02__paralytic_administration_summary.csv|final_no_phi/step02__procedural_index_exclusion_summary.csv"),
     ("table1_by_agent_block_readable.csv", "table", "05_table_one", None, "table1_block_readable", "intermediate_phi/step04__index_covariates.parquet"),
     ("table1_by_agent_block.json", "table", "05_table_one", None, "table1_block", "intermediate_phi/step04__index_covariates.parquet"),
+    ("step05__block_race_ethnicity_sex.csv", "table", "05_table_one", None, "block_race_ethnicity_sex", "intermediate_phi/step04__index_covariates.parquet"),
     ("table1_by_agent_index_readable.csv", "table", "05_table_one", None, "table1_index_readable", "intermediate_phi/step04__index_covariates.parquet"),
     ("table1_by_agent_index.json", "table", "05_table_one", None, "table1_index", "intermediate_phi/step04__index_covariates.parquet"),
     ("fig_T1__organ_support_by_window.csv", "figure_data", "05_table_one", "T1", "figure_t1_df", "final_no_phi/table1_by_agent_block.json"),
     ("fig_F1__cpt_cascade.csv", "figure_data", "06_reference_cpt", "F1", "figure_f1_df", "intermediate_phi/step04__index_covariates.parquet"),
     ("fig_F1__cpt_cascade_qc.csv", "qc", "06_reference_cpt", "F1", "cpt_cascade_qc", "final_no_phi/fig_F1__cpt_cascade.csv"),
+    (
+        "step08__adult_imv_hospitalization_demographics.csv",
+        "table",
+        "08_adult_imv_demographics",
+        None,
+        "adult_imv_demographics",
+        f"raw_clif/clif_hospitalization.{CONFIG['filetype']}|"
+        f"raw_clif/clif_patient.{CONFIG['filetype']}|"
+        f"raw_clif/clif_respiratory_support.{CONFIG['filetype']}",
+    ),
 ]
 
 FIGURES = [
@@ -105,6 +122,67 @@ for figure_id, description, producer, dataframe in FIGURES:
     )
 
 
+def append_sedation_combination_artifacts():
+    """Declare the per-combination files listed by their fixed inventory tables."""
+    _specs = [
+        (
+            "sedation_combination_ecdf/step03__absolute_dose_inventory.csv",
+            "03_context",
+            "sedation_combination_dose_ecdf",
+            "absolute_dose",
+            "intermediate_phi/step03__index_context.parquet",
+        ),
+        (
+            "sedation_combination_ecdf/step04__dose_weight_inventory.csv",
+            "04_covariates",
+            "sedation_combination_step04_inventory",
+            None,
+            "intermediate_phi/step03__index_context.parquet|intermediate_phi/step04__dose_weights.parquet|final_no_phi/sedation_combination_ecdf/step03__absolute_dose_inventory.csv",
+        ),
+    ]
+    for _inventory_name, _producer, _dataframe, _fixed_type, _sources in _specs:
+        _inventory_path = SHARE_DIR / _inventory_name
+        if not _inventory_path.exists():
+            continue
+        _inventory = pl.read_csv(_inventory_path)
+        _required = {"agent_set", "file_slug", "csv_file", "figure_file"}
+        _missing = _required - set(_inventory.columns)
+        assert not _missing, f"{_inventory_name} is missing columns {sorted(_missing)}"
+        for _row in _inventory.iter_rows(named=True):
+            _artifact_type = _fixed_type or _row["artifact_type"]
+            _csv = Path(_row["csv_file"])
+            _figure = Path(_row["figure_file"])
+            assert not _csv.is_absolute() and ".." not in _csv.parts
+            assert not _figure.is_absolute() and ".." not in _figure.parts
+            assert _csv.parent == Path("sedation_combination_ecdf")
+            assert _figure.parent == Path("sedation_combination_ecdf/figures")
+            assert _csv.stem == _figure.stem
+            _figure_id = f"SC_{_artifact_type}_{_row['file_slug']}"
+            CATALOG.extend(
+                [
+                    (
+                        str(_csv),
+                        "figure_data",
+                        _producer,
+                        _figure_id,
+                        _dataframe,
+                        _sources,
+                    ),
+                    (
+                        str(_figure),
+                        "figure",
+                        _producer,
+                        _figure_id,
+                        _dataframe,
+                        f"final_no_phi/{_csv}|final_no_phi/{_inventory_name}",
+                    ),
+                ]
+            )
+
+
+append_sedation_combination_artifacts()
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as file:
@@ -140,6 +218,13 @@ def validate_artifact_site(path, site):
             )
 
 
+def source_path(source):
+    """Resolve generated sources under output and raw CLIF sources under data."""
+    if source.startswith("raw_clif/"):
+        return DATA_DIR / source.removeprefix("raw_clif/")
+    return OUTPUT_DIR / source
+
+
 def main():
     table1_path = SHARE_DIR / "table1_by_agent_block.json"
     with open(table1_path) as file:
@@ -161,7 +246,7 @@ def main():
         source
         for *_, source_files in CATALOG
         for source in source_files.split("|")
-        if not (OUTPUT_DIR / source).exists()
+        if not source_path(source).exists()
     )
     assert not missing_sources, f"declared source artifacts are missing: {missing_sources}"
 
@@ -171,7 +256,7 @@ def main():
         path = SHARE_DIR / filename
         exists = path.exists()
         if not exists and kind == "figure":
-            source = OUTPUT_DIR / source_files
+            source = source_path(source_files)
             if source.exists() and row_count(source) == 0:
                 status = "not_generated_empty_source"
             else:

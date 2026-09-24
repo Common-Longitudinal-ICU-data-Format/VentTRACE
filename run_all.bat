@@ -1,7 +1,7 @@
 @echo off
 rem Run the VentTRACE pipeline, in order, logging each step.
 rem
-rem   run_all.bat            - 01 through 07
+rem   run_all.bat            - 01 through 06, standalone 08, then the 07 audit
 rem   run_all.bat 02 03      - only those steps
 
 setlocal EnableExtensions DisableDelayedExpansion
@@ -18,13 +18,13 @@ if not exist "config\config.json" (
     exit /b 1
 )
 
-set "ALL_STEPS=01_cohort 02_index_paralytic 03_context 04_covariates 05_table_one 06_reference_cpt 07_artifact_manifest"
+set "ALL_STEPS=01_cohort 02_index_paralytic 03_context 04_covariates 05_table_one 06_reference_cpt 08_adult_imv_demographics 07_artifact_manifest"
 set "STEPS="
 set /a STEP_COUNT=0
 
 if "%~1"=="" (
     set "STEPS=%ALL_STEPS%"
-    set /a STEP_COUNT=7
+    set /a STEP_COUNT=8
 ) else (
     call :select_steps %*
     if errorlevel 1 (

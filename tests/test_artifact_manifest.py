@@ -61,14 +61,33 @@ def test_manifest_has_unique_complete_inventory(manifest):
     assert manifest.get_column("filename").is_unique().all()
     assert manifest.get_column("artifact_id").is_unique().all()
     assert manifest.filter(pl.col("status") == "missing").height == 0
-    assert manifest.height == 62
+    share = _share_dir()
+    absolute_inventory = pl.read_csv(
+        share / "sedation_combination_ecdf/step03__absolute_dose_inventory.csv"
+    )
+    weight_inventory = pl.read_csv(
+        share / "sedation_combination_ecdf/step04__dose_weight_inventory.csv"
+    )
+    assert manifest.height == 67 + 2 * (
+        absolute_inventory.height + weight_inventory.height
+    )
 
 
 def test_declared_source_artifacts_exist(manifest):
     output = _share_dir().parent
+    with open(CONFIG) as file:
+        config = json.load(file)
+    data = Path(config["data_directory"])
+    if not data.is_absolute():
+        data = ROOT / data
     for source_files in manifest.get_column("source_files"):
         for source in source_files.split("|"):
-            assert (output / source).exists(), source
+            source_path = (
+                data / source.removeprefix("raw_clif/")
+                if source.startswith("raw_clif/")
+                else output / source
+            )
+            assert source_path.exists(), source
 
 
 def test_generated_artifact_hashes_match(manifest):
@@ -85,9 +104,10 @@ def test_every_figure_has_same_stem_data(manifest):
         (pl.col("kind") == "figure") & (pl.col("status") == "generated")
     )
     for row in generated_figures.iter_rows(named=True):
-        png_stem = Path(row["filename"]).stem
-        data = manifest.filter(pl.col("filename") == f"{png_stem}.csv")
-        assert data.height == 1, png_stem
+        png_path = Path(row["filename"])
+        data_path = png_path.parent.parent / f"{png_path.stem}.csv"
+        data = manifest.filter(pl.col("filename") == str(data_path))
+        assert data.height == 1, png_path.stem
         assert data["figure_id"][0] == row["figure_id"]
         assert data["primary_dataframe"][0] == row["primary_dataframe"]
 
@@ -99,9 +119,16 @@ def test_output_names_follow_contract(manifest):
         "table1_by_agent_index_readable.csv",
         "table1_by_agent_index.json",
     }
+    dynamic_prefixes = (
+        "dose_ecdf__",
+        "dose_per_weight_ecdf__",
+        "selected_weight_ecdf__",
+    )
     for filename in manifest.get_column("filename"):
         name = Path(filename).name
-        assert name in stable_table1 or name.startswith(("fig_", "step")), filename
+        assert name in stable_table1 or name.startswith(
+            ("fig_", "step", *dynamic_prefixes)
+        ), filename
 
 
 def test_site_validation_rejects_mixed_site_csv(tmp_path):

@@ -66,6 +66,11 @@ def _(mo):
         that is not a CSV, and it is the one place in this pipeline where a reader must
         unwrap `payload["rows"]` before reading a published table.
 
+        A separate `step05__block_race_ethnicity_sex.csv` gives manuscript-ready joint
+        counts of race by ethnicity and sex for the block-level population. It retains
+        only the six requested race rows and complete Hispanic/non-Hispanic Female/Male
+        cells, so its total is the number represented in the displayed table.
+
         Proning was withdrawn from the covariate set on 2026-08-14 at the study lead's
         direction, so no `position` row appears here and `04` no longer opens the table.
 
@@ -1146,6 +1151,75 @@ def _(
         "encounter_block"
     ).n_unique(), "the first-valid-index selection lost or duplicated a block"
 
+    # A manuscript-ready joint demographic count table. CSV has one header row, so
+    # ethnicity and sex are flattened into labels such as "Hispanic or Latino - Female".
+    # Other, unknown, and absent demographics are outside this purpose-built display;
+    # totals therefore describe only records represented in its four visible cells.
+    _race_levels = [
+        ("american indian or alaska native", "American Indian/Alaska Native"),
+        ("asian", "Asian"),
+        (
+            "native hawaiian or other pacific islander",
+            "Native Hawaiian or Other Pacific Islander",
+        ),
+        ("black or african american", "Black or African American"),
+        ("white", "White"),
+        ("more than one race", "More than One Race"),
+    ]
+    _ethnicity_levels = [
+        ("non-hispanic", "Not Hispanic or Latino"),
+        ("hispanic", "Hispanic or Latino"),
+    ]
+    _sex_levels = [("female", "Female"), ("male", "Male")]
+    _count_columns = [
+        f"{_ethnicity_label} - {_sex_label}"
+        for _, _ethnicity_label in _ethnicity_levels
+        for _, _sex_label in _sex_levels
+    ]
+    _included_demographics = _block_covariates.filter(
+        pl.col("race_category").is_in([value for value, _ in _race_levels])
+        & pl.col("ethnicity_category").is_in(
+            [value for value, _ in _ethnicity_levels]
+        )
+        & pl.col("sex_category").is_in([value for value, _ in _sex_levels])
+    )
+    _demographic_rows = []
+    for _race_value, _race_label in _race_levels:
+        _race_frame = _included_demographics.filter(
+            pl.col("race_category") == _race_value
+        )
+        _record = {"Racial Categories": _race_label}
+        for _ethnicity_value, _ethnicity_label in _ethnicity_levels:
+            for _sex_value, _sex_label in _sex_levels:
+                _record[f"{_ethnicity_label} - {_sex_label}"] = _race_frame.filter(
+                    (pl.col("ethnicity_category") == _ethnicity_value)
+                    & (pl.col("sex_category") == _sex_value)
+                ).height
+        _record["Total"] = sum(_record[_column] for _column in _count_columns)
+        assert sum(_record[_column] for _column in _count_columns) == _record["Total"], (
+            f"demographic cells do not reconcile for race {_race_label!r}"
+        )
+        _demographic_rows.append(_record)
+
+    _total_record = {"Racial Categories": "Total"}
+    for _column in [*_count_columns, "Total"]:
+        _total_record[_column] = sum(_row[_column] for _row in _demographic_rows)
+    assert _total_record["Total"] == _included_demographics.height
+    assert sum(_total_record[_column] for _column in _count_columns) == _total_record["Total"]
+    _demographic_rows.append(_total_record)
+    block_race_ethnicity_sex = pl.DataFrame(_demographic_rows).select(
+        "Racial Categories", *_count_columns, "Total"
+    )
+    publish(
+        block_race_ethnicity_sex,
+        SHARE_DIR / "step05__block_race_ethnicity_sex.csv",
+        "step05__block_race_ethnicity_sex",
+    )
+    print(
+        "block demographic table represented "
+        f"{_included_demographics.height:,}/{_block_covariates.height:,} blocks"
+    )
+
     table1_index = build_table1(_valid_index_covariates, "index")
     table1_block = build_table1(_block_covariates, "block")
 
@@ -1154,7 +1228,13 @@ def _(
     )
     print(f"block table n_rows : {table1_block.filter(pl.col('statistic') == 'n_rows')['overall'][0]:,.0f}")
     print(f"index table n_rows : {table1_index.filter(pl.col('statistic') == 'n_rows')['overall'][0]:,.0f}")
-    return build_table1, index_covariates, table1_block, table1_index
+    return (
+        block_race_ethnicity_sex,
+        build_table1,
+        index_covariates,
+        table1_block,
+        table1_index,
+    )
 
 
 @app.cell
