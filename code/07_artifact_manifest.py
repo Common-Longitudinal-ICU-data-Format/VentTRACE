@@ -157,11 +157,13 @@ def append_sedation_combination_artifacts():
             assert _csv.parent == Path("sedation_combination_ecdf")
             assert _figure.parent == Path("sedation_combination_ecdf/figures")
             assert _csv.stem == _figure.stem
+            _csv_name = _csv.as_posix()
+            _figure_name = _figure.as_posix()
             _figure_id = f"SC_{_artifact_type}_{_row['file_slug']}"
             CATALOG.extend(
                 [
                     (
-                        str(_csv),
+                        _csv_name,
                         "figure_data",
                         _producer,
                         _figure_id,
@@ -169,12 +171,12 @@ def append_sedation_combination_artifacts():
                         _sources,
                     ),
                     (
-                        str(_figure),
+                        _figure_name,
                         "figure",
                         _producer,
                         _figure_id,
                         _dataframe,
-                        f"final_no_phi/{_csv}|final_no_phi/{_inventory_name}",
+                        f"final_no_phi/{_csv_name}|final_no_phi/{_inventory_name}",
                     ),
                 ]
             )
@@ -225,6 +227,11 @@ def source_path(source):
     return OUTPUT_DIR / source
 
 
+def relative_artifact_name(path, directory):
+    """Return a platform-independent path for comparison and publication."""
+    return path.relative_to(directory).as_posix()
+
+
 def main():
     table1_path = SHARE_DIR / "table1_by_agent_block.json"
     with open(table1_path) as file:
@@ -233,7 +240,7 @@ def main():
     declared = {entry[0] for entry in CATALOG}
     # Launcher logs are timestamped runtime files, not declared analysis artifacts.
     actual = {
-        str(path.relative_to(SHARE_DIR))
+        relative_artifact_name(path, SHARE_DIR)
         for path in SHARE_DIR.rglob("*")
         if path.is_file()
         and path.name != "artifact_manifest.csv"

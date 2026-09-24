@@ -3,7 +3,7 @@
 import ast
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import polars as pl
 import pytest
@@ -30,6 +30,7 @@ def _load_manifest_function(name):
 
 
 VALIDATE_ARTIFACT_SITE = _load_manifest_function("validate_artifact_site")
+RELATIVE_ARTIFACT_NAME = _load_manifest_function("relative_artifact_name")
 
 
 def _share_dir():
@@ -39,6 +40,15 @@ def _share_dir():
     if not output.is_absolute():
         output = ROOT / output
     return output / "final_no_phi"
+
+
+def test_relative_artifact_name_is_platform_independent():
+    share = PureWindowsPath("Z:/output/final_no_phi")
+    artifact = share / "figures" / "fig_1__main_consort.png"
+
+    assert RELATIVE_ARTIFACT_NAME(artifact, share) == (
+        "figures/fig_1__main_consort.png"
+    )
 
 
 @pytest.fixture(scope="module")
