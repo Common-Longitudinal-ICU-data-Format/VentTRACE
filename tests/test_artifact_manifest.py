@@ -31,6 +31,10 @@ def _load_manifest_function(name):
 
 VALIDATE_ARTIFACT_SITE = _load_manifest_function("validate_artifact_site")
 RELATIVE_ARTIFACT_NAME = _load_manifest_function("relative_artifact_name")
+SOURCE_PATH = _load_manifest_function("source_path")
+ROW_COUNT = _load_manifest_function("row_count")
+ARTIFACT_STATUS = _load_manifest_function("artifact_status")
+ARTIFACT_STATUS.__globals__.update(source_path=SOURCE_PATH, row_count=ROW_COUNT)
 
 
 def _share_dir():
@@ -49,6 +53,44 @@ def test_relative_artifact_name_is_platform_independent():
     assert RELATIVE_ARTIFACT_NAME(artifact, share) == (
         "figures/fig_1__main_consort.png"
     )
+
+
+def test_missing_figure_with_empty_primary_source_is_allowed(tmp_path, monkeypatch):
+    output = tmp_path / "output"
+    source = output / "final_no_phi" / "ecdf.csv"
+    source.parent.mkdir(parents=True)
+    pl.DataFrame(schema={"value": pl.Float64}).write_csv(source)
+    inventory = output / "final_no_phi" / "inventory.csv"
+    pl.DataFrame({"artifact": ["ecdf.csv"]}).write_csv(inventory)
+    monkeypatch.setitem(SOURCE_PATH.__globals__, "OUTPUT_DIR", output)
+    monkeypatch.setitem(SOURCE_PATH.__globals__, "DATA_DIR", tmp_path / "data")
+
+    status = ARTIFACT_STATUS(
+        output / "final_no_phi" / "figures" / "ecdf.png",
+        "figure",
+        "final_no_phi/ecdf.csv|final_no_phi/inventory.csv",
+    )
+
+    assert status == "not_generated_empty_source"
+
+
+def test_missing_figure_with_nonempty_primary_source_is_required(tmp_path, monkeypatch):
+    output = tmp_path / "output"
+    source = output / "final_no_phi" / "ecdf.csv"
+    source.parent.mkdir(parents=True)
+    pl.DataFrame({"value": [1.0]}).write_csv(source)
+    inventory = output / "final_no_phi" / "inventory.csv"
+    pl.DataFrame({"artifact": ["ecdf.csv"]}).write_csv(inventory)
+    monkeypatch.setitem(SOURCE_PATH.__globals__, "OUTPUT_DIR", output)
+    monkeypatch.setitem(SOURCE_PATH.__globals__, "DATA_DIR", tmp_path / "data")
+
+    status = ARTIFACT_STATUS(
+        output / "final_no_phi" / "figures" / "ecdf.png",
+        "figure",
+        "final_no_phi/ecdf.csv|final_no_phi/inventory.csv",
+    )
+
+    assert status == "missing"
 
 
 @pytest.fixture(scope="module")

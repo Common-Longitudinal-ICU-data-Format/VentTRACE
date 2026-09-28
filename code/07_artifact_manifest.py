@@ -232,6 +232,17 @@ def relative_artifact_name(path, directory):
     return path.relative_to(directory).as_posix()
 
 
+def artifact_status(path, kind, source_files):
+    """Classify an artifact, allowing figures with empty primary data to be absent."""
+    if path.exists():
+        return "generated"
+    if kind == "figure":
+        primary_source = source_path(source_files.split("|", 1)[0])
+        if primary_source.exists() and row_count(primary_source) == 0:
+            return "not_generated_empty_source"
+    return "missing"
+
+
 def main():
     table1_path = SHARE_DIR / "table1_by_agent_block.json"
     with open(table1_path) as file:
@@ -262,18 +273,9 @@ def main():
     for filename, kind, producer, figure_id, dataframe, source_files in CATALOG:
         path = SHARE_DIR / filename
         exists = path.exists()
-        if not exists and kind == "figure":
-            source = source_path(source_files)
-            if source.exists() and row_count(source) == 0:
-                status = "not_generated_empty_source"
-            else:
-                missing_required.append(filename)
-                status = "missing"
-        elif not exists:
+        status = artifact_status(path, kind, source_files)
+        if status == "missing":
             missing_required.append(filename)
-            status = "missing"
-        else:
-            status = "generated"
 
         if exists:
             validate_artifact_site(path, SITE)
