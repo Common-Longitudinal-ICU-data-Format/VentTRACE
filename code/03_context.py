@@ -107,6 +107,9 @@ def _(Path, json):
     SHARE_DIR = OUTPUT_DIR / "final_no_phi"
     FIG_DIR = SHARE_DIR / "figures"
     FIG_DIR.mkdir(parents=True, exist_ok=True)
+    SEDATION_COMBINATION_DIR = SHARE_DIR / "sedation_combination_ecdf"
+    SEDATION_COMBINATION_FIG_DIR = SEDATION_COMBINATION_DIR / "figures"
+    SEDATION_COMBINATION_FIG_DIR.mkdir(parents=True, exist_ok=True)
 
     IMV_WINDOW_BEFORE_MINUTES = float(config["imv_window_before_minutes"])
     IMV_WINDOW_AFTER_MINUTES = float(config["imv_window_after_minutes"])
@@ -187,9 +190,12 @@ def _(Path, json):
         MEDICATION_DOSE_UNITS,
         OFFSET_BIN_WIDTH,
         PHI_DIR,
+        SEDATION_COMBINATION_DIR,
+        SEDATION_COMBINATION_FIG_DIR,
         SEDATION_WINDOW_MINUTES,
         SEDATIVES,
         SHARE_DIR,
+        SITE,
         TIMEZONE,
     )
 
@@ -1721,6 +1727,252 @@ def _(pl):
 
 
 @app.cell
+def _(pl):
+    def ecdf_by_sedative_combination(df):
+        """ECDF of each agent's dose within an exact sedative agent set."""
+        _group = ["agent_set", "med_category", "med_dose_unit"]
+        _clean = df.filter(
+            pl.col("agent_set").is_not_null()
+            & pl.col("med_category").is_not_null()
+            & pl.col("med_dose_unit").is_not_null()
+            & pl.col("med_dose").is_not_null()
+            & pl.col("med_dose").is_finite()
+        )
+        return (
+            _clean.group_by([*_group, "med_dose"])
+            .agg(n_at_dose=pl.len())
+            .sort([*_group, "med_dose"])
+            .with_columns(
+                n_cum=pl.col("n_at_dose").cum_sum().over(_group),
+                n_total=pl.col("n_at_dose").sum().over(_group),
+            )
+            .with_columns(ecdf=(pl.col("n_cum") / pl.col("n_total")).round(6))
+            .rename({"med_dose": "dose"})
+            .select([*_group, "dose", "n_at_dose", "n_cum", "n_total", "ecdf"])
+        )
+
+    return (ecdf_by_sedative_combination,)
+
+
+@app.cell
+def _(pl):
+    def summarize_doses_by_sedative_combination(
+        df, agent_sets, medications, configured_units
+    ):
+        """Build one wide configured-dose summary row per exact agent set."""
+        _medications = sorted(medications)
+        _grouped = df.group_by(["agent_set", "med_category"]).agg(
+            n_admin_windows=pl.len(),
+            mean_dose=pl.col("med_dose_converted").mean(),
+            sd_dose=pl.col("med_dose_converted").std(),
+            median_dose=pl.col("med_dose_converted").median(),
+            p25_dose=pl.col("med_dose_converted").quantile(
+                0.25, interpolation="linear"
+            ),
+            p75_dose=pl.col("med_dose_converted").quantile(
+                0.75, interpolation="linear"
+            ),
+        )
+
+        _schema = {"agent_set": pl.String}
+        for _medication in _medications:
+            _schema[f"{_medication}_n_admin_windows"] = pl.Int64
+            for _statistic in (
+                "mean_dose",
+                "sd_dose",
+                "median_dose",
+                "p25_dose",
+                "p75_dose",
+                "iqr_dose",
+            ):
+                _schema[f"{_medication}_{_statistic}"] = pl.Float64
+            _schema[f"{_medication}_dose_unit"] = pl.String
+
+        _rows = []
+        for _agent_set in sorted(agent_sets):
+            _row = {"agent_set": _agent_set}
+            for _medication in _medications:
+                _part = _grouped.filter(
+                    (pl.col("agent_set") == _agent_set)
+                    & (pl.col("med_category") == _medication)
+                )
+                _prefix = f"{_medication}_"
+                if _part.is_empty():
+                    _row[f"{_prefix}n_admin_windows"] = 0
+                    for _statistic in (
+                        "mean_dose",
+                        "sd_dose",
+                        "median_dose",
+                        "p25_dose",
+                        "p75_dose",
+                        "iqr_dose",
+                    ):
+                        _row[f"{_prefix}{_statistic}"] = None
+                else:
+                    _statistics = _part.row(0, named=True)
+                    _row[f"{_prefix}n_admin_windows"] = _statistics[
+                        "n_admin_windows"
+                    ]
+                    for _statistic in (
+                        "mean_dose",
+                        "sd_dose",
+                        "median_dose",
+                        "p25_dose",
+                        "p75_dose",
+                    ):
+                        _row[f"{_prefix}{_statistic}"] = _statistics[_statistic]
+                    _row[f"{_prefix}iqr_dose"] = (
+                        _statistics["p75_dose"] - _statistics["p25_dose"]
+                    )
+                _row[f"{_prefix}dose_unit"] = configured_units[_medication]
+            _rows.append(_row)
+
+        return pl.DataFrame(_rows, schema=_schema).sort("agent_set")
+
+    return (summarize_doses_by_sedative_combination,)
+
+
+@app.cell
+def _(
+    MEDICATION_DOSE_UNITS,
+    SEDATION_COMBINATION_DIR,
+    SEDATION_COMBINATION_FIG_DIR,
+    SEDATIVES,
+    SITE,
+    ecdf_by_sedative_combination,
+    index_context,
+    pl,
+    publish,
+    sed_in_window,
+    sedation_dose_summary_clean,
+    summarize_doses_by_sedative_combination,
+):
+    _agent_sets = index_context.select(
+        "index_paralytic_id",
+        pl.col("sedative_agents").list.join("+").alias("agent_set"),
+    )
+    sedation_combination_source = sed_in_window.join(
+        _agent_sets, on="index_paralytic_id", how="left", validate="m:1"
+    )
+    assert sedation_combination_source.height == sed_in_window.height
+    assert not sedation_combination_source.filter(pl.col("agent_set") == "").height
+
+    sedation_combination_dose_ecdf = ecdf_by_sedative_combination(
+        sedation_combination_source
+    ).with_columns(pl.lit(SITE).alias("site_name")).select(
+        "site_name",
+        "agent_set",
+        "med_category",
+        "med_dose_unit",
+        "dose",
+        "n_at_dose",
+        "n_cum",
+        "n_total",
+        "ecdf",
+    )
+
+    for _path in SEDATION_COMBINATION_DIR.glob("dose_ecdf__*.csv"):
+        _path.unlink()
+    # A step-03 rerun invalidates all downstream combination/weight products. Removing
+    # only this generated namespace makes a later manifest run fail until step 04 reruns,
+    # rather than certifying files built from an older index context.
+    for _pattern in ("dose_per_weight_ecdf__*.csv", "selected_weight_ecdf__*.csv"):
+        for _path in SEDATION_COMBINATION_DIR.glob(_pattern):
+            _path.unlink()
+    for _pattern in (
+        "dose_per_weight_ecdf__*.png",
+        "selected_weight_ecdf__*.png",
+    ):
+        for _path in SEDATION_COMBINATION_FIG_DIR.glob(_pattern):
+            _path.unlink()
+    for _name in (
+        "step04__dose_weight_inventory.csv",
+        "step04__selected_weight_eligibility_qc.csv",
+    ):
+        (SEDATION_COMBINATION_DIR / _name).unlink(missing_ok=True)
+
+    _index_counts = (
+        index_context.filter(pl.col("any_sedative"))
+        .with_columns(agent_set=pl.col("sedative_agents").list.join("+"))
+        .group_by("agent_set")
+        .agg(n_indexes=pl.len())
+    )
+    _administration_counts = sedation_combination_source.group_by("agent_set").agg(
+        n_admin_windows=pl.len()
+    )
+    _agent_set_values = sorted(
+        sedation_combination_dose_ecdf.get_column("agent_set").unique().to_list()
+    )
+    _summary_source = sedation_dose_summary_clean.join(
+        _agent_sets, on="index_paralytic_id", how="left", validate="m:1"
+    )
+    assert _summary_source.height == sedation_dose_summary_clean.height
+    _dose_statistics = summarize_doses_by_sedative_combination(
+        _summary_source,
+        _agent_set_values,
+        SEDATIVES,
+        MEDICATION_DOSE_UNITS,
+    )
+    _rows = []
+    for _agent_set in _agent_set_values:
+        _slug = _agent_set.replace("+", "_plus_")
+        _filename = f"dose_ecdf__{_slug}.csv"
+        _part = sedation_combination_dose_ecdf.filter(
+            pl.col("agent_set") == _agent_set
+        )
+        publish(
+            _part,
+            SEDATION_COMBINATION_DIR / _filename,
+            f"sedation_combination_dose_ecdf__{_slug}",
+        )
+        _rows.append(
+            {
+                "site_name": SITE,
+                "agent_set": _agent_set,
+                "file_slug": _slug,
+                "csv_file": f"sedation_combination_ecdf/{_filename}",
+                "figure_file": (
+                    f"sedation_combination_ecdf/figures/dose_ecdf__{_slug}.png"
+                ),
+                "n_agents": len(_agent_set.split("+")),
+                "n_indexes": _index_counts.filter(
+                    pl.col("agent_set") == _agent_set
+                ).get_column("n_indexes").item(),
+                "n_admin_windows": _administration_counts.filter(
+                    pl.col("agent_set") == _agent_set
+                ).get_column("n_admin_windows").item(),
+            }
+        )
+
+    _inventory_base = pl.DataFrame(
+        _rows,
+        schema={
+            "site_name": pl.String,
+            "agent_set": pl.String,
+            "file_slug": pl.String,
+            "csv_file": pl.String,
+            "figure_file": pl.String,
+            "n_agents": pl.Int64,
+            "n_indexes": pl.Int64,
+            "n_admin_windows": pl.Int64,
+        },
+    )
+    sedation_combination_dose_inventory = _inventory_base.join(
+        _dose_statistics, on="agent_set", how="left", validate="1:1"
+    ).sort("agent_set")
+    publish(
+        sedation_combination_dose_inventory,
+        SEDATION_COMBINATION_DIR / "step03__absolute_dose_inventory.csv",
+        "step03__absolute_dose_inventory",
+    )
+    return (
+        sedation_combination_dose_ecdf,
+        sedation_combination_dose_inventory,
+        sedation_combination_source,
+    )
+
+
+@app.cell
 def _(SHARE_DIR, ecdf_by_group, pl, publish, sed_in_window):
     # The ECDF and unit-count table consume the same raw frame. A row here is an (index paralytic,
     # administration) pair, not a distinct administration: a sedative charted inside
@@ -2397,6 +2649,68 @@ def _(FIG_DIR, SHARE_DIR, pl, plt):
         plt.close(_fig)
         print(f"fig_E3__sedation_dose_ecdf.png -> {FIG_DIR}")
     return (figure_e3_df,)
+
+
+@app.cell
+def _(
+    SEDATION_COMBINATION_FIG_DIR,
+    SHARE_DIR,
+    pl,
+    plt,
+    sedation_combination_dose_inventory,
+):
+    for _path in SEDATION_COMBINATION_FIG_DIR.glob("dose_ecdf__*.png"):
+        _path.unlink()
+
+    for _row in sedation_combination_dose_inventory.iter_rows(named=True):
+        _df = pl.read_csv(SHARE_DIR / _row["csv_file"])
+        _groups = _df.select("med_category", "med_dose_unit").unique().sort(
+            ["med_category", "med_dose_unit"]
+        ).rows()
+        if not _groups:
+            continue
+
+        _height = 1.5 + 2.2 * len(_groups)
+        _fig, _axes = plt.subplots(
+            len(_groups), 1, figsize=(9, _height), squeeze=False
+        )
+        _axes = [_axis[0] for _axis in _axes]
+        for _axis, (_medication, _unit) in zip(_axes, _groups):
+            _part = _df.filter(
+                (pl.col("med_category") == _medication)
+                & (pl.col("med_dose_unit") == _unit)
+            ).sort("dose")
+            _x = _part.get_column("dose").to_list()
+            _y = _part.get_column("ecdf").to_list()
+            _axis.step(_x, _y, where="post", color="#2a78d6", linewidth=1.7)
+            _axis.plot(_x, _y, "o", color="#2a78d6", markersize=3.2)
+            _axis.set_ylim(0, 1.02)
+            _axis.set_xlim(left=0)
+            _axis.grid(axis="x", color="#e1e0d9", linewidth=0.8)
+            _axis.set_axisbelow(True)
+            for _side in ("top", "right"):
+                _axis.spines[_side].set_visible(False)
+            _axis.set_ylabel("cumulative\nproportion", fontsize=8)
+            _axis.set_title(
+                f"{_medication} | {_unit} | n = {_part['n_total'][0]:,}",
+                loc="left",
+                fontsize=9,
+            )
+        _axes[-1].set_xlabel(
+            "charted dose; each agent has its own ECDF and axis"
+        )
+        _fig.suptitle(
+            f"Sedative dose ECDF | exact combination: {_row['agent_set']}\n"
+            f"{_row['n_indexes']:,} index event(s); doses are not combined",
+            fontsize=11,
+        )
+        _fig.tight_layout()
+        _fig.subplots_adjust(top=1 - 1.0 / _height, hspace=0.55)
+        _destination = SHARE_DIR / _row["figure_file"]
+        _fig.savefig(_destination, dpi=150)
+        plt.close(_fig)
+        print(f"{_destination.name} -> {SEDATION_COMBINATION_FIG_DIR}")
+    return
 
 
 if __name__ == "__main__":

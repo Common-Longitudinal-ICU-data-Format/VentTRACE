@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the VentTRACE pipeline, in order, logging each step.
 #
-#   ./run_all.sh            # 01 .. 07
+#   ./run_all.sh            # 01 .. 06, standalone 08, then the 07 audit
 #   ./run_all.sh 02 03      # only those steps
 #
 # Always launches from the repo root: config's output_directory is "./output",
@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
   exit 1
 }
 
-STEPS=(01_cohort 02_index_paralytic 03_context 04_covariates 05_table_one 06_reference_cpt 07_artifact_manifest)
+STEPS=(01_cohort 02_index_paralytic 03_context 04_covariates 05_table_one 06_reference_cpt 08_adult_imv_demographics 07_artifact_manifest)
 
 if [ $# -gt 0 ]; then
   picked=()
@@ -29,7 +29,8 @@ if [ $# -gt 0 ]; then
   STEPS=("${picked[@]}")
 fi
 
-LOG_DIR="output/final_no_phi/logs/run_$(date -u +%Y%m%dT%H%M%SZ)"   # UTC, never the OS zone
+OUTPUT_DIR=$(python3 -c 'import json; print(json.load(open("config/config.json"))["output_directory"])')
+LOG_DIR="${OUTPUT_DIR%/}/final_no_phi/logs/run_$(date -u +%Y%m%dT%H%M%SZ)"   # UTC, never the OS zone
 mkdir -p "$LOG_DIR"
 
 uv sync --quiet
@@ -45,5 +46,5 @@ for step in "${STEPS[@]}"; do
   echo "--- $step ok in $((SECONDS - start))s"
 done
 
-file_count=$(uv run python -c 'from pathlib import Path; print(sum(p.is_file() for p in Path("output/final_no_phi").rglob("*")))')
-echo; echo "done: ${#STEPS[@]} steps, $file_count files in output/final_no_phi"
+file_count=$(uv run python -c 'import sys; from pathlib import Path; print(sum(p.is_file() for p in Path(sys.argv[1]).rglob("*")))' "${OUTPUT_DIR%/}/final_no_phi")
+echo; echo "done: ${#STEPS[@]} steps, $file_count files in ${OUTPUT_DIR%/}/final_no_phi"

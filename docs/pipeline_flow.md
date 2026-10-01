@@ -219,6 +219,9 @@ forward-fills `device_category`, and relabels a row with a null device to `imv` 
 ventilator settings on it look like a ventilator. Sub-analysis D reads this output, not the raw
 table — see §5. A block without a raw IMV row remains eligible; missing respiratory context is
 reported as `no_device_record` rather than excluding a patient who died before IMV was charted.
+CLIF 3.0 lowercase snake-case device and mode values are translated to the equivalent CLIF 2.1
+labels at this boundary because `clifpy 0.5.0`'s waterfall still compares against those labels.
+The existing lower-case analytic labels and published result columns therefore remain unchanged.
 
 The expensive CLIFpy operation is resumable. `01` caches its projected result by stable
 `hospitalization_id` under `output/intermediate_phi/resp_waterfall_cache/`, with per-hospital
@@ -437,6 +440,16 @@ changes the configured width. The column is named `n_admin_windows` for exactly 
 not comparable row-for-row with `fig_B1__paralytic_dose_ecdf.csv`'s `n_total`, which counts
 administrations, despite the two files sharing a column name and schema.
 
+The `sedation_combination_ecdf/` directory preserves the exact sorted `agent_set` from
+`step03__sedation_summary.csv`. Each `dose_ecdf__<combination>.csv` contains a separate ECDF for
+each member agent; doses from ketamine and propofol, for example, are never added or placed on one
+shared distribution. Redoses remain administration-window pairs, matching E.3. The paired PNG uses
+one panel and axis per agent. `step03__absolute_dose_inventory.csv` records the deterministic file
+mapping and the index and administration-window denominators. It also keeps one row per exact
+combination with a fixed column block for every sedative: clean configured-unit n, mean, sample SD,
+median, p25, p75 and IQR. Thus the fentanyl columns on the `fentanyl` row can be compared directly
+with the same columns on `fentanyl+propofol` without combining unlike medication doses or units.
+
 **Output:** `step03__index_context.parquet` — `step02__index_paralytic.parquet` plus D's and E's columns, one
 row per index paralytic, written to `output/intermediate_phi/`. It carries raw timestamps
 (`t_dttm`, `imv_transition_dttm`, per-dose `admin_dttm` inside `sedatives`) and is never
@@ -455,10 +468,20 @@ The induction percentile and tier population is every etomidate or ketamine pair
 configured +/-5-minute window, with no additional normalized-dose range filter. The separate
 valid-index summary and E.6 population requires the Table 1 index gate, sums repeated
 administrations per drug/index, and includes crossover indexes in both received-drug summaries.
-Site percentiles are descriptive and cannot
-be averaged across sites. B.2/E.4 integer `n_at_dose` values can be concatenated to reconstruct a
-pooled distribution; E.5 integer tier numerators and denominators support the later coordinating
-center meta-analysis.
+Site percentiles are descriptive and cannot be averaged across sites. B.2/E.4 integer `n_at_dose`
+values can be concatenated to reconstruct a pooled distribution; E.5 integer tier numerators and
+denominators support the later coordinating center meta-analysis.
+
+Combination-specific normalized outputs are written as
+`sedation_combination_ecdf/dose_per_weight_ecdf__<combination>.csv`, again with independent agent
+ECDFs. Selected-weight QC uses one weight per index rather than one per medication row and publishes
+`selected_weight_ecdf__all_indexes.csv` plus one file per observed sedative combination.
+`step04__selected_weight_eligibility_qc.csv` retains the available and missing-weight counts for
+every denominator, while `step04__dose_weight_inventory.csv` lists all generated CSV/PNG pairs.
+Its `dose_per_weight` rows also carry the same fixed medication blocks as the absolute-dose
+inventory, reporting normalized-dose n, mean, sample SD, median, p25, p75, IQR and unit. This makes
+solo-versus-combination comparisons available on both dose scales; `selected_weight` rows leave
+those medication fields null because they describe the weight distribution rather than dose.
 
 ---
 

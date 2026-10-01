@@ -114,6 +114,15 @@ def table1_block_readable():
 
 
 @pytest.fixture(scope="module")
+def block_race_ethnicity_sex():
+    _, share = _dirs()
+    path = share / "step05__block_race_ethnicity_sex.csv"
+    if not path.exists():
+        pytest.skip("step05__block_race_ethnicity_sex.csv absent; run code/05_table_one.py first")
+    return pl.read_csv(path)
+
+
+@pytest.fixture(scope="module")
 def consort_cohort():
     _, share = _dirs()
     return pl.read_csv(share / "step01__consort_cohort.csv")
@@ -483,3 +492,85 @@ def test_the_readable_table_never_prints_a_bare_python_none(table1_block_readabl
             f"column {_c} has {_bad.height} unformatted cell(s): "
             f"{_bad.get_column('variable').to_list()[:5]}"
         )
+
+
+def test_block_race_ethnicity_sex_table_reconciles(block_race_ethnicity_sex, frame):
+    expected_races = {
+        "American Indian/Alaska Native",
+        "Asian",
+        "Native Hawaiian or Other Pacific Islander",
+        "Black or African American",
+        "White",
+        "More than One Race",
+        "Total",
+    }
+    assert set(block_race_ethnicity_sex.get_column("Racial Categories")) == expected_races
+
+    count_columns = [
+        column
+        for column in block_race_ethnicity_sex.columns
+        if column not in ("Racial Categories", "Total")
+    ]
+    race_rows = block_race_ethnicity_sex.filter(pl.col("Racial Categories") != "Total")
+    total_row = block_race_ethnicity_sex.filter(pl.col("Racial Categories") == "Total")
+    assert total_row.height == 1
+    assert race_rows.filter(
+        pl.sum_horizontal([pl.col(column) for column in count_columns])
+        != pl.col("Total")
+    ).height == 0
+    for column in [*count_columns, "Total"]:
+        assert race_rows.get_column(column).sum() == total_row.get_column(column)[0]
+
+    first_valid = (
+        frame.filter(pl.col("imv_transition") & pl.col("any_sedative"))
+        .sort(["encounter_block", "p_num", "index_paralytic_id"])
+        .unique("encounter_block", keep="first", maintain_order=True)
+    )
+    expected = first_valid.filter(
+        pl.col("race_category").is_in(
+            [
+                "american indian or alaska native",
+                "asian",
+                "native hawaiian or other pacific islander",
+                "black or african american",
+                "white",
+                "more than one race",
+            ]
+        )
+        & pl.col("ethnicity_category").is_in(["non-hispanic", "hispanic"])
+        & pl.col("sex_category").is_in(["female", "male"])
+    ).height
+    assert total_row.get_column("Total")[0] == expected
+
+
+def test_block_demographic_column_totals_match_first_valid_indexes(
+    frame, block_race_ethnicity_sex
+):
+    first_valid = (
+        frame.filter(pl.col("imv_transition") & pl.col("any_sedative"))
+        .sort(["encounter_block", "p_num", "index_paralytic_id"])
+        .unique("encounter_block", keep="first", maintain_order=True)
+    )
+    total = block_race_ethnicity_sex.filter(pl.col("Racial Categories") == "Total").row(
+        0, named=True
+    )
+    ethnicity_labels = {
+        "Not Hispanic or Latino": "non-hispanic",
+        "Hispanic or Latino": "hispanic",
+    }
+    retained_races = [
+        "american indian or alaska native",
+        "asian",
+        "native hawaiian or other pacific islander",
+        "black or african american",
+        "white",
+        "more than one race",
+    ]
+    for label, ethnicity in ethnicity_labels.items():
+        for sex_label, sex in (("Female", "female"), ("Male", "male")):
+            expected = first_valid.filter(
+                pl.col("race_category").is_in(retained_races)
+                & (pl.col("ethnicity_category") == ethnicity)
+                & (pl.col("sex_category") == sex)
+            ).height
+            assert total[f"{label} - {sex_label}"] == expected

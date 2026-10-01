@@ -27,10 +27,10 @@ output/intermediate_phi/*
 
 output/*
 ouput_mimic/*
+output_mimic/*
 output_rush/*
 output_ucmc/*
 
 # site-specific config (create from config_template.json)
 config/config.json
 *.pyc
-

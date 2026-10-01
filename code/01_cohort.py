@@ -89,7 +89,44 @@ def _(pl):
             ]
         )
 
-    return canonical_category_sql, normalize_category_columns
+    def normalize_respiratory_categories(df):
+        """Accept CLIF 2.1 labels and CLIF 3.0 tokens without changing outputs."""
+        aliases = {
+            "device_category": {
+                "hfnc": "high flow nc",
+                "high_flow_nc": "high flow nc",
+                "face_mask": "face mask",
+                "trach_collar": "trach collar",
+                "t_piece": "t piece",
+                "nasal_cannula": "nasal cannula",
+                "room_air": "room air",
+            },
+            "mode_category": {
+                "acvc": "assist control-volume control",
+                "assist_control_volume_control": "assist control-volume control",
+                "pressure_control": "pressure control",
+                "prvc": "pressure-regulated volume control",
+                "pressure_regulated_volume_control": "pressure-regulated volume control",
+                "ps_or_cpap": "pressure support/cpap",
+                "pressure_support_cpap": "pressure support/cpap",
+                "volume_support": "volume support",
+                "t_piece": "t piece",
+                "blow_by": "blow by",
+            },
+        }
+        columns = [column for column in aliases if column in df.columns]
+        if not columns:
+            return df
+        normalized = normalize_category_columns(df, *columns)
+        return normalized.with_columns(
+            [pl.col(column).replace(aliases[column]).alias(column) for column in columns]
+        )
+
+    return (
+        canonical_category_sql,
+        normalize_category_columns,
+        normalize_respiratory_categories,
+    )
 
 
 @app.cell
@@ -758,6 +795,7 @@ def _(
     cohort_paralytic,
     encounter_mapping,
     normalize_category_columns,
+    normalize_respiratory_categories,
     pl,
 ):
     # One load of the raw respiratory table for every hospitalization in the cohort —
@@ -783,8 +821,8 @@ def _(
     _resp_category_columns = [
         column for column in resp_raw_pd.columns if column.endswith("_category")
     ]
-    resp_raw_pd = normalize_category_columns(
-        pl.from_pandas(resp_raw_pd), *_resp_category_columns
+    resp_raw_pd = normalize_respiratory_categories(
+        normalize_category_columns(pl.from_pandas(resp_raw_pd), *_resp_category_columns)
     ).to_pandas()
     resp_utc_pd = resp_raw_pd.assign(
         recorded_dttm=resp_raw_pd["recorded_dttm"].dt.tz_convert("UTC")
@@ -873,16 +911,14 @@ def _(mo):
         effective: the transition sequence `03` evaluates is assembled across the whole
         encounter in time order.
 
-        **This is where lower-casing on load pays for itself.** The waterfall lower-cases
-        `device_category` itself (`waterfall.py:147-149`). Under a pipeline that compared
-        against mCIDE casing, that one line would silently break t0: `device_category ==
-        'IMV'` on waterfalled data does not error, it matches nothing, and every encounter
-        comes back with a null t0.
+        **This is where category normalization on load pays for itself.** CLIF 2.1 labels
+        such as `Room Air` and CLIF 3.0 tokens such as `room_air` are converted to the same
+        existing lower-case analytic label before the waterfall. This also supplies the
+        CLIF 2.1 spellings that `clifpy 0.5.0` still uses in its device and mode heuristics.
 
-        Because the column was already lower-cased on load, the waterfall's transformation
-        is a **no-op** — it writes back the values that were already there. Nothing
-        re-normalises anything, and the same literal `'imv'` is correct on both sides of
-        the call.
+        The waterfall lower-cases `device_category` itself (`waterfall.py:147-149`), so the
+        normalized input remains unchanged and the same literal `'imv'` is correct on both
+        sides of the call.
         """
     )
     return
@@ -899,6 +935,7 @@ def _(
     inspect,
     json,
     normalize_category_columns,
+    normalize_respiratory_categories,
     pl,
     process_resp_support_waterfall,
     resp_raw,
@@ -933,6 +970,7 @@ def _(
         "waterfall_sha256": file_sha256(_waterfall_source),
         "projection": ["hospitalization_id", "recorded_dttm", "device_category"],
         "time_basis": "site_local_naive",
+        "respiratory_category_compatibility": "clif-2.1-and-3.0-v1",
     }
     _source_digests = waterfall_input_digests(_resp_in)
     _required_resp_ids = set(_source_digests)
@@ -1026,11 +1064,15 @@ def _(
         _waterfalled["recorded_dttm"] = (
             _waterfalled["recorded_dttm"].dt.tz_convert(TIMEZONE).dt.tz_localize(None)
         )
-        _batch_frame = normalize_category_columns(
-            pl.from_pandas(
-                _waterfalled[["hospitalization_id", "recorded_dttm", "device_category"]]
-            ).with_columns(pl.col("hospitalization_id").cast(pl.String)),
-            "device_category",
+        _batch_frame = normalize_respiratory_categories(
+            normalize_category_columns(
+                pl.from_pandas(
+                    _waterfalled[
+                        ["hospitalization_id", "recorded_dttm", "device_category"]
+                    ]
+                ).with_columns(pl.col("hospitalization_id").cast(pl.String)),
+                "device_category",
+            )
         )
         _got_batch_ids = set(
             _batch_frame.get_column("hospitalization_id").unique().to_list()
@@ -1084,7 +1126,9 @@ def _(
         ) == _required_resp_ids, "assembled waterfall cache does not cover current respiratory IDs"
 
     resp_waterfall = (
-        normalize_category_columns(_cached_waterfall, "device_category")
+        normalize_respiratory_categories(
+            normalize_category_columns(_cached_waterfall, "device_category")
+        )
         .join(
             encounter_mapping.with_columns(pl.col("hospitalization_id").cast(pl.String)),
             on="hospitalization_id",
@@ -1098,13 +1142,14 @@ def _(
     # assert the vocabulary is the one we expect rather than discovering it downstream.
     _MCIDE_DEVICE_LOWER = {
         "imv", "nippv", "cpap", "high flow nc", "face mask",
-        "trach collar", "nasal cannula", "room air", "other",
+        "trach collar", "t piece", "nasal cannula", "room air", "other",
     }
     _seen = set(
         resp_waterfall.get_column("device_category").drop_nulls().unique().to_list()
     )
     assert _seen <= _MCIDE_DEVICE_LOWER, (
-        f"waterfall emitted device_category values outside mCIDE: {sorted(_seen - _MCIDE_DEVICE_LOWER)}"
+        "waterfall emitted unsupported CLIF 2.1/3.0 device_category values: "
+        f"{sorted(_seen - _MCIDE_DEVICE_LOWER)}"
     )
 
     # Defense in depth for the timezone boundary. The waterfall only ever ADDS rows, at
