@@ -29,6 +29,29 @@ def test_selector_uses_only_adult_age_and_any_imv_hospitalization():
     assert selected.get_column("hospitalization_id").to_list() == ["adult_imv"]
 
 
+def test_selector_keeps_first_duplicate_hospitalization_row():
+    hospitalizations = pl.DataFrame(
+        {
+            "hospitalization_id": ["duplicate", "duplicate", "other"],
+            "patient_id": ["first_patient", "second_patient", "other_patient"],
+            "age_at_admission": [40.0, 70.0, 50.0],
+        }
+    )
+
+    selected = MODULE.select_adult_imv_hospitalizations(
+        hospitalizations,
+        ["duplicate"],
+    )
+
+    assert selected.to_dicts() == [
+        {
+            "hospitalization_id": "duplicate",
+            "patient_id": "first_patient",
+            "age_at_admission": 40.0,
+        }
+    ]
+
+
 def test_demographic_table_keeps_only_requested_categories_and_reconciles():
     cohort = pl.DataFrame(
         {

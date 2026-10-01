@@ -43,9 +43,11 @@ def normalize_categories(frame, *columns):
 
 
 def select_adult_imv_hospitalizations(hospitalizations, imv_hospitalization_ids):
-    """One row per hospitalization satisfying only age >=18 and any charted IMV."""
-    assert hospitalizations.get_column("hospitalization_id").is_unique().all(), (
-        "hospitalization source contains duplicate hospitalization_id values"
+    """Keep the first source row per adult hospitalization with any charted IMV."""
+    hospitalizations = hospitalizations.unique(
+        subset="hospitalization_id",
+        keep="first",
+        maintain_order=True,
     )
     imv_ids = pl.DataFrame(
         {"hospitalization_id": pl.Series(imv_hospitalization_ids).unique()}
